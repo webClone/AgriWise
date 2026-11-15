@@ -1,12 +1,12 @@
 "use client";
 import {useState} from "react";
-import {Layers3, ListFilter, X} from "lucide-react";
+import {Layers3, ListFilter, PenTool, Plane, FileText, X} from "lucide-react";
 import type {WorkspaceFeatureEnvelope} from "@/lib/agribrain/workspace-feature-envelope";
 import type {SceneLayerEntry} from "./p06-scene-registry.mjs";
 import {sceneLayerForEntityKind} from "./p06-scene-registry.mjs";
 
 export default function WorkspaceSceneControlsP06({
- manifest, entities, zones, selectedId, onToggle, onOpacity, onAll, onSelectEntity, onSelectZone,
+ manifest, entities, zones, selectedId, onToggle, onOpacity, onAll, onSelectEntity, onSelectZone, onStartDrawing,
 }:{
  manifest:SceneLayerEntry[];
  entities:WorkspaceFeatureEnvelope[];
@@ -17,20 +17,70 @@ export default function WorkspaceSceneControlsP06({
  onAll:(visible:boolean)=>void;
  onSelectEntity:(item:WorkspaceFeatureEnvelope)=>void;
  onSelectZone:(id:string)=>void;
+ onStartDrawing?:(kind:"DRONE_MISSION"|"FIELD_OBSERVATION")=>void;
 }) {
  const [open,setOpen]=useState(false);
  const [directory,setDirectory]=useState(false);
+ const [drawMenuOpen,setDrawMenuOpen]=useState(false);
  const visibleCount=manifest.filter(layer=>layer.visible).length;
  return (
   <div className="pw-scene-controls" data-testid="p06-scene-controls">
    <div className="pw-scene-header">
-    <button type="button" aria-expanded={open} aria-controls="pw-scene-layer-panel" onClick={()=>setOpen(!open)}>
+    <button type="button" aria-expanded={open} aria-controls="pw-scene-layer-panel" onClick={()=>{setOpen(!open);setDrawMenuOpen(false);}}>
      <Layers3 size={16} aria-hidden="true"/> Layers <span>{visibleCount}/{manifest.length}</span>
     </button>
-    <button type="button" aria-expanded={directory} aria-controls="pw-scene-directory" onClick={()=>setDirectory(!directory)}>
+    <button type="button" aria-expanded={directory} aria-controls="pw-scene-directory" onClick={()=>{setDirectory(!directory);setDrawMenuOpen(false);}}>
      <ListFilter size={16} aria-hidden="true"/> Entities <span>{entities.length + zones.length}</span>
     </button>
+    {onStartDrawing && (
+      <button
+        type="button"
+        aria-expanded={drawMenuOpen}
+        onClick={()=>{setDrawMenuOpen(!drawMenuOpen);setOpen(false);setDirectory(false);}}
+        data-testid="p06-draw-geometry-btn"
+        title="Draw planned flight route or scouting boundary"
+      >
+        <PenTool size={16} aria-hidden="true"/> Draw
+      </button>
+    )}
    </div>
+   {drawMenuOpen && (
+    <section aria-label="Spatial authoring tools" className="pw-scene-panel" style={{ width: "240px" }}>
+      <div className="pw-scene-panel-title">
+        <strong>Author Geometry</strong>
+        <button type="button" aria-label="Close draw tools" onClick={()=>setDrawMenuOpen(false)}>
+          <X size={15}/>
+        </button>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: "8px", padding: "6px 0" }}>
+        <button
+          type="button"
+          data-testid="p06-draw-drone-btn"
+          onClick={()=>{setDrawMenuOpen(false);onStartDrawing?.("DRONE_MISSION");}}
+          style={{
+            display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px",
+            background: "rgba(249, 115, 22, 0.15)", border: "1px solid rgba(249, 115, 22, 0.35)",
+            color: "#fb923c", borderRadius: "6px", cursor: "pointer", fontSize: "12px", fontWeight: 600,
+          }}
+        >
+          <Plane size={15}/> Plan Drone Route (Line)
+        </button>
+        <button
+          type="button"
+          data-testid="p06-draw-scout-btn"
+          onClick={()=>{setDrawMenuOpen(false);onStartDrawing?.("FIELD_OBSERVATION");}}
+          style={{
+            display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px",
+            background: "rgba(244, 63, 94, 0.15)", border: "1px solid rgba(244, 63, 94, 0.35)",
+            color: "#f43f5e", borderRadius: "6px", cursor: "pointer", fontSize: "12px", fontWeight: 600,
+          }}
+        >
+          <FileText size={15}/> Map Scouting Area (Polygon)
+        </button>
+      </div>
+      <p className="pw-scene-hint">Drawings are saved as owner-declared and do not infer scientific admission.</p>
+    </section>
+   )}
    {open && (
     <section id="pw-scene-layer-panel" aria-label="Map scene layer controls" className="pw-scene-panel">
       <div className="pw-scene-panel-title"><strong>Visible map layers</strong><button type="button" aria-label="Close layer controls" onClick={()=>setOpen(false)}><X size={15}/></button></div>

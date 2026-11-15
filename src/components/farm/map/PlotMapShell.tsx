@@ -23,7 +23,7 @@ import {
   isRenderedMaterialization,
 } from "@/lib/agribrain/render-materialization";
 import { getWorkspaceEntityPinsLayers } from "./layers/WorkspaceEntityPinsLayer";
-import { getWorkspaceEntityGeometryLayers } from "./layers/WorkspaceEntityGeometryLayer";
+import { getWorkspaceEntityGeometryLayers, getWorkspaceDraftGeometryLayers, type WorkspaceDraftGeometryProps } from "./layers/WorkspaceEntityGeometryLayer";
 import {geometryBounds} from "@/lib/agribrain/workspace-geometry.mjs";
 import type { WorkspaceFeatureEnvelope } from "@/lib/agribrain/workspace-feature-envelope";
 import {sceneLayerForEntityKind,coincidentSceneEntities} from "@/components/farm/workspace/p06-scene-registry.mjs";
@@ -70,6 +70,8 @@ interface PlotMapShellProps {
   sceneVisibility?: Record<string,boolean>;
   sceneOpacity?: Record<string,number>;
   sceneGeneration?: number;
+  draftGeometry?: WorkspaceDraftGeometryProps | null;
+  onCanvasMapClick?: (coordinate: [number, number]) => void;
 }
 
 export default function PlotMapShell(props: PlotMapShellProps) {
@@ -673,7 +675,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
   }),[workspaceEntities,sceneVisibility,sceneOpacity]);
 
   const pickEntity=useCallback((entity:WorkspaceFeatureEnvelope,info?:any)=>{
-    if(transectMode)return;
+    if(transectMode || props.draftGeometry)return;
     const project=typeof info?.viewport?.project==="function"
       ? (point:[number,number])=>info.viewport.project(point) as [number,number] : undefined;
     const items=coincidentSceneEntities(visibleEntities,entity,project,13);
@@ -686,12 +688,14 @@ export default function PlotMapShell(props: PlotMapShellProps) {
       setOverlap(null);
       onEntityClick?.(entity);
     }
-  },[visibleEntities,onEntityClick,transectMode]);
+  },[visibleEntities,onEntityClick,transectMode,props.draftGeometry]);
 
   const entityLayers=useMemo(()=>visibleEntities.length?[
     ...getWorkspaceEntityGeometryLayers({entities:visibleEntities,selectedEntityId,onEntityClick:pickEntity,sceneOpacity}),
     ...getWorkspaceEntityPinsLayers({entities:visibleEntities,selectedEntityId,onEntityClick:pickEntity,sceneOpacity}),
   ]:[],[visibleEntities,selectedEntityId,pickEntity,sceneOpacity]);
+
+  const draftLayers=useMemo(()=>getWorkspaceDraftGeometryLayers(props.draftGeometry||null),[props.draftGeometry]);
 
   // 5. Compute hovered zone centroid for floating chip
   const hoveredZoneData = useMemo(() => {
@@ -778,8 +782,15 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     }
   }, [showRaster]);
 
-  // Intercept map click to define transect line
+  // Intercept map click to define transect line or geometry draft vertex
   const handleMapClick = useCallback((info: any) => {
+    if (props.onCanvasMapClick && props.draftGeometry) {
+      const { coordinate } = info;
+      if (coordinate && Array.isArray(coordinate)) {
+        props.onCanvasMapClick([coordinate[0], coordinate[1]]);
+        return;
+      }
+    }
     if (transectMode) {
       const { coordinate } = info;
       if (coordinate && Array.isArray(coordinate)) {
@@ -792,7 +803,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
         }
       }
     }
-  }, [transectMode, transectPoints]);
+  }, [transectMode, transectPoints, props.onCanvasMapClick, props.draftGeometry]);
 
   // Human readable title of active mode
   const modeTitle = useMemo(() => {
@@ -929,9 +940,9 @@ export default function PlotMapShell(props: PlotMapShellProps) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         onViewStateChange={({ viewState }) => setViewState(viewState as any)}
         controller={true}
-        layers={[...surfaceLayers, ...zoneLayers, ...entityLayers]}
+        layers={[...surfaceLayers, ...zoneLayers, ...entityLayers, ...draftLayers]}
         getCursor={({ isHovering }) => {
-
+          if (props.draftGeometry) return "crosshair";
           if (transectMode) return "crosshair";
           return isHovering ? "pointer" : "grab";
         }}

@@ -4,6 +4,7 @@ import dynamic from "next/dynamic";
 import type { useLayer10 } from "@/hooks/useLayer10";
 import type { MapVisualLens } from "./useWorkspaceScientificAdapter";
 import type { WorkspaceFeatureEnvelope } from "@/lib/agribrain/workspace-feature-envelope";
+import type { WorkspaceDraftGeometryProps } from "@/components/farm/map/layers/WorkspaceEntityGeometryLayer";
 
 const PlotMapShell = dynamic(() => import("@/components/farm/map/PlotMapShell"), {
   ssr: false,
@@ -31,6 +32,8 @@ interface WorkspaceSpatialCanvasProps {
   sceneGeneration?: number;
   selectedEntityId?: string | null;
   onEntityClick?: (entity: WorkspaceFeatureEnvelope) => void;
+  draftGeometry?: WorkspaceDraftGeometryProps | null;
+  onCanvasMapClick?: (coordinate: [number, number]) => void;
 }
 
 /**
@@ -52,6 +55,8 @@ export default function WorkspaceSpatialCanvas({
   sceneGeneration,
   selectedEntityId,
   onEntityClick,
+  draftGeometry,
+  onCanvasMapClick,
 }: WorkspaceSpatialCanvasProps) {
   const deviationSurface =
     l10.activeMode === "veg_attention"
@@ -90,6 +95,8 @@ export default function WorkspaceSpatialCanvas({
           sceneGeneration={sceneGeneration}
           selectedEntityId={selectedEntityId}
           onEntityClick={onEntityClick}
+          draftGeometry={draftGeometry}
+          onCanvasMapClick={onCanvasMapClick}
         />
       )}
     </div>

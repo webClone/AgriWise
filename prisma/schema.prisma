@@ -1202,9 +1202,31 @@ model WorkspaceGeometryRegistration {
   revision       Int      @default(1)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+  revisions      WorkspaceGeometryRevision[]
 
   @@unique([plotId, registrationKey])
   @@index([tenantId, farmId, plotId, status])
   @@index([plotId, entityKind, sourceId])
 }
+
+// P06.05: append-only revision history for owner-declared geometries.
+// Preserves historical geometry, digest, editor, operation, and timestamp.
+model WorkspaceGeometryRevision {
+  id             String   @id @default(auto()) @map("_id") @db.ObjectId
+  registrationId String   @db.ObjectId
+  registration   WorkspaceGeometryRegistration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+  plotId         String   @db.ObjectId
+  revision       Int
+  operation      String   // "CREATE", "UPDATE", "REVOKE"
+  geometry       Json
+  geometryDigest String
+  name           String
+  notes          String?
+  editorId       String   @db.ObjectId
+  createdAt      DateTime @default(now())
+
+  @@index([registrationId, revision])
+  @@index([plotId, createdAt])
+}
+
 

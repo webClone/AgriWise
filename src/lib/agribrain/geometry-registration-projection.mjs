@@ -13,13 +13,14 @@ export function projectWorkspaceGeometryRegistration(record,scope){
  if(REGISTRATION_SOURCES[record.entityKind]!==record.sourceKind ||
    (record.sourceKind==="OWNER_PLAN" ? record.sourceId!=null : !/^[a-f\d]{24}$/i.test(record.sourceId||"")))return null;
  if(record.epistemicClass!==(record.entityKind==="DRONE_MISSION"?"PLANNED":"ESTIMATED") ||
-   record.locationSource!=="USER_DECLARED" || record.revision!==1)return null;
+   record.locationSource!=="USER_DECLARED" || !Number.isInteger(record.revision) || record.revision < 1)return null;
  if(!isSupportedWorkspaceGeometry(record.geometry) ||
    geometryIntegrityDigest(record.geometry)!==record.geometryDigest)return null;
+ const rev=Number.isInteger(record.revision)?record.revision:1;
  const envelope=createWorkspaceFeatureEnvelope({
    entity_kind:record.entityKind,
    entity_id:record.entityId,
-   source_version:`registered-v1:${record.id}`,
+   source_version:`registered-v${rev}:${record.id}`,
    owner_scope:{tenant_id:scope.tenantId,farm_id:scope.farmId,plot_id:scope.plotId},
    geometry:record.geometry,
    location_source:"USER_DECLARED",
@@ -28,6 +29,7 @@ export function projectWorkspaceGeometryRegistration(record,scope){
    properties:{
      name:record.name,
      notes:record.notes||null,
+     revision:rev,
      geometry_source:"OWNER_DECLARED",
      registration_status:"OWNER_DECLARED",
      registered_at:record.createdAt instanceof Date?record.createdAt.toISOString():String(record.createdAt),

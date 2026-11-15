@@ -14,6 +14,9 @@ import WorkspaceScientificStatus from "./WorkspaceScientificStatus";
 import WorkspaceTimelineContainer from "./WorkspaceTimelineContainer";
 import WorkspaceContextActionsP04, { type P04InvestigationKind } from "./WorkspaceContextActionsP04";
 import WorkspaceInvestigationHostP04, { type P04HostMode } from "./WorkspaceInvestigationHostP04";
+import WorkspaceGeometryAuthoringHUD from "./WorkspaceGeometryAuthoringHUD";
+import WorkspaceGeometryLifecycleModal from "./WorkspaceGeometryLifecycleModal";
+import type { WorkspaceFeatureEnvelope } from "@/lib/agribrain/workspace-feature-envelope";
 import "./p04-investigation.css";
 import {
   PlotWorkspaceProvider,
@@ -39,8 +42,9 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
   const [hostMode, setHostMode] = useState<P04HostMode>("context");
   const [activeSpecializedTool, setActiveSpecializedTool] = useState<WorkspaceQuickAction | null>(null);
   const [activeInitialSensorId, setActiveInitialSensorId] = useState<string | null>(null);
-  const { entities } = useWorkspaceEntities(plotId, 30000, state.generationId);
+  const { entities, refetch: refetchEntities } = useWorkspaceEntities(plotId, 30000, state.generationId);
   const launchControlRef = useRef<HTMLElement | null>(null);
+
   const scopedScene = useMemo(() => ({tenantId:state.ownerScope.tenantId,farmId:state.plotScope.farmId,plotId:state.plotScope.plotId}),
     [state.ownerScope.tenantId,state.plotScope.farmId,state.plotScope.plotId]);
   const scopedEntities = useMemo(() => filterCurrentSceneEntities(entities,scopedScene),[entities,scopedScene]);
@@ -48,6 +52,73 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
     selectEntity({kind:entity.entity_kind,id:entity.entity_id,sourceSnapshotId:entity.source_version,
       metadata:entity as unknown as Record<string,unknown>});
   },[selectEntity]);
+
+  // P06.05 Authoring & Controlled Lifecycle State
+  const [drawingKind, setDrawingKind] = useState<"DRONE_MISSION" | "FIELD_OBSERVATION" | null>(null);
+  const [draftCoordinates, setDraftCoordinates] = useState<[number, number][]>([]);
+  const [lifecycleModal, setLifecycleModal] = useState<{
+    mode: "revise" | "revoke" | "history" | null;
+    entity: WorkspaceFeatureEnvelope | null;
+  }>({ mode: null, entity: null });
+
+  const handleStartDrawing = useCallback((kind: "DRONE_MISSION" | "FIELD_OBSERVATION") => {
+    setDrawingKind(kind);
+    setDraftCoordinates([]);
+    clearSelection();
+  }, [clearSelection]);
+
+  const handleCanvasMapClick = useCallback((coord: [number, number]) => {
+    if (!drawingKind) return;
+    setDraftCoordinates((prev) => [...prev, coord]);
+  }, [drawingKind]);
+
+  const handleUndoVertex = useCallback(() => {
+    setDraftCoordinates((prev) => prev.slice(0, -1));
+  }, []);
+
+  const handleClearVertices = useCallback(() => {
+    setDraftCoordinates([]);
+  }, []);
+
+  const handleCancelDrawing = useCallback(() => {
+    setDrawingKind(null);
+    setDraftCoordinates([]);
+  }, []);
+
+  const handleAuthoringComplete = useCallback(async (newEntity: WorkspaceFeatureEnvelope) => {
+    setDrawingKind(null);
+    setDraftCoordinates([]);
+    await refetchEntities();
+    selectSceneEntity(newEntity);
+  }, [refetchEntities, selectSceneEntity]);
+
+  const handleRevise = useCallback((entity: WorkspaceFeatureEnvelope) => {
+    setLifecycleModal({ mode: "revise", entity });
+  }, []);
+
+  const handleRevoke = useCallback((entity: WorkspaceFeatureEnvelope) => {
+    setLifecycleModal({ mode: "revoke", entity });
+  }, []);
+
+  const handleHistory = useCallback((entity: WorkspaceFeatureEnvelope) => {
+    setLifecycleModal({ mode: "history", entity });
+  }, []);
+
+  const handleLifecycleClose = useCallback(() => {
+    setLifecycleModal({ mode: null, entity: null });
+  }, []);
+
+  const handleEntityRevised = useCallback(async (updatedEntity: WorkspaceFeatureEnvelope) => {
+    setLifecycleModal({ mode: null, entity: null });
+    await refetchEntities();
+    selectSceneEntity(updatedEntity);
+  }, [refetchEntities, selectSceneEntity]);
+
+  const handleEntityRevoked = useCallback(async (_revokedId: string) => {
+    setLifecycleModal({ mode: null, entity: null });
+    clearSelection();
+    await refetchEntities();
+  }, [clearSelection, refetchEntities]);
 
   const scientific = useWorkspaceScientificAdapter({
     farm: props.farm,
@@ -104,16 +175,32 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
           });
         }
       };
+      const onTestStartDrawing = (e: Event) => {
+        const detail = (e as CustomEvent<{ kind: "DRONE_MISSION" | "FIELD_OBSERVATION" }>).detail;
+        if (detail?.kind) {
+          handleStartDrawing(detail.kind);
+        }
+      };
+      const onTestAddDraftPoint = (e: Event) => {
+        const detail = (e as CustomEvent<{ coord: [number, number] }>).detail;
+        if (detail?.coord) {
+          handleCanvasMapClick(detail.coord);
+        }
+      };
       window.addEventListener("akaloris:test:select-zone", onTestSelectZone);
       window.addEventListener("akaloris:test:select-entity", onTestSelectEntity);
       window.addEventListener("akaloris:test:launch-investigation", onTestLaunch);
+      window.addEventListener("akaloris:test:start-drawing", onTestStartDrawing);
+      window.addEventListener("akaloris:test:add-draft-point", onTestAddDraftPoint);
       return () => {
         window.removeEventListener("akaloris:test:select-zone", onTestSelectZone);
         window.removeEventListener("akaloris:test:select-entity", onTestSelectEntity);
         window.removeEventListener("akaloris:test:launch-investigation", onTestLaunch);
+        window.removeEventListener("akaloris:test:start-drawing", onTestStartDrawing);
+        window.removeEventListener("akaloris:test:add-draft-point", onTestAddDraftPoint);
       };
     }
-  }, [scientific.l10, selectEntity, setActiveTool, state.publication.snapshotId]);
+  }, [scientific.l10, selectEntity, setActiveTool, state.publication.snapshotId, handleStartDrawing, handleCanvasMapClick]);
 
   // An open investigation or specialized tool must never retain context across
   // tenant, plot, crop-cycle, geometry or request-generation changes.
@@ -200,6 +287,11 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
             sceneGeneration={state.generationId}
             selectedEntityId={state.selectedEntity.id}
             onEntityClick={selectSceneEntity}
+            draftGeometry={drawingKind ? {
+              type: drawingKind === "DRONE_MISSION" ? "LineString" : "Polygon",
+              coordinates: draftCoordinates,
+            } : null}
+            onCanvasMapClick={handleCanvasMapClick}
             onZoneClick={(zoneId) => {
               scientific.l10.setSelectedZone(zoneId);
               selectEntity({
@@ -215,6 +307,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
           entities={scopedEntities}
           zones={sceneZones}
           selectedId={state.selectedEntity.id}
+          onStartDrawing={handleStartDrawing}
           onToggle={(id, visible) => {
             toggleSceneLayer(id, visible);
             if (!visible && id === "zones" && state.selectedEntity.kind === "ZONE") {
@@ -243,6 +336,28 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
             selectEntity({kind:"ZONE",id:zoneId,sourceSnapshotId:state.publication.snapshotId});
           }}
         />
+        {drawingKind && (
+          <WorkspaceGeometryAuthoringHUD
+            plotId={plotId}
+            drawingKind={drawingKind}
+            draftCoordinates={draftCoordinates}
+            onAddVertex={handleCanvasMapClick}
+            onUndoVertex={handleUndoVertex}
+            onClearVertices={handleClearVertices}
+            onCancel={handleCancelDrawing}
+            onComplete={handleAuthoringComplete}
+          />
+        )}
+        {lifecycleModal.mode && lifecycleModal.entity && (
+          <WorkspaceGeometryLifecycleModal
+            plotId={plotId}
+            entity={lifecycleModal.entity}
+            mode={lifecycleModal.mode}
+            onClose={handleLifecycleClose}
+            onRevised={handleEntityRevised}
+            onRevoked={handleEntityRevoked}
+          />
+        )}
         <WorkspaceSpecializedToolsP04
           plotId={plotId}
           plot={props.plot}
@@ -279,6 +394,9 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
           onOpenSensor={handleOpenSensor}
           onOpenTool={openTool}
           workspaceEntities={scopedEntities}
+          onRevise={handleRevise}
+          onRevoke={handleRevoke}
+          onHistory={handleHistory}
           onCollapse={() => {
             if (window.matchMedia("(max-width: 820px)").matches) {
               setMobileInspectorOpen(false);

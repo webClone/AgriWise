@@ -66,10 +66,34 @@ export async function POST(
     });
     if(!camera)return NextResponse.json({error:"Source record not found"},{status:404});
   }else if(input.source_kind==="CROP_OBSERVATION"){
-    const observation=await prisma.cropObservation.findFirst({
-      where:{id:input.source_id!,cropCycle:{plotId:scope.plotId}},select:{id:true},
-    });
-    if(!observation)return NextResponse.json({error:"Source record not found"},{status:404});
+    if(input.new_observation){
+      let cycle=await prisma.cropCycle.findFirst({
+        where:{plotId:scope.plotId},orderBy:{createdAt:"desc"},select:{id:true}
+      });
+      if(!cycle){
+        cycle=await prisma.cropCycle.create({
+          data:{cropCode:"unspecified_plot_crop",status:"PLANNED",plotId:scope.plotId},
+          select:{id:true}
+        });
+      }
+      const obs=await prisma.cropObservation.create({
+        data:{
+          cropCycleId:cycle.id,
+          title:input.new_observation.title,
+          type:input.new_observation.type||"pest",
+          severity:input.new_observation.severity||"warning",
+          description:input.new_observation.description||null,
+          photos:[],
+        },
+        select:{id:true}
+      });
+      input.source_id=obs.id;
+    }else{
+      const observation=await prisma.cropObservation.findFirst({
+        where:{id:input.source_id!,cropCycle:{plotId:scope.plotId}},select:{id:true},
+      });
+      if(!observation)return NextResponse.json({error:"Source record not found"},{status:404});
+    }
   }
   const isPlan=input.source_kind==="OWNER_PLAN";
   const key=isPlan?`OWNER_PLAN:${randomUUID()}`:`${input.source_kind}:${input.source_id}`;
@@ -89,6 +113,19 @@ export async function POST(
       name:input.label,notes:input.notes,status:"OWNER_DECLARED",
       epistemicClass:input.epistemic_class,locationSource:"USER_DECLARED",revision:1,
     },
+  });
+  await prisma.workspaceGeometryRevision.create({
+    data:{
+      registrationId:record.id,
+      plotId:scope.plotId,
+      revision:1,
+      operation:"CREATE",
+      geometry:record.geometry as any,
+      geometryDigest:record.geometryDigest,
+      name:record.name,
+      notes:record.notes,
+      editorId:userId,
+    }
   });
   const entity=projectWorkspaceGeometryRegistration(record as any,scope);
   if(!entity)throw new Error("Stored registration failed canonical projection");

@@ -1,6 +1,64 @@
-import { PathLayer, GeoJsonLayer } from "@deck.gl/layers";
+import { PathLayer, GeoJsonLayer, ScatterplotLayer } from "@deck.gl/layers";
 import type {WorkspaceFeatureEnvelope} from "@/lib/agribrain/workspace-feature-envelope";
 import {isRenderableWorkspaceEntity} from "@/lib/agribrain/workspace-geometry.mjs";
+
+export interface WorkspaceDraftGeometryProps {
+  type: "LineString" | "Polygon";
+  coordinates: [number, number][];
+}
+
+export function getWorkspaceDraftGeometryLayers(draft: WorkspaceDraftGeometryProps | null) {
+  if (!draft || draft.coordinates.length === 0) return [];
+  const layers = [];
+  layers.push(
+    new ScatterplotLayer({
+      id: "workspace-draft-vertices",
+      data: draft.coordinates.map((c, i) => ({ position: c, index: i })),
+      pickable: false,
+      getPosition: (d: any) => d.position,
+      getFillColor: [250, 204, 21, 255],
+      getLineColor: [0, 0, 0, 200],
+      stroked: true,
+      lineWidthMinPixels: 2,
+      radiusMinPixels: 5,
+      radiusMaxPixels: 8,
+    })
+  );
+  if (draft.type === "LineString" && draft.coordinates.length >= 2) {
+    layers.push(
+      new PathLayer({
+        id: "workspace-draft-path",
+        data: [{ path: draft.coordinates }],
+        pickable: false,
+        getPath: (d: any) => d.path,
+        getColor: [251, 146, 60, 255],
+        widthMinPixels: 4,
+      })
+    );
+  } else if (draft.type === "Polygon" && draft.coordinates.length >= 3) {
+    const closed = [...draft.coordinates];
+    if (closed[0][0] !== closed[closed.length - 1][0] || closed[0][1] !== closed[closed.length - 1][1]) {
+      closed.push(closed[0]);
+    }
+    layers.push(
+      new GeoJsonLayer({
+        id: "workspace-draft-area",
+        data: {
+          type: "Feature",
+          geometry: { type: "Polygon", coordinates: [closed] },
+          properties: {},
+        } as any,
+        pickable: false,
+        filled: true,
+        stroked: true,
+        getFillColor: [244, 63, 94, 60],
+        getLineColor: [244, 63, 94, 255],
+        lineWidthMinPixels: 2.5,
+      })
+    );
+  }
+  return layers;
+}
 
 export interface WorkspaceGeometryLayerProps {
   entities:WorkspaceFeatureEnvelope[];
@@ -34,7 +92,7 @@ export function getWorkspaceEntityGeometryLayers({entities,selectedEntityId,onEn
    type:"Feature" as const,
    id:e.envelope_id,
    geometry:e.geometry!,
-   properties:{envelope_id:e.envelope_id},
+   properties:{envelope_id:e.envelope_id, name:e.properties?.name, source_kind:e.properties?.source_kind, source_id:e.properties?.source_record_id, revision:e.properties?.revision},
   }));
   layers.push(new GeoJsonLayer({
    id:"workspace-entity-areas",
