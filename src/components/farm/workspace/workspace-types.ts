@@ -71,7 +71,7 @@ export interface RenderIntent {
   showGridCells: boolean;
   visibleVectors: Record<string, boolean>;
   /** UI transparency only; cannot grant scientific rendering rights. */
-  sceneLayerOpacity: Record<string, number>;
+  sceneLayerOpacity?: Record<string, number>;
 }
 
 export interface ScenarioState {

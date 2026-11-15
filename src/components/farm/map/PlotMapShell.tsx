@@ -103,7 +103,8 @@ export default function PlotMapShell(props: PlotMapShellProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [overlap, setOverlap] = useState<{items:WorkspaceFeatureEnvelope[];x:number;y:number}|null>(null);
   const overlapRef=useRef<HTMLDivElement>(null);
-  useEffect(()=>setOverlap(null),[primaryPlot?._id,primaryPlot?.id,sceneGeneration]);
+  const lastFocusedRef=useRef<string|null>(null);
+  useEffect(()=>setOverlap(null),[primaryPlot?._id,primaryPlot?.id,sceneGeneration,sceneVisibility,sceneOpacity]);
   useEffect(()=>{
     if(!overlap)return;
     overlapRef.current?.querySelector<HTMLButtonElement>("button[data-entity-choice]")?.focus();
@@ -473,6 +474,21 @@ export default function PlotMapShell(props: PlotMapShellProps) {
 
   // 4. Build Layers dynamically using pure external helper
   const plotId = (primaryPlot?._id || primaryPlot?.id) as string | undefined;
+
+  // Directory and map use the same canonical selection; focus only known coordinates.
+  // No camera motion occurs for unlocated entities or stale plot selections.
+  useEffect(()=>{
+    if(!selectedEntityId || !plotId)return;
+    const e=workspaceEntities.find(x=>(x.entity_id===selectedEntityId||x.envelope_id===selectedEntityId)
+      &&x.owner_scope?.plot_id===plotId&&x.display_eligibility?.eligible_for_map_pin===true
+      &&x.geometry?.type==="Point");
+    const point=e?.geometry?.coordinates;
+    if(!point||point.length!==2||!point.every(Number.isFinite))return;
+    const key=[sceneGeneration??0,plotId,e?.envelope_id,selectedEntityId].join(":");
+    if(lastFocusedRef.current===key)return;
+    lastFocusedRef.current=key;
+    setViewState(prev=>({...prev,longitude:point[0],latitude:point[1]}));
+  },[selectedEntityId,workspaceEntities,plotId,sceneGeneration,setViewState]);
 
   // V92.4: Build overlay surfaces dynamically from ALL resolved surfaces.
   // Previously whitelisted only canonical types (WATER_STRESS_PROB, etc.)
