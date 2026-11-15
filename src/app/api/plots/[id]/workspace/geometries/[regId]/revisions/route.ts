@@ -20,28 +20,26 @@ export async function GET(
     const userId = await authenticatedUserId();
     if (!userId) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
     const { id: plotId, regId } = await params;
-    if (!objectIdRegex.test(plotId)) {
+    if (!objectIdRegex.test(plotId) || !objectIdRegex.test(regId)) {
       return NextResponse.json({ error: "Resource not found" }, { status: 404 });
     }
     const scope = await authorizedScope(plotId, userId);
     if (!scope) return NextResponse.json({ error: "Plot not found" }, { status: 404 });
 
     const registration = await prisma.workspaceGeometryRegistration.findFirst({
-      where: objectIdRegex.test(regId)
-        ? { id: regId, plotId: scope.plotId }
-        : { plotId: scope.plotId, OR: [{ entityId: regId }, { registrationKey: regId }] },
+      where: { id: regId, plotId: scope.plotId },
       select: { id: true, name: true, entityKind: true, status: true, revision: true },
     });
     if (!registration) return NextResponse.json({ error: "Geometry registration not found" }, { status: 404 });
 
     const revisions = await prisma.workspaceGeometryRevision.findMany({
-      where: { registrationId: registration.id },
+      where: { registrationId: regId },
       orderBy: { revision: "asc" },
     });
 
     return NextResponse.json({
       success: true,
-      registration_id: registration.id,
+      registration_id: regId,
       current_revision: registration.revision,
       current_status: registration.status,
       revisions: revisions.map((r) => ({
@@ -61,3 +59,4 @@ export async function GET(
     return NextResponse.json({ error: "Unable to fetch revision history" }, { status: 500 });
   }
 }
+

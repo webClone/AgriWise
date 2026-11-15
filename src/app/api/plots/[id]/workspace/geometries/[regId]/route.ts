@@ -6,15 +6,27 @@ import {
   geometryIntegrityDigest,
   projectWorkspaceGeometryRegistration,
 } from "@/lib/agribrain/geometry-registration-projection.mjs";
+import { validateParcelContainment } from "../route";
 
 const objectIdRegex = /^[a-f\d]{24}$/i;
 
 async function authorizedScope(rawPlotId: string, userId: string) {
   const plot = await prisma.plot.findFirst({
     where: { id: rawPlotId, farm: { userId } },
-    select: { id: true, farm: { select: { id: true, userId: true } } },
+    select: {
+      id: true,
+      geoJson: true,
+      farm: { select: { id: true, userId: true } },
+    },
   });
-  return plot ? { tenantId: plot.farm.userId, farmId: plot.farm.id, plotId: plot.id } : null;
+  return plot
+    ? {
+        tenantId: plot.farm.userId,
+        farmId: plot.farm.id,
+        plotId: plot.id,
+        geoJson: plot.geoJson,
+      }
+    : null;
 }
 
 export async function GET(
@@ -71,8 +83,11 @@ export async function PATCH(
         : { plotId: scope.plotId, OR: [{ entityId: regId }, { registrationKey: regId }] },
     });
     if (!record) return NextResponse.json({ error: "Geometry registration not found" }, { status: 404 });
-    if (record.status === "REVOKED") {
-      return NextResponse.json({ error: "Cannot revise a revoked geometry registration" }, { status: 400 });
+    if (record.status !== "OWNER_DECLARED") {
+      return NextResponse.json(
+        { error: "Cannot revise a revoked or non-active geometry registration" },
+        { status: 400 }
+      );
     }
 
     let raw: unknown;
@@ -86,6 +101,15 @@ export async function PATCH(
     if (!validation.ok) return NextResponse.json({ error: validation.error }, { status: 400 });
 
     const input = validation.value;
+
+    // Validate parcel footprint containment if geometry is being revised
+    if (input.geometry) {
+      const containment = validateParcelContainment(input.geometry, scope.geoJson);
+      if (!containment.ok) {
+        return NextResponse.json({ error: containment.error }, { status: 400 });
+      }
+    }
+
     // Strict optimistic concurrency check
     if (input.expected_revision !== record.revision) {
       return NextResponse.json(
@@ -106,53 +130,69 @@ export async function PATCH(
     const nextName = input.label !== null && input.label !== undefined ? input.label : record.name;
     const nextNotes = input.notes !== undefined ? input.notes : record.notes;
 
-    const updateResult = await prisma.workspaceGeometryRegistration.updateMany({
-      where: {
-        id: record.id,
-        plotId: scope.plotId,
-        revision: input.expected_revision,
-      },
-      data: {
-        revision: nextRevision,
-        geometry: nextGeometry as any,
-        geometryDigest: nextDigest,
-        name: nextName,
-        notes: nextNotes,
-      },
-    });
+    // Execute mutation and audit log insertion inside an atomic database transaction
+    let updatedRecord: any = null;
+    try {
+      updatedRecord = await prisma.$transaction(async (tx) => {
+        const updateResult = await tx.workspaceGeometryRegistration.updateMany({
+          where: {
+            id: record.id,
+            plotId: scope.plotId,
+            status: "OWNER_DECLARED", // Strict active predicate prevents race with concurrent DELETE
+            revision: input.expected_revision,
+          },
+          data: {
+            revision: nextRevision,
+            geometry: nextGeometry,
+            geometryDigest: nextDigest,
+            name: nextName,
+            notes: nextNotes,
+            updatedAt: new Date(),
+          },
+        });
 
-    if (updateResult.count === 0) {
-      const latest = await prisma.workspaceGeometryRegistration.findUnique({
-        where: { id: record.id },
-        select: { revision: true },
+        if (updateResult.count === 0) {
+          throw new Error("REVISION_CONFLICT");
+        }
+
+        await tx.workspaceGeometryRevision.create({
+          data: {
+            registrationId: record.id,
+            plotId: scope.plotId,
+            revision: nextRevision,
+            operation: "UPDATE",
+            geometry: nextGeometry,
+            geometryDigest: nextDigest,
+            name: nextName,
+            notes: nextNotes,
+            editorId: userId,
+          },
+        });
+
+        const updated = await tx.workspaceGeometryRegistration.findUnique({
+          where: { id: record.id },
+        });
+        return updated;
       });
-      return NextResponse.json(
-        {
-          error: "Revision conflict: the geometry has been modified by another concurrent operation",
-          expected_revision: input.expected_revision,
-          current_revision: latest?.revision ?? record.revision,
-        },
-        { status: 409 }
-      );
+    } catch (err: any) {
+      if (err.message === "REVISION_CONFLICT" || err.code === "P2002" || err.code === "P2034") {
+        const latest = await prisma.workspaceGeometryRegistration.findUnique({
+          where: { id: record.id },
+          select: { revision: true, status: true },
+        });
+        return NextResponse.json(
+          {
+            error: "Revision conflict: the geometry has been modified or revoked by another concurrent operation",
+            expected_revision: input.expected_revision,
+            current_revision: latest?.revision ?? record.revision,
+            current_status: latest?.status ?? record.status,
+          },
+          { status: 409 }
+        );
+      }
+      throw err;
     }
 
-    await prisma.workspaceGeometryRevision.create({
-      data: {
-        registrationId: record.id,
-        plotId: scope.plotId,
-        revision: nextRevision,
-        operation: "UPDATE",
-        geometry: nextGeometry as any,
-        geometryDigest: nextDigest,
-        name: nextName,
-        notes: nextNotes,
-        editorId: userId,
-      },
-    });
-
-    const updatedRecord = await prisma.workspaceGeometryRegistration.findUnique({
-      where: { id: record.id },
-    });
     const entity = projectWorkspaceGeometryRegistration(updatedRecord as any, scope);
     return NextResponse.json({
       success: true,
@@ -194,13 +234,24 @@ export async function DELETE(
     try {
       const text = await request.text();
       if (text) rawBody = JSON.parse(text);
-    } catch {}
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
 
+    // expected_revision is MANDATORY for revocation to prevent concurrent revocation/edit races
     if (
-      rawBody.expected_revision !== undefined &&
-      Number.isInteger(rawBody.expected_revision) &&
-      rawBody.expected_revision !== record.revision
+      rawBody.expected_revision === undefined ||
+      typeof rawBody.expected_revision !== "number" ||
+      !Number.isInteger(rawBody.expected_revision) ||
+      rawBody.expected_revision < 1
     ) {
+      return NextResponse.json(
+        { error: "expected_revision is required and must be a positive integer" },
+        { status: 400 }
+      );
+    }
+
+    if (rawBody.expected_revision !== record.revision) {
       return NextResponse.json(
         {
           error: "Revision conflict: the geometry has been modified by another operation",
@@ -212,55 +263,68 @@ export async function DELETE(
     }
 
     const nextRevision = record.revision + 1;
-    const updateResult = await prisma.workspaceGeometryRegistration.updateMany({
-      where: {
-        id: record.id,
-        plotId: scope.plotId,
-        status: "OWNER_DECLARED",
-        ...(rawBody.expected_revision !== undefined && Number.isInteger(rawBody.expected_revision)
-          ? { revision: rawBody.expected_revision }
-          : {}),
-      },
-      data: {
-        status: "REVOKED",
-        revision: nextRevision,
-      },
-    });
+    const reasonText = rawBody.reason ? String(rawBody.reason).slice(0, 500) : null;
 
-    if (updateResult.count === 0) {
-      const latest = await prisma.workspaceGeometryRegistration.findUnique({
-        where: { id: record.id },
-        select: { revision: true, status: true },
+    // Atomic transaction for revocation and audit record
+    try {
+      await prisma.$transaction(async (tx) => {
+        const updateResult = await tx.workspaceGeometryRegistration.updateMany({
+          where: {
+            id: record.id,
+            plotId: scope.plotId,
+            status: "OWNER_DECLARED", // Strict active predicate prevents double-revocation or race
+            revision: rawBody.expected_revision,
+          },
+          data: {
+            status: "REVOKED",
+            revision: nextRevision,
+            updatedAt: new Date(),
+          },
+        });
+
+        if (updateResult.count === 0) {
+          throw new Error("REVOCATION_CONFLICT");
+        }
+
+        await tx.workspaceGeometryRevision.create({
+          data: {
+            registrationId: record.id,
+            plotId: scope.plotId,
+            revision: nextRevision,
+            operation: "REVOKE",
+            geometry: record.geometry as any,
+            geometryDigest: record.geometryDigest,
+            name: record.name,
+            notes: reasonText ? `REVOKED: ${reasonText}` : "REVOKED",
+            editorId: userId,
+          },
+        });
       });
-      return NextResponse.json(
-        {
-          error: "Revision conflict or geometry already revoked by another concurrent operation",
-          expected_revision: rawBody.expected_revision,
-          current_revision: latest?.revision ?? record.revision,
-        },
-        { status: 409 }
-      );
+    } catch (err: any) {
+      if (err.message === "REVOCATION_CONFLICT" || err.code === "P2002" || err.code === "P2034") {
+        const latest = await prisma.workspaceGeometryRegistration.findUnique({
+          where: { id: record.id },
+          select: { revision: true, status: true },
+        });
+        return NextResponse.json(
+          {
+            error: "Revocation conflict: the geometry has been modified or revoked by another concurrent operation",
+            expected_revision: rawBody.expected_revision,
+            current_revision: latest?.revision ?? record.revision,
+            current_status: latest?.status ?? record.status,
+          },
+          { status: 409 }
+        );
+      }
+      throw err;
     }
-
-    await prisma.workspaceGeometryRevision.create({
-      data: {
-        registrationId: record.id,
-        plotId: scope.plotId,
-        revision: nextRevision,
-        operation: "REVOKE",
-        geometry: record.geometry as any,
-        geometryDigest: record.geometryDigest,
-        name: record.name,
-        notes: typeof rawBody.reason === "string" ? rawBody.reason : "Revoked by owner",
-        editorId: userId,
-      },
-    });
 
     return NextResponse.json({
       success: true,
-      revoked_id: record.id,
+      message: "Geometry registration soft-revoked; historical audit trail preserved",
+      registration_id: record.id,
+      final_revision: nextRevision,
       status: "REVOKED",
-      revision: nextRevision,
     });
   } catch (error) {
     console.error("[workspace/geometries/[regId]:DELETE]", error);

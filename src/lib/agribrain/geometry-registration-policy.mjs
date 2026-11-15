@@ -1,4 +1,4 @@
-import {isSupportedWorkspaceGeometry,normalizeWorkspaceGeometry} from "./workspace-geometry.mjs";
+import {isSupportedWorkspaceGeometry,normalizeWorkspaceGeometry,geometryBounds} from "./workspace-geometry.mjs";
 
 export const GEOMETRY_REGISTRATION_VERSION="2026.11-p06.5";
 export const REGISTRATION_SOURCES=Object.freeze({
@@ -97,4 +97,37 @@ export function validateGeometryRevisionInput(raw,entityKind){
 export function isRegistrationRecordInScope(record,scope){
  return Boolean(record?.tenantId===scope?.tenantId && record?.farmId===scope?.farmId &&
   record?.plotId===scope?.plotId && record?.status==="OWNER_DECLARED");
+}
+
+function extractGeometry(geoJson) {
+  if (!geoJson) return null;
+  if (geoJson.type === "Feature" && geoJson.geometry) return geoJson.geometry;
+  if (geoJson.type === "Polygon" || geoJson.type === "MultiPolygon") return geoJson;
+  return null;
+}
+
+export function validateParcelContainment(geometry, plotGeoJson) {
+  if (!plotGeoJson) return { ok: true };
+  const plotGeom = extractGeometry(plotGeoJson);
+  if (!plotGeom) return { ok: true };
+  const pBounds = geometryBounds(plotGeom);
+  const gBounds = geometryBounds(geometry);
+  if (!pBounds || !gBounds) return { ok: true };
+
+  const buffer = 0.02; // ~2.2 km operational envelope margin
+  const [pMinX, pMinY, pMaxX, pMaxY] = pBounds;
+  const [gMinX, gMinY, gMaxX, gMaxY] = gBounds;
+
+  if (
+    gMinX < pMinX - buffer ||
+    gMaxX > pMaxX + buffer ||
+    gMinY < pMinY - buffer ||
+    gMaxY > pMaxY + buffer
+  ) {
+    return {
+      ok: false,
+      error: `Geometry vertices exceed authorized plot operational envelope (bounds: [${gMinX.toFixed(4)}, ${gMinY.toFixed(4)}] to [${gMaxX.toFixed(4)}, ${gMaxY.toFixed(4)}]; allowed plot bounds with buffer: [${(pMinX - buffer).toFixed(4)}, ${(pMinY - buffer).toFixed(4)}] to [${(pMaxX + buffer).toFixed(4)}, ${(pMaxY + buffer).toFixed(4)}])`,
+    };
+  }
+  return { ok: true };
 }

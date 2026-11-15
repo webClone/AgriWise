@@ -108,6 +108,31 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
     setLifecycleModal({ mode: null, entity: null });
   }, []);
 
+  const handleEditOnMap = useCallback((entity: WorkspaceFeatureEnvelope) => {
+    let coords: [number, number][] = [];
+    if (entity.geometry) {
+      if (entity.geometry.type === "LineString") {
+        coords = (entity.geometry.coordinates as [number, number][]).map((c: any) => [Number(c[0]), Number(c[1])]);
+      } else if (entity.geometry.type === "Polygon") {
+        const ring = (entity.geometry.coordinates as [number, number][][])[0] || [];
+        const rawCoords = ring.map((c: any) => [Number(c[0]), Number(c[1])] as [number, number]);
+        if (
+          rawCoords.length > 1 &&
+          rawCoords[0][0] === rawCoords[rawCoords.length - 1][0] &&
+          rawCoords[0][1] === rawCoords[rawCoords.length - 1][1]
+        ) {
+          coords = rawCoords.slice(0, -1);
+        } else {
+          coords = rawCoords;
+        }
+      }
+    }
+    const kind = entity.entity_kind === "DRONE_MISSION" ? "DRONE_MISSION" : "FIELD_OBSERVATION";
+    setDrawingKind(kind);
+    setDraftCoordinates(coords);
+    setLifecycleModal({ mode: null, entity: null });
+  }, []);
+
   const handleEntityRevised = useCallback(async (updatedEntity: WorkspaceFeatureEnvelope) => {
     setLifecycleModal({ mode: null, entity: null });
     await refetchEntities();
@@ -202,12 +227,15 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
     }
   }, [scientific.l10, selectEntity, setActiveTool, state.publication.snapshotId, handleStartDrawing, handleCanvasMapClick]);
 
-  // An open investigation or specialized tool must never retain context across
-  // tenant, plot, crop-cycle, geometry or request-generation changes.
+  // An open investigation, specialized tool, authoring draft or lifecycle modal
+  // must never retain context across tenant, plot, crop-cycle, geometry or request-generation changes.
   useEffect(() => {
     setInvestigation(null);
     setActiveSpecializedTool(null);
     setActiveInitialSensorId(null);
+    setDrawingKind(null);
+    setDraftCoordinates([]);
+    setLifecycleModal({ mode: null, entity: null });
   }, [state.generationId, state.plotScope.plotId, state.plotScope.cropCycleId,
       state.plotScope.geometryHash, state.plotScope.geometryVersion]);
 
@@ -293,6 +321,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
             } : null}
             onCanvasMapClick={handleCanvasMapClick}
             onZoneClick={(zoneId) => {
+              if (drawingKind) return;
               scientific.l10.setSelectedZone(zoneId);
               selectEntity({
                 kind: "ZONE",
@@ -356,6 +385,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
             onClose={handleLifecycleClose}
             onRevised={handleEntityRevised}
             onRevoked={handleEntityRevoked}
+            onEditOnMap={handleEditOnMap}
           />
         )}
         <WorkspaceSpecializedToolsP04

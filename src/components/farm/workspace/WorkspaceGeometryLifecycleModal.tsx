@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Edit3, Trash2, History, AlertTriangle, X, Check, ShieldAlert } from "lucide-react";
+import { Edit3, Trash2, History, AlertTriangle, X, Check, ShieldAlert, MapPin } from "lucide-react";
 import {
   reviseGeometryRegistration,
   revokeGeometryRegistration,
@@ -17,6 +17,7 @@ interface LifecycleModalProps {
   onClose: () => void;
   onRevised: (updatedEntity: WorkspaceFeatureEnvelope) => void;
   onRevoked: (revokedId: string) => void;
+  onEditOnMap?: (entity: WorkspaceFeatureEnvelope) => void;
 }
 
 export default function WorkspaceGeometryLifecycleModal({
@@ -26,6 +27,7 @@ export default function WorkspaceGeometryLifecycleModal({
   onClose,
   onRevised,
   onRevoked,
+  onEditOnMap,
 }: LifecycleModalProps) {
   const props = (entity.properties || {}) as Record<string, any>;
   const regId = (entity.provenance as any)?.registration_id || entity.entity_id;
@@ -33,6 +35,10 @@ export default function WorkspaceGeometryLifecycleModal({
 
   const [label, setLabel] = useState(String(props.name || entity.entity_id));
   const [notes, setNotes] = useState(String(props.notes || ""));
+  const initialCoordinatesJson = entity.geometry?.coordinates
+    ? JSON.stringify(entity.geometry.coordinates)
+    : "";
+  const [coordinatesText, setCoordinatesText] = useState(initialCoordinatesJson);
   const [revokeReason, setRevokeReason] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -63,11 +69,52 @@ export default function WorkspaceGeometryLifecycleModal({
     e.preventDefault();
     setIsSubmitting(true);
     setErrorMessage(null);
+
+    let revisedGeometry: any = undefined;
+    if (coordinatesText.trim() && coordinatesText.trim() !== initialCoordinatesJson.trim()) {
+      try {
+        const parsed = JSON.parse(coordinatesText.trim());
+        if (!Array.isArray(parsed)) {
+          throw new Error("Coordinates must be a JSON array");
+        }
+        const geomType = entity.geometry?.type || (entity.entity_kind === "DRONE_MISSION" ? "LineString" : "Polygon");
+        if (geomType === "Polygon") {
+          const ring = Array.isArray(parsed[0]) && typeof parsed[0][0] === "number" ? parsed : parsed[0];
+          if (!Array.isArray(ring) || ring.length < 3) {
+            throw new Error("Polygon requires at least 3 vertices");
+          }
+          const first = ring[0];
+          const last = ring[ring.length - 1];
+          const closedRing = [...ring];
+          if (first[0] !== last[0] || first[1] !== last[1]) {
+            closedRing.push([first[0], first[1]]);
+          }
+          revisedGeometry = {
+            type: "Polygon",
+            coordinates: [closedRing],
+          };
+        } else {
+          if (parsed.length < 2) {
+            throw new Error("LineString requires at least 2 vertices");
+          }
+          revisedGeometry = {
+            type: "LineString",
+            coordinates: parsed,
+          };
+        }
+      } catch (parseErr: any) {
+        setIsSubmitting(false);
+        setErrorMessage(`Invalid coordinates format: ${parseErr.message}`);
+        return;
+      }
+    }
+
     try {
       const res = await reviseGeometryRegistration(plotId, regId, {
         expected_revision: currentRevision,
         label: label.trim(),
         notes: notes.trim() || null,
+        geometry: revisedGeometry,
       });
       setIsSubmitting(false);
       onClose();
@@ -135,7 +182,6 @@ export default function WorkspaceGeometryLifecycleModal({
           </div>
           <button
             type="button"
-            data-testid="p06-modal-close-btn"
             onClick={onClose}
             style={{ background: "transparent", border: "none", color: "#94a3b8", cursor: "pointer" }}
           >
@@ -187,6 +233,57 @@ export default function WorkspaceGeometryLifecycleModal({
                   fontSize: "13px",
                   outline: "none",
                   resize: "none",
+                }}
+              />
+            </div>
+
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+                <label style={{ fontSize: "12px", color: "#cbd5e1", fontWeight: 600 }}>
+                  Geometry Vertices ({entity.geometry?.type || "Unknown"})
+                </label>
+                {onEditOnMap && (
+                  <button
+                    type="button"
+                    data-testid="p06-edit-on-map-btn"
+                    onClick={() => {
+                      onClose();
+                      onEditOnMap(entity);
+                    }}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "5px",
+                      background: "rgba(56, 189, 248, 0.15)",
+                      border: "1px solid rgba(56, 189, 248, 0.35)",
+                      color: "#38bdf8",
+                      borderRadius: "6px",
+                      padding: "4px 10px",
+                      fontSize: "11px",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <MapPin size={13} /> Adjust Vertices on Field Map
+                  </button>
+                )}
+              </div>
+              <textarea
+                value={coordinatesText}
+                onChange={(e) => setCoordinatesText(e.target.value)}
+                rows={3}
+                placeholder="Coordinates JSON array [ [lon, lat], ... ]"
+                style={{
+                  width: "100%",
+                  background: "rgba(255,255,255,0.06)",
+                  border: "1px solid rgba(255,255,255,0.15)",
+                  borderRadius: "8px",
+                  padding: "8px 12px",
+                  color: "#f8fafc",
+                  fontSize: "11px",
+                  fontFamily: "monospace",
+                  outline: "none",
+                  resize: "vertical",
                 }}
               />
             </div>
@@ -392,3 +489,4 @@ export default function WorkspaceGeometryLifecycleModal({
     </div>
   );
 }
+

@@ -93,7 +93,7 @@ export async function reviseGeometryRegistration(
 export async function revokeGeometryRegistration(
   plotId: string,
   regId: string,
-  expectedRevision?: number,
+  expectedRevision: number,
   reason?: string
 ) {
   const res = await fetch(

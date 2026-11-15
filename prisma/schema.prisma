@@ -1214,7 +1214,7 @@ model WorkspaceGeometryRegistration {
 model WorkspaceGeometryRevision {
   id             String   @id @default(auto()) @map("_id") @db.ObjectId
   registrationId String   @db.ObjectId
-  registration   WorkspaceGeometryRegistration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+  registration   WorkspaceGeometryRegistration @relation(fields: [registrationId], references: [id], onDelete: NoAction)
   plotId         String   @db.ObjectId
   revision       Int
   operation      String   // "CREATE", "UPDATE", "REVOKE"
@@ -1225,7 +1225,7 @@ model WorkspaceGeometryRevision {
   editorId       String   @db.ObjectId
   createdAt      DateTime @default(now())
 
-  @@index([registrationId, revision])
+  @@unique([registrationId, revision])
   @@index([plotId, createdAt])
 }
 

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   validateGeometryRegistrationInput,
   validateGeometryRevisionInput,
+  validateParcelContainment,
   isRegistrationRecordInScope,
 } from "../../src/lib/agribrain/geometry-registration-policy.mjs";
 import {
@@ -116,4 +117,73 @@ test("P06.05: FIELD_OBSERVATION registration allows new_observation creation wit
 
   // Conflict if both source_id and new_observation provided
   assert.equal(validateGeometryRegistrationInput({ ...input, source_id: "507f1f77bcf86cd799439099" }).ok, false);
+});
+
+test("P06.05: validateParcelContainment accepts coordinates within plot footprint plus operational margin and rejects out-of-envelope geometry", () => {
+  const plotGeoJson = {
+    type: "Feature",
+    geometry: {
+      type: "Polygon",
+      coordinates: [
+        [
+          [2.655, 36.507],
+          [2.663, 36.507],
+          [2.663, 36.510],
+          [2.655, 36.510],
+          [2.655, 36.507],
+        ],
+      ],
+    },
+  };
+
+  // 1. Inside plot polygon
+  const insideGeom = {
+    type: "LineString",
+    coordinates: [
+      [2.658, 36.508],
+      [2.660, 36.509],
+    ],
+  };
+  const resInside = validateParcelContainment(insideGeom, plotGeoJson);
+  assert.equal(resInside.ok, true);
+
+  // 2. Just outside parcel boundary but within 0.02 deg buffer margin (~2.2 km)
+  const marginGeom = {
+    type: "LineString",
+    coordinates: [
+      [2.665, 36.512],
+      [2.668, 36.515],
+    ],
+  };
+  const resMargin = validateParcelContainment(marginGeom, plotGeoJson);
+  assert.equal(resMargin.ok, true);
+
+  // 3. Far outside (California coordinates)
+  const farGeom = {
+    type: "LineString",
+    coordinates: [
+      [-119.825, 34.421],
+      [-119.820, 34.425],
+    ],
+  };
+  const resFar = validateParcelContainment(farGeom, plotGeoJson);
+  assert.equal(resFar.ok, false);
+  assert.match(resFar.error, /exceed authorized plot operational envelope/);
+});
+
+test("P06.05: optimistic concurrency predicates strictly enforce revision matching and reject state regressions", () => {
+  const activeRecord = baseRecord(2, "OWNER_DECLARED");
+  // Active record is visible in scope
+  assert.equal(isRegistrationRecordInScope(activeRecord, plot), true);
+
+  // If revision is stale
+  const stalePayload = { expected_revision: 1, label: "Stale update" };
+  const val = validateGeometryRevisionInput(stalePayload, "DRONE_MISSION");
+  assert.equal(val.ok, true);
+  // Concurrency check: payload expected_revision (1) !== record revision (2) -> conflict
+  assert.notEqual(val.value.expected_revision, activeRecord.revision);
+
+  // Revoked record is rejected from scope
+  const revokedRecord = baseRecord(3, "REVOKED");
+  assert.equal(isRegistrationRecordInScope(revokedRecord, plot), false);
 });

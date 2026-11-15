@@ -92,7 +92,7 @@ export function getWorkspaceEntityGeometryLayers({entities,selectedEntityId,onEn
    type:"Feature" as const,
    id:e.envelope_id,
    geometry:e.geometry!,
-   properties:{envelope_id:e.envelope_id, name:e.properties?.name, source_kind:e.properties?.source_kind, source_id:e.properties?.source_record_id, revision:e.properties?.revision},
+   properties:{envelope_id:e.envelope_id},
   }));
   layers.push(new GeoJsonLayer({
    id:"workspace-entity-areas",

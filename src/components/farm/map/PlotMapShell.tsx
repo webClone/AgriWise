@@ -514,6 +514,9 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     return l10.modeAvailability?.[modeKey] ?? undefined;
   }, [l10.baseSurfaceMode, activeMode, l10.modeAvailability]);
 
+  // P06.05 Mode Isolation: Suppress zone selection callbacks when geometry authoring is active
+  const safeOnZoneClick = props.draftGeometry ? undefined : onZoneClick;
+
   // 4a. Build SURFACE layers (heavy raster work — NOT affected by zone hover)
   const surfaceStack = useMemo(() => buildLayerStack({
     plotId,
@@ -531,7 +534,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     paletteId,
     transectPoints: activeTransectPoints,
     hoveredSampleCoordinate,
-    onZoneClick,
+    onZoneClick: safeOnZoneClick,
     onZoneHover: handleZoneHover,
     showExperimental1m,
     showCandidateMask,
@@ -568,7 +571,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     paletteId,
     activeTransectPoints,
     hoveredSampleCoordinate,
-    onZoneClick,
+    safeOnZoneClick,
     handleZoneHover,
     showExperimental1m,
     showCandidateMask,
@@ -620,7 +623,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     paletteId,
     transectPoints: activeTransectPoints,
     hoveredSampleCoordinate,
-    onZoneClick,
+    onZoneClick: safeOnZoneClick,
     onZoneHover: handleZoneHover,
     renderMode: l10.evidenceState?.renderMode,
     evidenceState: l10.evidenceState,
@@ -650,7 +653,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     paletteId,
     activeTransectPoints,
     hoveredSampleCoordinate,
-    onZoneClick,
+    safeOnZoneClick,
     handleZoneHover,
     l10.evidenceState,
     overlaySurfaces,
