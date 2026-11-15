@@ -105,11 +105,11 @@ export function useWorkspaceEntities(
   }, [fetchEntities, pollIntervalMs, plotId, generationId]);
 
   const locatedEntities = entities.filter(
-    (e) => e.display_eligibility?.eligible_for_map_pin && e.geometry?.coordinates
+    (e) => (e.display_eligibility?.eligible_for_map_pin || e.display_eligibility?.eligible_for_map_geometry) && e.geometry !== null
   );
 
   const unlocatedEntities = entities.filter(
-    (e) => !e.display_eligibility?.eligible_for_map_pin
+    (e) => !e.display_eligibility?.eligible_for_map_pin && !e.display_eligibility?.eligible_for_map_geometry
   );
 
   return {

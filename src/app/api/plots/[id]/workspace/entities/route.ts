@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authenticatedUserId } from "@/lib/tenant-authorization";
+import {projectWorkspaceGeometryRegistration} from "@/lib/agribrain/geometry-registration-projection.mjs";
 import {
   createWorkspaceFeatureEnvelope,
   validateWorkspaceFeatureEnvelope,
@@ -413,7 +414,18 @@ export async function GET(
       }
     }
 
-    // 3. Add Benchmark Entities (Sensors, Cameras, Drone Missions, Field Observations)
+    // 3. Durable registered geometry, always scoped to the authenticated plot.
+    // Owner declarations remain PLANNED or ESTIMATED; no scientific admission is inferred.
+    const registrations = await prisma.workspaceGeometryRegistration.findMany({
+      where:{tenantId,farmId,plotId,status:"OWNER_DECLARED"},
+      orderBy:{createdAt:"desc"},take:200,
+    });
+    for(const record of registrations){
+      const envelope=projectWorkspaceGeometryRegistration(record as any,{tenantId,farmId,plotId});
+      if(envelope)envelopes.push(envelope);
+    }
+
+    // 4. Add Benchmark Entities (Sensors, Cameras, Drone Missions, Field Observations)
     for (const item of benchmarkEntities) {
       const alreadyIncluded = envelopes.some(
         (e) => (e.properties as any)?.deviceId === item.entityId || e.entity_id === item.entityId
@@ -472,7 +484,7 @@ export async function GET(
       : envelopes;
 
     const locatedCount = filtered.filter(
-      (e) => e.display_eligibility.eligible_for_map_pin
+      (e) => e.display_eligibility.eligible_for_map_pin || e.display_eligibility.eligible_for_map_geometry
     ).length;
     const unlocatedCount = filtered.length - locatedCount;
 
@@ -484,6 +496,7 @@ export async function GET(
       total: filtered.length,
       located_count: locatedCount,
       unlocated_count: unlocatedCount,
+      mapped_geometry_count: filtered.filter(e => e.display_eligibility.eligible_for_map_geometry).length,
       entities: filtered,
     });
   } catch (error) {

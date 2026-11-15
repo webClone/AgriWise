@@ -62,6 +62,7 @@ export default function WorkspaceContextInspector({
   const entityProps = (matchedEntity?.properties || {}) as Record<string, any>;
   const entityCoords = matchedEntity?.geometry?.type==="Point" ? matchedEntity.geometry.coordinates : null;
   const footprintBounds = matchedEntity?.geometry?.type !== "Point" ? geometryBounds(matchedEntity?.geometry) : null;
+  const ownerDeclared=matchedEntity?.spatial_support?.location_source==="USER_DECLARED";
   const isFixture = entityProps.is_benchmark_fixture === true || matchedEntity?.epistemic_class === "SIMULATED";
   const isOnline = isFixture ? false : (entityProps.isOnline ?? true);
   const latest = entityProps.latestReading;
@@ -111,6 +112,9 @@ export default function WorkspaceContextInspector({
                   {matchedEntity.epistemic_class}
                 </dd>
               </div>
+              {ownerDeclared && <div role="note" style={{color:"#f59e0b",fontSize:"12px",fontWeight:600}}>
+                Owner-declared geometry · Not independently verified or scientifically admitted
+              </div>}
               {footprintBounds && (
                 <div>
                   <dt>Mapped geometry</dt>
@@ -242,6 +246,9 @@ export default function WorkspaceContextInspector({
                 <dt>Field of View</dt>
                 <dd>{entityProps.fieldOfView || "120° Wide Angle"}</dd>
               </div>
+              {ownerDeclared && <div role="note" style={{color:"#f59e0b",fontSize:"12px",fontWeight:600}}>
+                Owner-declared geometry · Not independently verified or scientifically admitted
+              </div>}
               {footprintBounds && (
                 <div>
                   <dt>Mapped geometry</dt>
@@ -328,6 +335,9 @@ export default function WorkspaceContextInspector({
                   {matchedEntity.epistemic_class}
                 </dd>
               </div>
+              {ownerDeclared && <div role="note" style={{color:"#f59e0b",fontSize:"12px",fontWeight:600}}>
+                Owner-declared geometry · Not independently verified or scientifically admitted
+              </div>}
               {footprintBounds && (
                 <div>
                   <dt>Mapped geometry</dt>
@@ -406,6 +416,9 @@ export default function WorkspaceContextInspector({
                   <dd style={{ color: "#38bdf8" }}>{entityProps.aiTags.join(", ")}</dd>
                 </div>
               )}
+              {ownerDeclared && <div role="note" style={{color:"#f59e0b",fontSize:"12px",fontWeight:600}}>
+                Owner-declared geometry · Not independently verified or scientifically admitted
+              </div>}
               {footprintBounds && (
                 <div>
                   <dt>Mapped geometry</dt>

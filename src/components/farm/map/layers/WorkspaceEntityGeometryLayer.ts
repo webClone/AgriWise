@@ -13,7 +13,7 @@ const family=(e:WorkspaceFeatureEnvelope)=>({
  FIELD_OBSERVATION:"observations",FIELD_EVENT:"observations",ZONE:"zones"
 } as Record<string,string>)[e.entity_kind]||"observations";
 const tint=(e:WorkspaceFeatureEnvelope,alpha:number,opacity:Record<string,number>):[number,number,number,number]=>{
- const demo=e.epistemic_class==="SIMULATED"||e.properties?.is_benchmark_fixture===true;
+ const demo=e.epistemic_class==="SIMULATED"||e.properties?.is_benchmark_fixture===true || e.spatial_support?.location_source==="USER_DECLARED";
  const rgb=demo?[234,179,8]:e.entity_kind==="CAMERA"?[168,85,247]:
    e.entity_kind==="DRONE_MISSION"?[249,115,22]:
    e.entity_kind==="ZONE"?[34,197,94]:[244,63,94];
