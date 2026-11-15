@@ -13,7 +13,7 @@ test("P06: zone and all four entity actions can open Compare Time", () => {
   assert.equal((actions.match(/onLaunch\("compare"\)/g) || []).length, 5);
 });
 test("P06: in-place host consumes current authenticated entity list, not selection.metadata", () => {
-  assert.match(shell, /workspaceEntities=\{entities\}/);
+  assert.match(shell, /workspaceEntities=\{(scopedEntities|entities)\}/);
   assert.match(host, /workspaceEntities\.find\(/);
   assert.match(host, /buildEntityTemporalComparison/);
   assert.doesNotMatch(host, /selectedEntity\.metadata/);

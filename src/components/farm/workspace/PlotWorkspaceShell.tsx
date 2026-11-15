@@ -215,13 +215,25 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
           entities={scopedEntities}
           zones={sceneZones}
           selectedId={state.selectedEntity.id}
-          onToggle={(id,visible)=>{
-            toggleSceneLayer(id,visible);
-            if(!visible&&id==="zones"&&state.selectedEntity.kind==="ZONE")clearSelection();
-            if(!visible&&scopedEntities.some(e=>e.entity_id===state.selectedEntity.id &&
-               ((id==="sensors"&&e.entity_kind==="SENSOR")||(id==="cameras"&&e.entity_kind==="CAMERA")||
-                (id==="drones"&&e.entity_kind==="DRONE_MISSION")||
-                (id==="observations"&&(e.entity_kind==="FIELD_OBSERVATION"||e.entity_kind==="FIELD_EVENT"))))clearSelection();
+          onToggle={(id, visible) => {
+            toggleSceneLayer(id, visible);
+            if (!visible && id === "zones" && state.selectedEntity.kind === "ZONE") {
+              clearSelection();
+            }
+            if (
+              !visible &&
+              scopedEntities.some(
+                (e) =>
+                  e.entity_id === state.selectedEntity.id &&
+                  ((id === "sensors" && e.entity_kind === "SENSOR") ||
+                    (id === "cameras" && e.entity_kind === "CAMERA") ||
+                    (id === "drones" && e.entity_kind === "DRONE_MISSION") ||
+                    (id === "observations" &&
+                      (e.entity_kind === "FIELD_OBSERVATION" || e.entity_kind === "FIELD_EVENT")))
+              )
+            ) {
+              clearSelection();
+            }
           }}
           onOpacity={setSceneLayerOpacity}
           onAll={visible=>{setAllSceneLayersVisibility(visible);if(!visible)clearSelection();}}
