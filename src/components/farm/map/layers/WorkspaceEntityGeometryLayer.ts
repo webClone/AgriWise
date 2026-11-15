@@ -41,11 +41,11 @@ export function getWorkspaceEntityGeometryLayers({entities,selectedEntityId,onEn
    data:{type:"FeatureCollection",features} as any,
    pickable:true,filled:true,stroked:true,wireframe:false,
    lineWidthUnits:"pixels",lineWidthMinPixels:1.5,
-   getFillColor:(f:any)=>{
+   getFillColor:(f:any):[number,number,number,number]=>{
      const e=areas.find(x=>x.envelope_id===f.properties?.envelope_id);
      return e?tint(e,chosen(e,selectedEntityId)?110:50,sceneOpacity):[0,0,0,0];
    },
-   getLineColor:(f:any)=>{
+   getLineColor:(f:any):[number,number,number,number]=>{
      const e=areas.find(x=>x.envelope_id===f.properties?.envelope_id);
      return !e?[0,0,0,0]:chosen(e,selectedEntityId)?[34,211,238,255]:tint(e,225,sceneOpacity);
    },
@@ -65,7 +65,7 @@ export function getWorkspaceEntityGeometryLayers({entities,selectedEntityId,onEn
    id:"workspace-entity-paths",data:lines,pickable:true,
    widthUnits:"pixels",widthMinPixels:3,
    getPath:e=>(e.geometry?.type==="LineString"?e.geometry.coordinates:[]),
-   getColor:e=>chosen(e,selectedEntityId)?[34,211,238,255]:tint(e,255,sceneOpacity),
+   getColor:(e):[number,number,number,number]=>chosen(e,selectedEntityId)?[34,211,238,255]:tint(e,255,sceneOpacity),
    getWidth:e=>chosen(e,selectedEntityId)?7:4,
    onClick:info=>{if(info.object)onEntityClick?.(info.object,info);},
    updateTriggers:{getColor:[selectedEntityId,sceneOpacity],getWidth:[selectedEntityId]},
