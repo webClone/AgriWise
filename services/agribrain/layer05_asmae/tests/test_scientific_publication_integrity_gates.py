@@ -50,17 +50,18 @@ def _base_asmae_result(plot_id: str = "plot-a", num_val: float = 0.365):
     }
 
 
-def _base_frontend_payload(snapshot_id: str, num_val: float = 0.365):
+def _base_frontend_payload(snapshot_id: str, num_val: float = 0.365, plot_id: str = "plot-a"):
     num_rec, vec_hash = _make_numerical_record(num_val)
     return {
         "version": SURFACES_SCHEMA_VERSION,
         "surface_schema_version": SURFACES_SCHEMA_VERSION,
         "intelligence_snapshot_id": snapshot_id,
-        "plot_id": "plot-a",
+        "plot_id": plot_id,
         "publication_id": f"pub-{snapshot_id}",
         "publication_run_id": f"run-{snapshot_id}",
         "run_id": f"run-{snapshot_id}",
         "pipeline_state": "terminal_layer10_published",
+        "publication_status": "VALID_NORMAL",
         "render_authorization_version": RENDER_AUTHORIZATION_VERSION,
         "render_authorizations": {"canopy": {"authorized": True}},
         "asmae_proof": {"proof_id": f"proof-{snapshot_id}", "status": "valid", "numerical_vector_hash": vec_hash},
@@ -264,6 +265,7 @@ def test_provider_only_publication_without_numerical_claim_remains_available():
         "publication_run_id": f"run-{snap_id}",
         "run_id": f"run-{snap_id}",
         "pipeline_state": "terminal_layer10_published",
+        "publication_status": "VALID_NORMAL",
         "render_authorization_version": RENDER_AUTHORIZATION_VERSION,
         "render_authorizations": {"canopy": {"authorized": True}},
         "asmae_proof": {"proof_id": f"proof-{snap_id}", "status": "valid"},
@@ -468,3 +470,172 @@ def test_sire_rejects_non_north_up_or_westward_grid_orientations():
     ok, reason = validate_spatial_grid_spec(rotated_spec, 100, 100)
     assert ok is False
     assert reason == "unsupported_grid_orientation_not_north_up"
+
+
+# ── TEST 8: Gate G3 — Exact and Latest API Consistency & Cold Restart ─────────
+
+def test_g3_exact_and_latest_apis_consistency_and_cold_restart(tmp_path, monkeypatch):
+    """Gate G3: Exact and Latest APIs return identical validated scientific results
+    before and after cold restart. Superseded historical IDs remain blocked.
+    """
+    from fastapi.testclient import TestClient
+    from services.agribrain.app.main import (
+        app,
+        require_internal_service_request,
+        _SNAPSHOT_RESPONSE_CACHE,
+        _SNAPSHOT_RESPONSE_CACHE_LOCK,
+    )
+
+    monkeypatch.setattr(plot_snapshot_store, "PLOT_SNAPSHOT_ROOT", tmp_path)
+
+    plot_id = "plot-g3"
+    ns = PlotNamespace(tenant_id="tenant-g3", farm_id="farm-g3", plot_id=plot_id)
+    snap_id_1 = "ASMAE-SNAPSHOT-G3-001"
+
+    # Override internal service auth dependency
+    app.dependency_overrides[require_internal_service_request] = lambda: ns
+
+    try:
+        client = TestClient(app)
+
+        # Publish first snapshot
+        res1 = _base_asmae_result(plot_id=plot_id, num_val=0.42)
+        ref1 = snapshot_store.publish_latest_snapshot(res1, context_hash="ctx-g3-1", geometry_hash="geom-g3")
+        res1["snapshot_ref"] = ref1
+        snap_id_1 = res1["snapshot_id"]
+        payload1 = _base_frontend_payload(snap_id_1, num_val=0.42, plot_id=plot_id)
+
+        pub1 = plot_snapshot_store.publish_canonical_plot_snapshot(
+            namespace=ns,
+            geometry_hash="geom-g3",
+            snapshot_id=snap_id_1,
+            asmae_result=res1,
+            frontend_payload=payload1,
+            job_id="job-g3-1",
+            manifest_hash="manifest-g3-1",
+        )
+        assert pub1 is not None
+
+        # 1. Warm read: Latest endpoint
+        resp_latest_1 = client.get(f"/v2/plots/{plot_id}/snapshot")
+        assert resp_latest_1.status_code == 200
+        data_latest_1 = resp_latest_1.json()
+        assert data_latest_1["available"] is True
+        assert data_latest_1["snapshot_id"] == snap_id_1
+        vec_hash_latest_1 = (
+            data_latest_1["frontend_payload"]
+            .get("asmae_posterior_numerical_record", {})
+            .get("numerical_vector_hash")
+        )
+
+        # 2. Warm read: Exact endpoint
+        resp_exact_1 = client.get(f"/v2/snapshots/{snap_id_1}")
+        assert resp_exact_1.status_code == 200
+        data_exact_1 = resp_exact_1.json()
+        assert data_exact_1["available"] is True
+        assert data_exact_1["snapshot_id"] == snap_id_1
+        vec_hash_exact_1 = (
+            data_exact_1["frontend_payload"]
+            .get("asmae_posterior_numerical_record", {})
+            .get("numerical_vector_hash")
+        )
+
+        # Both return identical scientific results
+        assert vec_hash_latest_1 == vec_hash_exact_1
+        assert data_latest_1["frontend_payload"]["surfaces"] == data_exact_1["frontend_payload"]["surfaces"]
+
+        # 3. Simulate COLD RESTART: Flush all in-memory caches
+        with plot_snapshot_store._SNAPSHOT_CACHE_LOCK:
+            plot_snapshot_store._CANONICAL_SNAPSHOT_CACHE.clear()
+        with _SNAPSHOT_RESPONSE_CACHE_LOCK:
+            _SNAPSHOT_RESPONSE_CACHE.clear()
+
+        # Cold read: Latest endpoint
+        resp_latest_cold = client.get(f"/v2/plots/{plot_id}/snapshot")
+        assert resp_latest_cold.status_code == 200
+        data_latest_cold = resp_latest_cold.json()
+        assert data_latest_cold["available"] is True
+        assert (
+            data_latest_cold["frontend_payload"]
+            .get("asmae_posterior_numerical_record", {})
+            .get("numerical_vector_hash")
+            == vec_hash_latest_1
+        )
+
+        # Cold read: Exact endpoint
+        resp_exact_cold = client.get(f"/v2/snapshots/{snap_id_1}")
+        assert resp_exact_cold.status_code == 200
+        data_exact_cold = resp_exact_cold.json()
+        assert data_exact_cold["available"] is True
+        assert (
+            data_exact_cold["frontend_payload"]
+            .get("asmae_posterior_numerical_record", {})
+            .get("numerical_vector_hash")
+            == vec_hash_exact_1
+        )
+
+        # 4. Supersede with a second valid snapshot (distinct content hash -> distinct snapshot_id)
+        res2 = _base_asmae_result(plot_id=plot_id, num_val=0.48)
+        res2["content_hash"] = "content-hash-nominal-2"
+        res2["crop_posterior_lineage"] = "crop-lineage-nominal-2"
+        ref2 = snapshot_store.publish_latest_snapshot(res2, context_hash="ctx-g3-2", geometry_hash="geom-g3")
+        res2["snapshot_ref"] = ref2
+        snap_id_2 = res2["snapshot_id"]
+        payload2 = _base_frontend_payload(snap_id_2, num_val=0.48, plot_id=plot_id)
+        payload2["scientific_evidence_lineage"]["crop_posterior_lineage"] = "crop-lineage-nominal-2"
+
+        pub2 = plot_snapshot_store.publish_canonical_plot_snapshot(
+            namespace=ns,
+            geometry_hash="geom-g3",
+            snapshot_id=snap_id_2,
+            asmae_result=res2,
+            frontend_payload=payload2,
+            job_id="job-g3-2",
+            manifest_hash="manifest-g3-2",
+        )
+        assert pub2 is not None
+
+        # Latest now returns snap_id_2
+        resp_latest_2 = client.get(f"/v2/plots/{plot_id}/snapshot")
+        assert resp_latest_2.status_code == 200
+        assert resp_latest_2.json()["snapshot_id"] == snap_id_2
+
+        # Superseded historical ID snap_id_1 is blocked with 409 Conflict
+        resp_superseded = client.get(f"/v2/snapshots/{snap_id_1}")
+        assert resp_superseded.status_code == 409
+        assert "Exact snapshot was superseded; no substitution is allowed" in resp_superseded.text
+    finally:
+        app.dependency_overrides.pop(require_internal_service_request, None)
+
+
+# ── TEST 9: Phase 1B Held-Out Ground Truth Reordering Invariance ─────────────
+
+def test_phase1b_held_out_ground_truth_reordering_invariance():
+    """Phase 1B benchmark requirement: extract_held_out_ground_truth produces
+    identical ground truth values and digests regardless of record ordering.
+    """
+    from services.agribrain.datasets.pilot_phase1b_telemetry import ensure_phase1b_gateway_logs
+    from services.agribrain.evaluation.phase1b_held_out_validation import (
+        EVALUATION_CHECKPOINTS,
+        extract_held_out_ground_truth,
+    )
+
+    records = ensure_phase1b_gateway_logs()
+    assert len(records) > 0
+    t_eval = EVALUATION_CHECKPOINTS[0]
+
+    # 1. Forward order
+    gt_forward = extract_held_out_ground_truth(t_eval, records)
+
+    # 2. Reversed order
+    reversed_records = list(reversed(records))
+    gt_reversed = extract_held_out_ground_truth(t_eval, reversed_records)
+
+    # 3. Shuffled / interleaved order
+    shuffled_records = sorted(records, key=lambda r: (r.get("source_record_hash") or ""))
+    gt_shuffled = extract_held_out_ground_truth(t_eval, shuffled_records)
+
+    # Assert deterministic equivalence
+    assert gt_forward == gt_reversed, "Ground truth extraction must be invariant to reversed row order"
+    assert gt_forward == gt_shuffled, "Ground truth extraction must be invariant to hash-shuffled row order"
+
