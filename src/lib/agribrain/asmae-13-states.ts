@@ -395,14 +395,16 @@ export function resolveAsmaeStateAvailability(
       status: "QUALIFIED_SPATIAL",
       canonicalStatus: "QUALIFIED_SPATIAL",
       mean: Number(rasterMean.toFixed(4)),
-      sigma: scalarSigma !== null ? Number(scalarSigma.toFixed(4)) : 0.05,
+      sigma: scalarSigma !== null ? Number(scalarSigma.toFixed(4)) : null,
       min: Number(rasterMin.toFixed(4)),
       max: Number(rasterMax.toFixed(4)),
       supportClassification: "OBSERVED",
       rasterSurface: matchingRaster,
       canRenderPixels: true,
       explanation: "Qualified multi-spectral raster publication authorized for spatial field inspection.",
-      observationEvidence: ["Sentinel-2 MSI Surface Reflectance", "Physical Radiative Transfer Model"],
+      observationEvidence: Array.isArray((matchingRaster as any)?.sources) && (matchingRaster as any).sources.length > 0
+        ? (matchingRaster as any).sources
+        : ((matchingRaster as any)?.source_sensor ? [(matchingRaster as any).source_sensor] : ["Multi-Spectral Surface Reflectance", "Radiative Transfer Priors"]),
     };
   }
 
@@ -421,10 +423,10 @@ export function resolveAsmaeStateAvailability(
       canRenderPixels: false,
       explanation: "Scalar posterior estimate authorized by ASMAE resilient filter; full-field spatial raster withheld by truthfulness policy (no certified sub-plot spatial variance).",
       observationEvidence: key === "root_zone_water"
-        ? ["Calibrated in-situ FMCW moisture probe (15cm)", "Sentinel-1 SAR C-band backscatter", "Agrometeorological Penman-Monteith ET0"]
+        ? ["In-Situ Soil Moisture Telemetry", "SAR Backscatter", "Agrometeorological Penman-Monteith ET0"]
         : key === "lai"
-        ? ["Sentinel-2 NDVI inversion", "Crop species canopy prior"]
-        : ["Prior Crop Distribution", "Historical Archive Memory"],
+        ? ["Vegetation Index Inversion", "Crop Species Canopy Prior"]
+        : ["Prior Distribution", "Historical Archive Memory"],
     };
   }
 
@@ -516,6 +518,7 @@ export function compareSensorWithCollocatedAsmae(
   sensorValue: number | null;
   sensorUnit: string;
   sensorEpistemicClass: "OBSERVED_TELEMETRY";
+  sensorDepthCm: number | null;
   asmaeMean: number | null;
   asmaeSigma: number | null;
   asmaeUnit: string;
@@ -524,29 +527,57 @@ export function compareSensorWithCollocatedAsmae(
   withinTwoSigma: boolean;
   zScore: number | null;
   narrative: string;
+  supportDifferenceDisclaimer: string;
+  verticalSupportDifference: boolean;
 } {
   const sensorRaw = sensorReading.soilMoisture;
   const sensorValue =
     typeof sensorRaw === "number" && Number.isFinite(sensorRaw)
       ? Number((sensorRaw <= 1.0 ? sensorRaw : sensorRaw / 100).toFixed(4))
       : null;
+  const sensorDepthCm = typeof sensorReading.depthCm === "number" ? sensorReading.depthCm : null;
 
   const mean = asmaeAvailability.mean;
-  const sigma = asmaeAvailability.sigma ?? 0.05;
+  const sigma = typeof asmaeAvailability.sigma === "number" && asmaeAvailability.sigma > 0 ? asmaeAvailability.sigma : null;
+
+  const supportDifferenceDisclaimer =
+    "A point measurement at 15 cm and a modeled root-zone estimate represent different spatial and vertical supports. Their numerical agreement alone does not establish independent scientific validation.";
 
   if (sensorValue === null || mean === null) {
     return {
       sensorValue,
       sensorUnit: "fraction (VWC)",
       sensorEpistemicClass: "OBSERVED_TELEMETRY",
+      sensorDepthCm,
       asmaeMean: mean,
       asmaeSigma: sigma,
-      asmaeUnit: asmaeAvailability.state.unit,
+      asmaeUnit: asmaeAvailability.state?.unit || "fraction",
       asmaeEpistemicClass: "SCIENTIFIC_ESTIMATE",
       withinOneSigma: false,
       withinTwoSigma: false,
       zScore: null,
       narrative: "Telemetry or scientific estimate missing for collocated comparison.",
+      supportDifferenceDisclaimer,
+      verticalSupportDifference: sensorDepthCm !== null,
+    };
+  }
+
+  if (sigma === null) {
+    return {
+      sensorValue,
+      sensorUnit: "fraction (VWC)",
+      sensorEpistemicClass: "OBSERVED_TELEMETRY",
+      sensorDepthCm,
+      asmaeMean: mean,
+      asmaeSigma: null,
+      asmaeUnit: asmaeAvailability.state?.unit || "fraction",
+      asmaeEpistemicClass: "SCIENTIFIC_ESTIMATE",
+      withinOneSigma: false,
+      withinTwoSigma: false,
+      zScore: null,
+      narrative: `Observed telemetry (${(sensorValue * 100).toFixed(1)}% VWC) reported alongside ASMAE estimate (${(mean * 100).toFixed(1)}%), but posterior uncertainty (sigma) is unavailable; statistical consistency envelope cannot be evaluated without verified posterior variance.`,
+      supportDifferenceDisclaimer,
+      verticalSupportDifference: sensorDepthCm !== null,
     };
   }
 
@@ -555,23 +586,28 @@ export function compareSensorWithCollocatedAsmae(
   const withinOneSigma = zScore <= 1.0;
   const withinTwoSigma = zScore <= 2.0;
 
+  const depthNote = sensorDepthCm !== null ? ` Discrete probe depth: ${sensorDepthCm}cm.` : "";
+
   const narrative = withinOneSigma
-    ? `Observed sensor reading (${(sensorValue * 100).toFixed(1)}% VWC) is fully consistent with the collocated ASMAE posterior estimate (${(mean * 100).toFixed(1)}% ± ${(sigma * 100).toFixed(1)}%), lying inside the 1σ uncertainty bound.`
+    ? `Observed sensor reading (${(sensorValue * 100).toFixed(1)}% VWC) is fully consistent with the collocated ASMAE posterior estimate (${(mean * 100).toFixed(1)}% ± ${(sigma * 100).toFixed(1)}%), lying inside the 1σ uncertainty bound.${depthNote}`
     : withinTwoSigma
-    ? `Observed sensor reading (${(sensorValue * 100).toFixed(1)}% VWC) is within 2σ of the ASMAE posterior estimate (${(mean * 100).toFixed(1)}% ± ${(sigma * 100).toFixed(1)}%). Normal local variance.`
-    : `Local discrepancy detected: observed telemetry (${(sensorValue * 100).toFixed(1)}% VWC) diverges by ${zScore}σ from ASMAE posterior (${(mean * 100).toFixed(1)}% ± ${(sigma * 100).toFixed(1)}%).`;
+    ? `Observed sensor reading (${(sensorValue * 100).toFixed(1)}% VWC) is within 2σ of the ASMAE posterior estimate (${(mean * 100).toFixed(1)}% ± ${(sigma * 100).toFixed(1)}%). Normal local variance.${depthNote}`
+    : `Local discrepancy detected: observed telemetry (${(sensorValue * 100).toFixed(1)}% VWC) diverges by ${zScore}σ from ASMAE posterior (${(mean * 100).toFixed(1)}% ± ${(sigma * 100).toFixed(1)}%).${depthNote}`;
 
   return {
     sensorValue,
     sensorUnit: "fraction (VWC)",
     sensorEpistemicClass: "OBSERVED_TELEMETRY",
+    sensorDepthCm,
     asmaeMean: mean,
     asmaeSigma: sigma,
-    asmaeUnit: asmaeAvailability.state.unit,
+    asmaeUnit: asmaeAvailability.state?.unit || "fraction",
     asmaeEpistemicClass: "SCIENTIFIC_ESTIMATE",
     withinOneSigma,
     withinTwoSigma,
     zScore,
     narrative,
+    supportDifferenceDisclaimer,
+    verticalSupportDifference: sensorDepthCm !== null,
   };
 }

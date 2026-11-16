@@ -38,6 +38,10 @@ import {
   type AsmaeStateKey,
   type AsmaeStateAvailabilityResult,
 } from "@/lib/agribrain/asmae-13-states";
+import {
+  buildSoilDepthProfile,
+  normalizeRawReading,
+} from "@/lib/agribrain/physical-sensor-contract";
 
 export default function WorkspaceContextInspector({
   farmId,
@@ -133,6 +137,25 @@ export default function WorkspaceContextInspector({
       : null;
 
   const entityProps = (matchedEntity?.properties || {}) as Record<string, any>;
+  const latestMoisture = entityProps?.latestReading?.soilMoisture ?? null;
+  const sensorDepth = matchedEntity?.spatial_support?.depth_cm ?? 15;
+  const soilProfile =
+    matchedEntity && selectedEntity.kind === "SENSOR" && latestMoisture != null
+      ? buildSoilDepthProfile([
+          normalizeRawReading({
+            deviceId: String(matchedEntity.entity_id || entityProps.deviceId || "sensor"),
+            channelId: `ch_depth_${sensorDepth}cm`,
+            plotId: String(entityProps.plotId || plotId || "plot"),
+            variable: "soil_moisture_vwc",
+            rawValue: typeof latestMoisture === "number" ? latestMoisture : 0,
+            rawUnit: "pct",
+            nominalDepthCm: sensorDepth,
+          })
+        ], {
+          plotId: String(entityProps.plotId || plotId || "plot"),
+          deviceId: String(matchedEntity.entity_id || entityProps.deviceId || "sensor"),
+        })
+      : null;
   const entityCoords = matchedEntity?.geometry?.type==="Point" ? matchedEntity.geometry.coordinates : null;
   const footprintBounds = matchedEntity?.geometry?.type !== "Point" ? geometryBounds(matchedEntity?.geometry) : null;
   const ownerDeclared=matchedEntity?.spatial_support?.location_source==="USER_DECLARED";
@@ -283,6 +306,66 @@ export default function WorkspaceContextInspector({
               )}
             </dl>
 
+            {/* W2: Multi-Depth Soil Water Profile */}
+            {soilProfile && (
+              <div
+                className="pw-soil-depth-profile-card"
+                data-testid="p07-soil-depth-profile"
+                style={{
+                  background: "rgba(15, 23, 42, 0.75)",
+                  border: "1px solid rgba(56, 189, 248, 0.25)",
+                  borderRadius: "8px",
+                  padding: "10px",
+                  marginTop: "8px",
+                  marginBottom: "10px",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                    <Layers3 size={14} style={{ color: "#38bdf8" }} />
+                    <span style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "0.05em", color: "#38bdf8", textTransform: "uppercase" }}>
+                      Soil Water Profile
+                    </span>
+                  </div>
+                  <span style={{ fontSize: "9px", color: "#94a3b8", background: "rgba(255,255,255,0.06)", padding: "2px 6px", borderRadius: "4px" }}>
+                    {soilProfile.measuredCount} measured depth
+                  </span>
+                </div>
+
+                <div style={{ fontSize: "9px", color: "#64748b", marginBottom: "8px" }}>
+                  Historical evidence · Point sensors do not extrapolate across vertical profile
+                </div>
+
+                {/* Depth Bars */}
+                <div style={{ display: "flex", flexDirection: "column", gap: "5px", marginBottom: "8px" }}>
+                  {soilProfile.layers.map((layer) => (
+                    <div key={layer.nominalCm} style={{ display: "grid", gridTemplateColumns: "42px 1fr 75px", alignItems: "center", gap: "8px", fontSize: "10px" }}>
+                      <span style={{ color: "#94a3b8", fontFamily: "monospace" }}>{layer.nominalCm} cm</span>
+                      <div style={{ height: "6px", background: "rgba(255,255,255,0.06)", borderRadius: "3px", overflow: "hidden" }}>
+                        {layer.measured && layer.vwcFraction !== null ? (
+                          <div
+                            style={{
+                              height: "100%",
+                              width: `${Math.min(100, Math.max(0, (layer.vwcFraction / 0.6) * 100))}%`,
+                              background: "linear-gradient(90deg, #38bdf8, #0284c7)",
+                              borderRadius: "3px",
+                            }}
+                          />
+                        ) : null}
+                      </div>
+                      <span style={{ textAlign: "right", color: layer.measured ? "#38bdf8" : "#64748b", fontWeight: layer.measured ? 700 : 400 }}>
+                        {layer.label}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ fontSize: "8.5px", color: "#64748b", fontStyle: "italic", borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: "4px" }}>
+                  {soilProfile.supportDifferenceDisclaimer}
+                </div>
+              </div>
+            )}
+
             {/* W1/W2 Collocated Sensor Telemetry vs. ASMAE Posterior State Comparison */}
             {sensorComparison && (
               <div
@@ -336,7 +419,7 @@ export default function WorkspaceContextInspector({
                   {sensorComparison.narrative}
                 </p>
                 <div style={{ fontSize: "8.5px", color: "#64748b", fontStyle: "italic", borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: "4px" }}>
-                  Observed telemetry is calibrated hardware ground truth; ASMAE is a multi-source resilient ETKF state. Observations are assimilated, not replaced.
+                  {sensorComparison.supportDifferenceDisclaimer}
                 </div>
               </div>
             )}
