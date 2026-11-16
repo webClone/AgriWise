@@ -3,9 +3,8 @@ import { prisma } from "@/lib/prisma";
 import { authenticatedUserId, userOwnsPlot } from "@/lib/tenant-authorization";
 import { physicalObservationStore } from "@/lib/agribrain/physical-observation-store";
 import {
-  normalizeRawReading,
-  buildSoilDepthProfile,
   SoilDepthProfile,
+  STANDARD_SOIL_PROFILE_DEPTHS_CM,
 } from "@/lib/agribrain/physical-sensor-contract";
 
 export const dynamic = "force-dynamic";
@@ -18,7 +17,8 @@ export const dynamic = "force-dynamic";
  * - True multi-depth observation profiles with measured channels
  * - Explicit gaps for unmeasured depths (zero synthetic fabrication)
  * - Channel health, freshness (FRESH/STALE/OFFLINE), and calibration status
- * - Prohibits single-probe root-zone aggregation (< 3 depths)
+ * - Never fabricates 15cm or "VALID" calibration for legacy records without depth
+ * - Bounded query parameters (limit <= 100)
  * - Sealed historical publication isolation
  */
 export async function GET(
@@ -39,7 +39,8 @@ export async function GET(
     const { searchParams } = new URL(request.url);
     const requestedDeviceId = searchParams.get("deviceId") || undefined;
     const since = searchParams.get("since") || undefined;
-    const limit = searchParams.get("limit") ? parseInt(searchParams.get("limit")!, 10) : 50;
+    const rawLimit = searchParams.get("limit");
+    const limit = rawLimit ? Math.min(Math.max(1, parseInt(rawLimit, 10) || 50), 100) : 50;
 
     // Fetch authorized sensors for this plot
     const sensors = await prisma.sensor.findMany({
@@ -84,39 +85,40 @@ export async function GET(
 
     const deviceId = targetSensor.deviceId;
 
-    // 1. Check observations from runtime store
+    // 1. Fetch multi-depth profile from durable observation store
     let depthProfile: SoilDepthProfile = physicalObservationStore.getSoilDepthProfile(plotId, deviceId);
 
-    // If store has no readings yet (e.g. freshly restarted server), check Prisma
+    // If store has no multi-depth readings, check Prisma for fallback metadata
+    // Truthfulness invariant (W2-R05):
+    // If a legacy Prisma reading exists without registered depth mapping,
+    // do NOT invent 15cm nominal depth or claim VALID calibration!
     if (depthProfile.measuredCount === 0) {
       const latestPrismaReading = await prisma.sensorReading.findFirst({
         where: { sensorId: targetSensor.id },
         orderBy: { timestamp: "desc" },
       });
 
-      if (latestPrismaReading && latestPrismaReading.soilMoisture != null) {
-        const nominalDepth = 15; // Plot A empirical benchmark depth
-        const fallbackRecord = normalizeRawReading({
-          deviceId,
-          channelId: `ch_depth_${nominalDepth}cm`,
-          plotId,
-          variable: "soil_moisture_vwc",
-          rawValue: latestPrismaReading.soilMoisture,
-          rawUnit: "pct",
-          nominalDepthCm: nominalDepth,
-          deviceAcquiredAt: latestPrismaReading.timestamp.toISOString(),
-          serverReceivedAt: latestPrismaReading.timestamp.toISOString(),
-        });
-
-        depthProfile = buildSoilDepthProfile([fallbackRecord], {
-          plotId,
-          deviceId,
-          timestamp: latestPrismaReading.timestamp.toISOString(),
-        });
-      }
+      const standardDepths = [10, 15, 30, 45, 60, 90];
+      depthProfile = {
+        plotId,
+        deviceId,
+        timestamp: latestPrismaReading?.timestamp.toISOString() ?? new Date().toISOString(),
+        standardDepthsCm: standardDepths,
+        layers: standardDepths.map((nominalCm) => ({
+          nominalCm,
+          measured: false,
+          vwcFraction: null,
+          reading: null,
+          label: "Not measured —",
+        })),
+        measuredCount: 0,
+        rootZoneAggregateAllowed: false,
+        supportDifferenceDisclaimer:
+          "No registered multi-depth sensor observations available. Individual point measurements cannot be assumed to represent root-zone profile.",
+      };
     }
 
-    // 2. Fetch history time series
+    // 2. Fetch history time series (strictly bounded)
     const observations = physicalObservationStore.getObservationsForPlot(plotId, {
       deviceId,
       variable: "soil_moisture_vwc",
@@ -128,6 +130,7 @@ export async function GET(
     let channels = physicalObservationStore.getChannelsForDevice(deviceId);
 
     // If no dynamic channels registered, supply status from database metadata
+    // Truthfulness invariant (W2-R05): calibrationStatus is UNREGISTERED, depth is null
     if (channels.length === 0) {
       const now = Date.now();
       const lastSyncMs = targetSensor.lastSync ? targetSensor.lastSync.getTime() : 0;
@@ -136,17 +139,16 @@ export async function GET(
 
       channels = [
         {
-          channelId: "ch_depth_15cm",
+          channelId: "ch_unregistered",
           deviceId,
           variable: "soil_moisture_vwc",
-          depthCm: 15,
+          depthCm: null,
           status: isOnline ? "ACTIVE" : "OFFLINE",
           freshness: !isOnline ? "OFFLINE" : isStale ? "STALE" : "FRESH",
-          calibrationStatus: "VALID",
+          calibrationStatus: "UNREGISTERED",
           lastSeen: targetSensor.lastSync ? targetSensor.lastSync.toISOString() : null,
-          latestNormalizedValue:
-            depthProfile.layers.find((l) => l.nominalCm === 15)?.vwcFraction ?? null,
-          latestUnit: "fraction",
+          latestNormalizedValue: null,
+          latestUnit: null,
         },
       ];
     }
@@ -165,7 +167,7 @@ export async function GET(
           variable: o.variable,
           normalizedValue: o.normalizedValue,
           normalizedUnit: o.normalizedUnit,
-          depthCm: o.depthInterval?.nominalCm,
+          depthCm: o.depthInterval?.nominalCm ?? null,
           deviceAcquiredAt: o.deviceAcquiredAt,
           qaState: o.qaState,
         })),

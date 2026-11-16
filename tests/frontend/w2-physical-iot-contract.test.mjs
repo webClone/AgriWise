@@ -111,6 +111,7 @@ test("W2-01: Physical Observation Contract & Schema Validation", async (t) => {
       rawValue: 34.2,
       rawUnit: "pct",
       nominalDepthCm: 15,
+      depthInterval: { topCm: 10, bottomCm: 20, nominalCm: 15 },
       deviceAcquiredAt: "2026-09-08T12:00:00Z",
       serverReceivedAt: "2026-09-08T12:00:02Z",
     });
@@ -176,6 +177,7 @@ test("W2-01: Multi-Depth Soil Profile Contract & Zero Fabrication Gate", async (
       rawValue: 34.2,
       rawUnit: "pct",
       nominalDepthCm: 15,
+      depthInterval: { topCm: 10, bottomCm: 20, nominalCm: 15 },
       deviceAcquiredAt: "2026-09-08T12:00:00Z",
     });
 

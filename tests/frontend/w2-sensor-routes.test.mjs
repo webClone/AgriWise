@@ -158,11 +158,12 @@ test("W2-02 & W2-03: Route Boundaries, Auth, and Contract Enforcement", async (t
       assert.equal(res.status, 200);
       assert.equal(res.body.plotId, plotId);
       assert.equal(res.body.deviceId, "DEV-PLOT-A");
-      assert.equal(res.body.profile.measuredCount, 1);
+      assert.equal(res.body.profile.measuredCount, 0, "Legacy DB record without depth stays unknown (Gate B)");
       assert.equal(res.body.rootZoneAggregateAllowed, false);
-      assert.ok(res.body.supportDifferenceDisclaimer.includes("spatial and vertical supports"));
+      assert.ok(res.body.supportDifferenceDisclaimer.includes("Individual point measurements"));
       assert.equal(res.body.channels.length, 1);
-      assert.equal(res.body.channels[0].depthCm, 15);
+      assert.equal(res.body.channels[0].depthCm, null, "Legacy sensor without depth returns null depth");
+      assert.equal(res.body.channels[0].calibrationStatus, "UNREGISTERED", "Legacy sensor without depth returns UNREGISTERED calibration");
       assert.equal(res.headers["Cache-Control"], "private, no-store, max-age=0");
     }
   });

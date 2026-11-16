@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useLayer10 } from "@/hooks/useLayer10";
 import { useParcelAssessment } from "@/hooks/useParcelAssessment";
@@ -38,10 +38,10 @@ import {
   type AsmaeStateKey,
   type AsmaeStateAvailabilityResult,
 } from "@/lib/agribrain/asmae-13-states";
-import {
-  buildSoilDepthProfile,
-  normalizeRawReading,
+import type {
+  SoilDepthProfile,
 } from "@/lib/agribrain/physical-sensor-contract";
+import type { ChannelStatus } from "@/lib/agribrain/physical-observation-store";
 
 export default function WorkspaceContextInspector({
   farmId,
@@ -122,55 +122,70 @@ export default function WorkspaceContextInspector({
       : (currentAsmaeAvail.status as "QUALIFIED_SPATIAL" | "PLOT_ESTIMATE" | "UNAVAILABLE" | "BLOCKED");
   const activeStatusMeta = ASMAE_STATUS_META[canonicalStatusKey] || ASMAE_STATUS_META.UNAVAILABLE;
 
-  // Collocated in-situ moisture comparison for SENSOR entities
+  const entityProps = (matchedEntity?.properties || {}) as Record<string, any>;
+  const targetDeviceId = matchedEntity ? String(matchedEntity.entity_id || entityProps.deviceId || "") : "";
+
+  // W2-R06: Fetch owner-scoped depth profile directly from authorized API as single authority
+  const [fetchedProfile, setFetchedProfile] = useState<SoilDepthProfile | null>(null);
+  const [fetchedChannels, setFetchedChannels] = useState<ChannelStatus[]>([]);
+  const [profileLoading, setProfileLoading] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (selectedEntity.kind !== "SENSOR" || !plotId || !targetDeviceId) {
+      setFetchedProfile(null);
+      setFetchedChannels([]);
+      return;
+    }
+
+    const controller = new AbortController();
+    setProfileLoading(true);
+
+    fetch(
+      `/api/plots/${encodeURIComponent(plotId)}/sensors/depth-profile?deviceId=${encodeURIComponent(targetDeviceId)}`,
+      { signal: controller.signal }
+    )
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data && data.profile) {
+          setFetchedProfile(data.profile);
+          setFetchedChannels(data.channels || []);
+        } else {
+          setFetchedProfile(null);
+          setFetchedChannels([]);
+        }
+      })
+      .catch((err) => {
+        if (err.name !== "AbortError") {
+          setFetchedProfile(null);
+          setFetchedChannels([]);
+        }
+      })
+      .finally(() => {
+        setProfileLoading(false);
+      });
+
+    return () => {
+      controller.abort();
+    };
+  }, [selectedEntity.kind, plotId, targetDeviceId]);
+
+  const soilProfile = fetchedProfile;
+
+  // Collocated in-situ moisture comparison strictly from authorized profile (W2-R06 & W2-R07)
   const rootZoneAvail = resolveAsmaeStateAvailability("root_zone_water", pubSurfaces, posteriorRecord, pubInventory);
+  const measuredMoistureLayer = fetchedProfile?.layers?.find((l) => l.measured && l.vwcFraction !== null);
+  const sensorMoistureValue = measuredMoistureLayer ? measuredMoistureLayer.vwcFraction : null;
+  const sensorMoistureDepth = measuredMoistureLayer?.nominalCm ?? null;
+
   const sensorComparison =
-    matchedEntity && selectedEntity.kind === "SENSOR"
+    matchedEntity && selectedEntity.kind === "SENSOR" && sensorMoistureValue !== null
       ? compareSensorWithCollocatedAsmae(
           {
-            soilMoisture: (matchedEntity.properties as any)?.latestReading?.soilMoisture ?? null,
-            temperature: (matchedEntity.properties as any)?.latestReading?.temperature ?? null,
-            depthCm: matchedEntity.spatial_support?.depth_cm ?? 15,
+            soilMoisture: sensorMoistureValue,
+            depthCm: sensorMoistureDepth,
           },
           rootZoneAvail
         )
-      : null;
-
-  const entityProps = (matchedEntity?.properties || {}) as Record<string, any>;
-  const latestMoisture = entityProps?.latestReading?.soilMoisture ?? null;
-  const sensorDepth = matchedEntity?.spatial_support?.depth_cm ?? 15;
-  const channelRecords = Array.isArray(entityProps.channelReadings) && entityProps.channelReadings.length > 0
-    ? entityProps.channelReadings.map((cr: any) =>
-        normalizeRawReading({
-          deviceId: String(matchedEntity.entity_id || entityProps.deviceId || "sensor"),
-          channelId: cr.channelId || `ch_depth_${cr.depthCm ?? 15}cm`,
-          plotId: String(entityProps.plotId || plotId || "plot"),
-          variable: cr.variable || "soil_moisture_vwc",
-          rawValue: typeof cr.rawValue === "number" ? cr.rawValue : (typeof cr.soilMoisture === "number" ? cr.soilMoisture : 0),
-          rawUnit: cr.rawUnit || "pct",
-          nominalDepthCm: cr.depthCm ?? 15,
-        })
-      )
-    : latestMoisture != null
-    ? [
-        normalizeRawReading({
-          deviceId: String(matchedEntity.entity_id || entityProps.deviceId || "sensor"),
-          channelId: `ch_depth_${sensorDepth}cm`,
-          plotId: String(entityProps.plotId || plotId || "plot"),
-          variable: "soil_moisture_vwc",
-          rawValue: typeof latestMoisture === "number" ? latestMoisture : 0,
-          rawUnit: "pct",
-          nominalDepthCm: sensorDepth,
-        }),
-      ]
-    : [];
-
-  const soilProfile =
-    matchedEntity && selectedEntity.kind === "SENSOR" && channelRecords.length > 0
-      ? buildSoilDepthProfile(channelRecords, {
-          plotId: String(entityProps.plotId || plotId || "plot"),
-          deviceId: String(matchedEntity.entity_id || entityProps.deviceId || "sensor"),
-        })
       : null;
   const entityCoords = matchedEntity?.geometry?.type==="Point" ? matchedEntity.geometry.coordinates : null;
   const footprintBounds = matchedEntity?.geometry?.type !== "Point" ? geometryBounds(matchedEntity?.geometry) : null;
@@ -418,7 +433,9 @@ export default function WorkspaceContextInspector({
                     <div style={{ fontSize: "13px", fontWeight: 750, color: "#f8fafc", margin: "2px 0" }}>
                       {sensorComparison.sensorValue !== null ? `${(sensorComparison.sensorValue * 100).toFixed(1)}% VWC` : "N/A"}
                     </div>
-                    <div style={{ fontSize: "9px", color: "#94a3b8" }}>In-situ probe ({matchedEntity.spatial_support?.depth_cm ?? 15}cm)</div>
+                    <div style={{ fontSize: "9px", color: "#94a3b8" }}>
+                      In-situ probe ({sensorComparison.sensorDepthCm != null ? `${sensorComparison.sensorDepthCm}cm` : "depth uncalibrated"})
+                    </div>
                   </div>
                   <div style={{ background: "rgba(255,255,255,0.03)", padding: "6px 8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.06)" }}>
                     <div style={{ fontSize: "9px", fontWeight: 800, color: "#34d399", letterSpacing: "0.05em" }}>SCIENTIFIC ESTIMATE</div>
@@ -434,12 +451,31 @@ export default function WorkspaceContextInspector({
                   padding: "3px 6px",
                   borderRadius: "4px",
                   display: "inline-block",
-                  background: sensorComparison.withinOneSigma ? "rgba(52, 211, 153, 0.15)" : "rgba(251, 146, 60, 0.15)",
-                  color: sensorComparison.withinOneSigma ? "#34d399" : "#fb923c",
-                  border: sensorComparison.withinOneSigma ? "1px solid rgba(52, 211, 153, 0.3)" : "1px solid rgba(251, 146, 60, 0.3)",
+                  background:
+                    sensorComparison.comparisonStatus === "COMPARABLE"
+                      ? "rgba(52, 211, 153, 0.15)"
+                      : sensorComparison.comparisonStatus === "DIVERGENT"
+                      ? "rgba(251, 146, 60, 0.15)"
+                      : "rgba(148, 163, 184, 0.15)",
+                  color:
+                    sensorComparison.comparisonStatus === "COMPARABLE"
+                      ? "#34d399"
+                      : sensorComparison.comparisonStatus === "DIVERGENT"
+                      ? "#fb923c"
+                      : "#94a3b8",
+                  border:
+                    sensorComparison.comparisonStatus === "COMPARABLE"
+                      ? "1px solid rgba(52, 211, 153, 0.3)"
+                      : sensorComparison.comparisonStatus === "DIVERGENT"
+                      ? "1px solid rgba(251, 146, 60, 0.3)"
+                      : "1px solid rgba(148, 163, 184, 0.3)",
                   marginBottom: "6px",
                 }}>
-                  {sensorComparison.withinOneSigma ? "✓ Consistent (Within 1σ Envelope)" : "⚠ Discrepancy (Outside 1σ)"}
+                  {sensorComparison.comparisonStatus === "COMPARABLE"
+                    ? "✓ Consistent (Within 1σ Envelope)"
+                    : sensorComparison.comparisonStatus === "DIVERGENT"
+                    ? "⚠ Discrepancy (Outside 1σ)"
+                    : "ℹ Not comparable (No posterior uncertainty σ)"}
                 </div>
                 <p style={{ fontSize: "10px", color: "#cbd5e1", lineHeight: 1.35, margin: "0 0 6px" }}>
                   {sensorComparison.narrative}

@@ -506,6 +506,8 @@ export function sampleSirePixel(
  * Compares an in-situ sensor reading with collocated ASMAE state (e.g. root_zone_water).
  * Strictly maintains epistemic separation between OBSERVED_TELEMETRY and SCIENTIFIC_ESTIMATE.
  */
+export type SensorComparisonStatus = "COMPARABLE" | "NOT_COMPARABLE" | "DIVERGENT";
+
 export function compareSensorWithCollocatedAsmae(
   sensorReading: {
     soilMoisture?: number | null;
@@ -526,6 +528,7 @@ export function compareSensorWithCollocatedAsmae(
   withinOneSigma: boolean;
   withinTwoSigma: boolean;
   zScore: number | null;
+  comparisonStatus: SensorComparisonStatus;
   narrative: string;
   supportDifferenceDisclaimer: string;
   verticalSupportDifference: boolean;
@@ -556,6 +559,7 @@ export function compareSensorWithCollocatedAsmae(
       withinOneSigma: false,
       withinTwoSigma: false,
       zScore: null,
+      comparisonStatus: "NOT_COMPARABLE",
       narrative: "Telemetry or scientific estimate missing for collocated comparison.",
       supportDifferenceDisclaimer,
       verticalSupportDifference: sensorDepthCm !== null,
@@ -575,6 +579,7 @@ export function compareSensorWithCollocatedAsmae(
       withinOneSigma: false,
       withinTwoSigma: false,
       zScore: null,
+      comparisonStatus: "NOT_COMPARABLE",
       narrative: `Observed telemetry (${(sensorValue * 100).toFixed(1)}% VWC) reported alongside ASMAE estimate (${(mean * 100).toFixed(1)}%), but posterior uncertainty (sigma) is unavailable; statistical consistency envelope cannot be evaluated without verified posterior variance.`,
       supportDifferenceDisclaimer,
       verticalSupportDifference: sensorDepthCm !== null,
@@ -606,6 +611,7 @@ export function compareSensorWithCollocatedAsmae(
     withinOneSigma,
     withinTwoSigma,
     zScore,
+    comparisonStatus: withinOneSigma ? "COMPARABLE" : "DIVERGENT",
     narrative,
     supportDifferenceDisclaimer,
     verticalSupportDifference: sensorDepthCm !== null,

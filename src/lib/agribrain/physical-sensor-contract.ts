@@ -113,6 +113,7 @@ export interface PhysicalObservationRecord {
   readonly physicalPlacement: PhysicalPlacement | null;
   readonly deviceAcquiredAt: string; // ISO 8601 UTC
   readonly serverReceivedAt: string; // ISO 8601 UTC
+  readonly timeBasis?: "device_acquired_at" | "server_received_at";
   readonly calibration: SensorCalibration | null;
   readonly qaState: ObservationQAState;
   readonly qaDetails: QADetails;
@@ -250,6 +251,15 @@ export function validatePhysicalObservation(record: unknown): { valid: boolean; 
 
 /**
  * Normalizes raw sensor readings into canonical PhysicalObservationRecord.
+ *
+ * Strict unit enforcement (W2-R08):
+ * - If rawUnit === "pct", always divide by 100 regardless of magnitude (e.g. 0.5% -> 0.005, 34.2% -> 0.342).
+ * - If rawUnit === "fraction", keep as fraction (e.g. 0.342 -> 0.342).
+ * - Never guess based on numeric value magnitude!
+ *
+ * Depth interval preservation (W2-R09):
+ * - If depthInterval is declared in payload, preserve its exact topCm and bottomCm.
+ * - Do NOT invent an assumed nominal ±5cm interval.
  */
 export function normalizeRawReading(input: {
   deviceId: string;
@@ -259,8 +269,10 @@ export function normalizeRawReading(input: {
   rawValue: number;
   rawUnit: string;
   nominalDepthCm?: number | null;
+  depthInterval?: DepthInterval | null;
   deviceAcquiredAt?: string;
   serverReceivedAt?: string;
+  timeBasis?: "device_acquired_at" | "server_received_at";
   physicalPlacement?: PhysicalPlacement | null;
   calibration?: SensorCalibration | null;
   protocol?: "HTTP_WEBHOOK" | "LORAWAN" | "MQTT";
@@ -279,45 +291,65 @@ export function normalizeRawReading(input: {
   };
   const rawPayloadHash = computeRawPayloadHash(rawPayload);
 
-  // Normalize units
+  // Normalize units strictly from declared unit, never magnitude (W2-R08)
   let normalizedValue = input.rawValue;
   let normalizedUnit = input.rawUnit;
+  let unitValid = true;
 
   if (input.variable === "soil_moisture_vwc") {
     normalizedUnit = "fraction";
-    if (input.rawValue > 1.0) {
+    const u = String(input.rawUnit || "").toLowerCase().trim();
+    if (u === "pct" || u === "percentage" || u === "%") {
       normalizedValue = Number((input.rawValue / 100).toFixed(4));
-    } else {
+    } else if (u === "fraction" || u === "m3_m3" || u === "m3/m3" || u === "ratio") {
       normalizedValue = Number(input.rawValue.toFixed(4));
+    } else {
+      unitValid = false;
+      normalizedValue = input.rawValue;
     }
   } else if (input.variable === "soil_temperature_c" || input.variable === "air_temperature_c") {
     normalizedUnit = "celsius";
-    if (input.rawUnit === "fahrenheit" || input.rawUnit === "F") {
+    const u = String(input.rawUnit || "").toLowerCase().trim();
+    if (u === "fahrenheit" || u === "f") {
       normalizedValue = Number((((input.rawValue - 32) * 5) / 9).toFixed(2));
-    } else {
+    } else if (u === "celsius" || u === "c" || u === "degc" || u === "°c") {
       normalizedValue = Number(input.rawValue.toFixed(2));
+    } else {
+      unitValid = false;
+      normalizedValue = input.rawValue;
     }
   }
 
   // Evaluate QA
   const [minVal, maxVal] = PHYSICAL_VARIABLE_LIMITS[input.variable] || [-Infinity, Infinity];
-  const passedRange = normalizedValue >= minVal && normalizedValue <= maxVal;
-  const qaState: ObservationQAState = passedRange ? "VALID" : "OUT_OF_RANGE";
+  const passedRange = unitValid && normalizedValue >= minVal && normalizedValue <= maxVal;
+  const qaState: ObservationQAState = !unitValid ? "SUSPECT" : passedRange ? "VALID" : "OUT_OF_RANGE";
   const qaDetails: QADetails = {
     passedRange,
     passedSpike: true,
     passedFlatline: true,
-    reason: passedRange ? undefined : `Normalized value ${normalizedValue} outside physical limits [${minVal}, ${maxVal}]`,
+    reason: !unitValid
+      ? `Unrecognized unit '${input.rawUnit}' for variable ${input.variable}`
+      : passedRange
+      ? undefined
+      : `Normalized value ${normalizedValue} outside physical limits [${minVal}, ${maxVal}]`,
   };
 
   const readingId = `obs_${input.deviceId}_${input.channelId}_${Date.parse(deviceAcquiredAt)}`;
 
+  // Preserve declared depth interval if provided; do NOT invent assumed ±5cm interval (W2-R09)
   const depthInterval: DepthInterval | null =
-    typeof input.nominalDepthCm === "number" && input.nominalDepthCm >= 0
+    input.depthInterval && typeof input.depthInterval.nominalCm === "number"
+      ? {
+          nominalCm: input.depthInterval.nominalCm,
+          topCm: input.depthInterval.topCm,
+          bottomCm: input.depthInterval.bottomCm,
+        }
+      : typeof input.nominalDepthCm === "number" && input.nominalDepthCm >= 0
       ? {
           nominalCm: input.nominalDepthCm,
-          topCm: Math.max(0, input.nominalDepthCm - 5),
-          bottomCm: input.nominalDepthCm + 5,
+          topCm: input.nominalDepthCm,
+          bottomCm: input.nominalDepthCm,
         }
       : null;
 
@@ -335,6 +367,7 @@ export function normalizeRawReading(input: {
     physicalPlacement: input.physicalPlacement || null,
     deviceAcquiredAt,
     serverReceivedAt,
+    timeBasis: input.timeBasis || (input.deviceAcquiredAt ? "device_acquired_at" : "server_received_at"),
     calibration: input.calibration || null,
     qaState,
     qaDetails,
@@ -397,11 +430,26 @@ export function buildSoilDepthProfile(
     };
   });
 
-  const measuredCount = layers.filter((l) => l.measured).length;
+  const measuredLayers = layers.filter((l) => l.measured && l.reading);
+  const measuredCount = measuredLayers.length;
 
-  // Non-negotiable rule: A single depth (e.g. 15cm) CANNOT automatically represent
-  // the full root zone. An aggregate requires explicit soil-layer model and depth weighting.
-  const rootZoneAggregateAllowed = measuredCount >= 3;
+  const distinctDepths = measuredLayers.map((l) => l.nominalCm);
+  const minDepth = distinctDepths.length > 0 ? Math.min(...distinctDepths) : Infinity;
+  const maxDepth = distinctDepths.length > 0 ? Math.max(...distinctDepths) : -Infinity;
+  const verticalSpan = maxDepth - minDepth;
+
+  const countValid = distinctDepths.length >= 3;
+  const spanValid = verticalSpan >= 45;
+  const shallowestValid = minDepth <= 20;
+  const allCleanQa = measuredLayers.every((l) => l.reading?.qaState === "VALID");
+  const allCalibrated = measuredLayers.every((l) => l.reading?.calibration != null && !l.reading.calibration.isExpired);
+
+  // Non-negotiable Layer 0 Rule (W2-R10):
+  // A single depth (e.g. 15cm) CANNOT represent the full root zone.
+  // Aggregation requires representative vertical span (>= 45cm), shallowest depth (<= 20cm),
+  // >= 3 distinct depths, verified valid calibration on all layers, and clean QA.
+  const rootZoneAggregateAllowed =
+    countValid && spanValid && shallowestValid && allCleanQa && allCalibrated;
 
   return {
     plotId,
