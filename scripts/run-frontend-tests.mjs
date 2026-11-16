@@ -16,6 +16,8 @@ if (testFiles.length === 0) {
   process.exit(1);
 }
 
+console.log(`[test:frontend] Executing all ${testFiles.length} test files in tests/frontend...`);
+
 const result = spawnSync(
   process.execPath,
   ["--experimental-vm-modules", "--test", ...testFiles],
