@@ -362,7 +362,7 @@ def test_hashless_sensor_publication_receipt_cannot_supply_historical_availabili
         first_available_at=False,
     )
 
-    # 1. Item with mismatched/hashless publication receipt
+    # 1. Item with hashless publication receipt (no content_hash in publication receipt)
     item_without_hash = EvidenceItem(
         evidence_id="ev_sensor_unbound",
         plot_id="plot-a",
@@ -383,7 +383,7 @@ def test_hashless_sensor_publication_receipt_cannot_supply_historical_availabili
     item_without_hash.publication_receipt = {
         "receipt_id": "rcpt_unbound",
         "published_at": t_pub.isoformat(),
-        "content_hash": "mismatched_hash_000",
+        # No content_hash: hashless publication receipt
     }
 
     avail_unbound, reason = ta.is_available_at_cutoff(

@@ -75,6 +75,9 @@ def sign_test_sensor_receipt_data(
     return "ed25519:" + sig_bytes.hex()
 
 
+_DEFAULT_FIRST_AVAIL = object()
+
+
 def create_signed_sensor_receipt(
     receipt_id: str,
     issuer: str,
@@ -85,7 +88,7 @@ def create_signed_sensor_receipt(
     status: str = "active",
     content_digest: Optional[str] = None,
     observation_instant: Optional[str] = None,
-    first_available_at: Optional[str] = None,
+    first_available_at: Any = _DEFAULT_FIRST_AVAIL,
     revocation_epoch: Optional[int] = None,
     private_key: Optional[Any] = None,
     reading_value: Optional[Any] = None,
@@ -110,7 +113,7 @@ def create_signed_sensor_receipt(
         )
 
     eff_epoch = get_revocation_store().revocation_epoch if revocation_epoch is None else int(revocation_epoch)
-    eff_first_avail = observation_instant if first_available_at is None else (None if first_available_at is False else first_available_at)
+    eff_first_avail = observation_instant if first_available_at is _DEFAULT_FIRST_AVAIL else first_available_at
     sig = sign_test_sensor_receipt_data(
         receipt_id=receipt_id,
         issuer=issuer,
