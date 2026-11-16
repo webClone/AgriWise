@@ -8,6 +8,7 @@ const map=read("src/components/farm/map/PlotMapShell.tsx");
 const canvas=read("src/components/farm/workspace/WorkspaceSpatialCanvas.tsx");
 const shell=read("src/components/farm/workspace/PlotWorkspaceShell.tsx");
 const sceneControls=read("src/components/farm/workspace/WorkspaceSceneControlsP06.tsx");
+const sceneControlsCss=read("src/components/farm/workspace/p06-scene-controls.css");
 const legend=read("src/components/farm/map/PlotScientificLegend.tsx");
 const legendCss=read("src/components/farm/map/plot-scientific-legend.css");
 const status=read("src/components/farm/workspace/WorkspaceScientificStatus.tsx");
@@ -38,12 +39,12 @@ test("P07-G02: appearance colors and cross-section continue through existing qua
   assert.match(sceneControls,/disabled=\{!canTransect\}/);
 });
 
-test("P07-G03: map evidence disclosure is interactive, keyboard-accessible, and collapsible",()=>{
+test("P07-G03: map evidence disclosure is interactive, keyboard-accessible, and collapsible in V2",()=>{
   assert.match(legend,/data-testid="p07-map-evidence-toggle"/);
   assert.match(legend,/aria-expanded=\{expanded\}/);
   assert.match(legend,/aria-controls="akaloris-legend-detail"/);
   assert.match(legend,/id="akaloris-legend-detail"/);
-  assert.match(legendCss,/pointer-events: auto/);
+  assert.match(legendCss,/\.akaloris-scientific-legend-v2\s*\{[^}]*pointer-events:\s*auto/);
   assert.match(legendCss,/\.akaloris-legend-toggle:focus-visible/);
 });
 
@@ -89,17 +90,31 @@ test("P07-G04 & P07-G05 & P07-G06: coordinated inspector collapse and expansion 
   assert.equal(plotChangedState.selectedEntity.id, null, "plot transition clears selected entity");
 });
 
-test("P07-G07: mobile layout positions legend away from timeline collision",()=>{
-  assert.match(legendCss,/@media \(max-width: 850px\)/);
-  assert.match(legendCss,/top: 60px/);
-  assert.match(legendCss,/bottom: auto/);
+test("P07-G05 Mobile: entity selection automatically reveals mobile inspector drawer",()=>{
+  assert.match(shell,/state\.selectedEntity\.id !== prevSelectedEntityIdRef\.current/);
+  assert.match(shell,/setMobileInspectorOpen\(true\)/);
+  assert.match(shell,/setMobileInspectorOpen\(false\)/);
 });
 
-test("P07-G08: workspace mode scoped exclusively to native V2; fallback legacy dashboard intact",()=>{
-  assert.match(canvas,/workspaceMode=\{workspaceMode\}/);
-  assert.match(shell,/\sworkspaceMode\s/);
+test("P07-G07 & P1 Positioning: scene controls and evidence disclosure clear top context band",()=>{
+  // Scene controls clear top context band on desktop and mobile
+  assert.match(sceneControlsCss,/inset-block-start:\s*calc\(var\(--pw-topbar-clearance,\s*111px\)\s*\+\s*8px\)/);
+  assert.match(sceneControlsCss,/inset-block-start:\s*calc\(var\(--pw-topbar-clearance,\s*110px\)\s*\+\s*46px\)/);
+  // Map evidence disclosure clears top context band in V2
+  assert.match(legendCss,/inset-block-start:\s*calc\(var\(--pw-topbar-clearance,\s*111px\)\s*\+\s*8px\)/);
+  assert.match(legendCss,/inset-block-start:\s*calc\(var\(--pw-topbar-clearance,\s*110px\)\s*\+\s*94px\)/);
+});
+
+test("P07-G08: strict legacy presentation parity; fallback dashboard completely unchanged",()=>{
+  // Feature gate routes cleanly
   assert.match(gate,/if \(!isPlotWorkspaceV2Enabled\(\)\) return <PlotDashboard \{\.\.\.props\} \/>/);
+  // PlotMapShell preserves legacy floating card when !workspaceMode
+  assert.match(map,/!props\.workspaceMode && \(/);
   assert.match(map,/style=\{\{ top: "340px", right: "344px" \}\}/);
+  // PlotScientificLegend preserves legacy static layout with pointer-events: none
+  assert.match(legend,/if \(!workspaceMode\)/);
+  assert.match(legend,/akaloris-scientific-legend-legacy/);
+  assert.match(legendCss,/\.akaloris-scientific-legend-legacy\s*\{[^}]*pointer-events:\s*none/);
 });
 
 test("P07: compact disclosure retains separate scientific and operational epistemic status",()=>{

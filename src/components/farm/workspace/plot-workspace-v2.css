@@ -402,6 +402,9 @@
   .pw-shell.pw-mobile-inspector-open .pw-context-slot {
     display: block;
   }
+  .pw-shell.pw-mobile-inspector-open .pw-mobile-inspector-button {
+    display: none;
+  }
   .pw-mobile-inspector-button {
     display: inline-flex;
     position: absolute;

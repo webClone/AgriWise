@@ -18,13 +18,14 @@ interface PlotScientificLegendProps {
   scene: SceneEvidence | null | undefined;
   degraded?: boolean;
   canInterpret?: boolean;
+  workspaceMode?: boolean;
 }
 
 const show = (value: unknown): string =>
   typeof value === "string" && value.trim() ? value.trim() : "Not reported";
 
 export default function PlotScientificLegend({
-  layerName, surface, scene, degraded = false, canInterpret = false,
+  layerName, surface, scene, degraded = false, canInterpret = false, workspaceMode = false,
 }: PlotScientificLegendProps) {
   const [expanded, setExpanded] = useState(false);
 
@@ -52,9 +53,26 @@ export default function PlotScientificLegend({
   const basemapDate = show(scene?.scene_date);
   const basemapLabel = scene?.is_mock ? "Simulated visual basemap" : "Visual basemap";
 
+  // P07.02 / P07-G08: Strict legacy fallback. Non-V2 dashboard keeps the exact static aside.
+  if (!workspaceMode) {
+    return (
+      <aside className="akaloris-scientific-legend akaloris-scientific-legend-legacy" aria-label="Scientific map evidence">
+        <div className="akaloris-scientific-legend-head"><span>MAP EVIDENCE</span><strong>{layerName}</strong></div>
+        <dl>
+          <div><dt>01 / Scientific source and date</dt><dd>{source} · {observationDate}</dd></div>
+          <div><dt>02 / Units and source resolution</dt><dd>{units} · {resolution}</dd></div>
+          <div><dt>03 / Provenance / support</dt><dd>{evidenceClass}</dd></div>
+          <div><dt>04 / Interpretation status</dt><dd>{state}</dd></div>
+        </dl>
+        <p>Boundary: user-registered geometry; not a surveyed cadastral outline.</p>
+        <p>{basemapLabel}: {basemapProvider} · {basemapDate}. Not scientific evidence.</p>
+      </aside>
+    );
+  }
+
   return (
     <aside
-      className={`akaloris-scientific-legend ${expanded ? "is-expanded" : "is-collapsed"}`}
+      className={`akaloris-scientific-legend akaloris-scientific-legend-v2 ${expanded ? "is-expanded" : "is-collapsed"}`}
       aria-label="Scientific map evidence"
     >
       <button

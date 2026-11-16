@@ -88,6 +88,7 @@ export default function WorkspaceContextInspector({
         <button
           type="button"
           className="pw-icon-button"
+          data-testid="p07-inspector-collapse-btn"
           onClick={onCollapse}
           title="Collapse inspector"
           aria-label="Collapse Context Inspector"

@@ -1078,6 +1078,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
         scene={visualSource}
         degraded={isLowConfidence}
         canInterpret={canInterpretDiagnostically}
+        workspaceMode={Boolean(props.workspaceMode)}
       />}
 
       {/* P07: Legacy retains its floating map dock; V2 scene header hosts the unified View control */}

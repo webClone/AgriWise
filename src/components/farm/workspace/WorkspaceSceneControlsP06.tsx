@@ -213,7 +213,7 @@ export default function WorkspaceSceneControlsP06({
       <ul>
        {zones.map(zone=>(
         <li key={`zone-${zone.zone_id}`}>
-          <button type="button" aria-current={selectedId===zone.zone_id?"true":undefined} onClick={()=>onSelectZone(zone.zone_id)}>
+          <button type="button" aria-current={selectedId===zone.zone_id?"true":undefined} onClick={()=>{setDirectory(false);onSelectZone(zone.zone_id);}}>
            <span>Zone · {zone.label||zone.zone_id}</span><small>Scientific zone</small>
           </button>
         </li>
@@ -227,7 +227,7 @@ export default function WorkspaceSceneControlsP06({
          const provisional=entity.spatial_support?.location_source==="USER_DECLARED";
          return <li key={entity.envelope_id}>
           <button type="button" aria-current={selectedId===entity.entity_id||selectedId===entity.envelope_id?"true":undefined}
-            onClick={()=>onSelectEntity(entity)}>
+            onClick={()=>{setDirectory(false);onSelectEntity(entity);}}>
             <span>{entity.entity_kind.replaceAll("_"," ")} · {label}</span>
             <small>{provisional?"OWNER-DECLARED · ":demo?"DEMO · ":""}{located?hidden?"Layer hidden":`${entity.geometry?.type} mapped`:"Location not registered (list only)"}</small>
           </button>

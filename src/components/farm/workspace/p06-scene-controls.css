@@ -1,6 +1,6 @@
 
 /* P06 — Spatial-first scene controls, independent of scientific source policy. */
-.pw-scene-controls{position:absolute;inset-block-start:80px;inset-inline-end:16px;z-index:47;display:flex;flex-direction:column;align-items:flex-end;gap:8px;pointer-events:none;max-width:min(340px,calc(100% - 20px));color:#f3f7f4}
+.pw-scene-controls{position:absolute;inset-block-start:calc(var(--pw-topbar-clearance, 111px) + 8px);inset-inline-end:16px;z-index:47;display:flex;flex-direction:column;align-items:flex-end;gap:8px;pointer-events:none;max-width:min(340px,calc(100% - 20px));color:#f3f7f4}
 .pw-scene-controls button,.pw-scene-controls input{pointer-events:auto}
 .pw-scene-header{display:flex;gap:6px;pointer-events:auto}
 .pw-scene-header button{display:flex;align-items:center;gap:6px;padding:8px 10px;background:#122721ee;color:#e6f4e9;border:1px solid #688d7966;border-radius:10px;font-weight:600;font-size:12px;box-shadow:0 8px 24px #0005}
@@ -24,4 +24,4 @@
 .pw-scene-directory li button small{color:#a4bdab;font-size:10px}
 .pw-scene-directory li button[aria-current="true"]{border-color:#31c6df;background:#176d7e40}
 .pw-scene-controls button:focus-visible,.pw-scene-controls input:focus-visible{outline:2px solid #58d5ed;outline-offset:2px}
-@media(max-width:820px){.pw-scene-controls{inset-block-start:64px;inset-inline-end:8px}.pw-scene-header button{padding:7px 8px}.pw-scene-panel{width:min(290px,calc(100vw - 75px));max-height:43vh}}
+@media(max-width:820px){.pw-scene-controls{inset-block-start:calc(var(--pw-topbar-clearance, 110px) + 46px);inset-inline-end:8px}.pw-scene-header button{padding:7px 8px}.pw-scene-panel{width:min(290px,calc(100vw - 75px));max-height:43vh}}

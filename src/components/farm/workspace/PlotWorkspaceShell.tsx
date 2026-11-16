@@ -39,6 +39,21 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
   const plotId = props.plotId || String(props.plot?.id || "");
   const { state, setActiveTool, toggleInspector, selectEntity, toggleSceneLayer, setSceneLayerOpacity, setAllSceneLayersVisibility, clearSelection } = usePlotWorkspace();
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
+  const prevSelectedEntityIdRef = useRef<string | null>(null);
+
+  // P07.02 / P07-G05 Mobile: Selecting an entity automatically reveals the mobile inspector drawer
+  useEffect(() => {
+    if (state.selectedEntity.id && state.selectedEntity.id !== prevSelectedEntityIdRef.current) {
+      setMobileInspectorOpen(true);
+    } else if (!state.selectedEntity.id && prevSelectedEntityIdRef.current) {
+      setMobileInspectorOpen(false);
+    }
+    prevSelectedEntityIdRef.current = state.selectedEntity.id;
+  }, [state.selectedEntity.id]);
+
+  useEffect(() => {
+    setMobileInspectorOpen(false);
+  }, [plotId]);
   const [investigation, setInvestigation] = useState<P04InvestigationKind | null>(null);
   const [hostMode, setHostMode] = useState<P04HostMode>("context");
   const [activeSpecializedTool, setActiveSpecializedTool] = useState<WorkspaceQuickAction | null>(null);
