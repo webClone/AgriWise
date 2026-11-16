@@ -288,7 +288,8 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
     <div
       className={`pw-shell ${desktopInspectorOpen ? "pw-inspector-expanded" : "pw-inspector-collapsed"} ${mobileInspectorOpen ? "pw-mobile-inspector-open" : ""}`}
       data-testid="plot-workspace-v2"
-      data-workspace-version="p03"
+      data-workspace-version="p07-candidate-01"
+      data-spatial-mode={drawingKind ? editingSession?.mode === "revise" ? "revising" : "drawing" : state.selectedEntity.id ? "selected" : "idle"}
       data-workspace-generation={state.generationId}
       aria-label="Akaloris Plot Workspace"
     >
@@ -339,6 +340,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
               coordinates: draftCoordinates,
             } : null}
             onCanvasMapClick={handleCanvasMapClick}
+            workspaceMode
             onZoneClick={(zoneId) => {
               if (drawingKind) return;
               scientific.l10.setSelectedZone(zoneId);

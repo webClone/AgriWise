@@ -144,9 +144,12 @@ export default function WorkspaceGeometryAuthoringHUD({
       <div
         className="pw-authoring-hud"
         data-testid="p06-authoring-hud"
+        role="status"
+        aria-live="polite"
+        data-authoring-mode={isRevise ? "revising" : "drawing"}
         style={{
           position: "absolute",
-          top: "16px",
+          top: "calc(var(--pw-topbar-clearance, 0px) + 8px)",
           left: "50%",
           transform: "translateX(-50%)",
           zIndex: 40,

@@ -34,6 +34,7 @@ interface WorkspaceSpatialCanvasProps {
   onEntityClick?: (entity: WorkspaceFeatureEnvelope) => void;
   draftGeometry?: WorkspaceDraftGeometryProps | null;
   onCanvasMapClick?: (coordinate: [number, number]) => void;
+  workspaceMode?: boolean;
 }
 
 /**
@@ -57,6 +58,7 @@ export default function WorkspaceSpatialCanvas({
   onEntityClick,
   draftGeometry,
   onCanvasMapClick,
+  workspaceMode,
 }: WorkspaceSpatialCanvasProps) {
   const deviationSurface =
     l10.activeMode === "veg_attention"
@@ -97,6 +99,7 @@ export default function WorkspaceSpatialCanvas({
           onEntityClick={onEntityClick}
           draftGeometry={draftGeometry}
           onCanvasMapClick={onCanvasMapClick}
+          workspaceMode={workspaceMode}
         />
       )}
     </div>

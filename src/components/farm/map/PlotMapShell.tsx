@@ -72,6 +72,7 @@ interface PlotMapShellProps {
   sceneGeneration?: number;
   draftGeometry?: WorkspaceDraftGeometryProps | null;
   onCanvasMapClick?: (coordinate: [number, number]) => void;
+  workspaceMode?: boolean;
 }
 
 export default function PlotMapShell(props: PlotMapShellProps) {
@@ -146,6 +147,8 @@ export default function PlotMapShell(props: PlotMapShellProps) {
   const [hoverCoord, setHoverCoord] = useState<{ lng: number; lat: number } | null>(null);
   const [hoveredSampleIndex, setHoveredSampleIndex] = useState<number | null>(null);
   const [showProxyBanner, setShowProxyBanner] = useState(false);
+  const [showWorkspaceViewTools, setShowWorkspaceViewTools] = useState(false);
+
   // Track last hovered grid cell to avoid re-renders on sub-cell mouse movement
   const lastHoverCellRef = useRef<string | null>(null);
 
@@ -1047,13 +1050,21 @@ export default function PlotMapShell(props: PlotMapShellProps) {
         canInterpret={canInterpretDiagnostically}
       />}
 
-      {/* --- PREMIUM CONTROL DOCK (Top-Right) --- */}
-      <div 
-        className="absolute z-40 flex flex-col gap-3 animate-fadeIn"
-        style={{
-          top: "340px",
-          right: "344px",
-        }}
+      {/* P07: Legacy retains its map dock; V2 uses a compact right-hand reveal.
+          This is a display control only; the existing scientific gates remain in place. */}
+      {props.workspaceMode && (
+        <div className="pw-p07-map-tools-trigger">
+          <button type="button" data-testid="p07-map-view-toggle"
+            aria-expanded={showWorkspaceViewTools} aria-controls="p07-map-view-panel"
+            onClick={()=>setShowWorkspaceViewTools(open=>!open)}>
+            View &amp; analysis
+          </button>
+        </div>
+      )}
+      {(!props.workspaceMode || showWorkspaceViewTools) && <div
+        id={props.workspaceMode ? "p07-map-view-panel" : undefined} 
+        className={props.workspaceMode ? "pw-p07-map-tools-panel" : "absolute z-40 flex flex-col gap-3 animate-fadeIn"}
+        style={props.workspaceMode ? undefined : {top:"340px",right:"344px"}}
       >
         <div className="backdrop-blur-md bg-slate-900/80 border border-white/10 rounded-xl p-3 shadow-2xl flex flex-col gap-2.5 min-w-[200px] transition-all">
           <div className="text-white/60 text-[10px] font-bold tracking-wider uppercase">
@@ -1112,7 +1123,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
             📏 {transectMode ? "Placing A ➔ B..." : transectPoints.length > 0 ? "Reset Transect" : inspectorDiagnosisAllowed ? "Cross-Section" : "Cross-Section unavailable"}
           </button>
         </div>
-      </div>
+      </div>}
 
       {/* --- AGRONOMIC BIOPHYSICS HUD (Top-Left) --- */}
       {activeCellData && canSamplePixel && canInterpretForScouting && (
