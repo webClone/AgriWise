@@ -21,6 +21,13 @@
 - **Publication:** expand status and verify that the unsealed operational count is clearly not scientific evidence. On a valid publication, only claim source availability—not rendered pixels absent a browser render receipt.
 - **V2 off:** verify legacy PlotDashboard and unchanged PlotMapShell control dock.
 
+## Additional selected-entity consolidation (same P07 candidate)
+- `WorkspaceContextInspector` presents a bounded overview first: epistemic class, registered geometry, calculated area/perimeter/route length/vertex count, revision and envelope digest.
+- Pure geometry summaries are derived from **submitted WGS84 coordinates** via Turf and explicitly labelled not a verified survey, observation or scientific publication. Invalid geometry produces no summary.
+- Owner-declared actions (Adjust vertices, History, Revoke) are presented once, ahead of verbose subsystem detail. Existing P06 test identifiers and callbacks are retained.
+- In V2 only, the pixel inspector uses responsive viewport-relative placement instead of fixed left=344px/top=260px. Standalone legacy coordinates are unchanged.
+- New tests cover point/line/polygon/multipolygon metrics and single action group.
+
 ## Follow-on P07 UX slices
 - Move the View & analysis trigger *into* the unified scene header to eliminate a second right-rail entry point, while keeping cross-section authority owned by PlotMapShell.
 - Improve the Context Inspector's selected entity hierarchy: overview, registered geometry metrics, revision provenance, and prioritized actions.
