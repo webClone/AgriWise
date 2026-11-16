@@ -1801,21 +1801,23 @@ export default function PlotMapShell(props: PlotMapShellProps) {
         enabled={debugNdvi}
       />
 
-      {/* Debug toggle button — always visible in bottom-left above SIRE badge */}
-      <button
-        onClick={() => setDebugNdvi(v => !v)}
-        className="absolute bottom-12 left-2 z-50 flex items-center gap-1 px-2 py-1 rounded text-xs font-mono cursor-pointer select-none"
-        style={{
-          background: debugNdvi ? '#facc15' : 'rgba(0,0,0,0.7)',
-          color: debugNdvi ? '#000' : '#facc15',
-          border: '1px solid #facc15',
-        }}
-      >
-        🔬 NDVI
-      </button>
+      {/* Debug toggle button — legacy only; hidden in V2 workspace mode */}
+      {!props.workspaceMode && (
+        <button
+          onClick={() => setDebugNdvi(v => !v)}
+          className="absolute bottom-12 left-2 z-50 flex items-center gap-1 px-2 py-1 rounded text-xs font-mono cursor-pointer select-none"
+          style={{
+            background: debugNdvi ? '#facc15' : 'rgba(0,0,0,0.7)',
+            color: debugNdvi ? '#000' : '#facc15',
+            border: '1px solid #facc15',
+          }}
+        >
+          🔬 NDVI
+        </button>
+      )}
 
       {/* Stats panel when debug is active */}
-      {debugNdvi && surfaceData?.values && (
+      {!props.workspaceMode && debugNdvi && surfaceData?.values && (
         <div
           className="absolute z-50 font-mono text-xs rounded p-2 pointer-events-none"
           style={{

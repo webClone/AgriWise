@@ -98,9 +98,40 @@ const CANONICAL_CONTRACT_FLAGS = Object.freeze([
   "publicationStatusValid",
 ]);
 
+export const ALL_CANONICAL_SCIENTIFIC_FLAGS = Object.freeze([
+  "nodeValid",
+  "publicationValid",
+  "receiptValid",
+  "inventoryValid",
+  "temporalBindingValid",
+  "numericalBindingValid",
+  "bindingValid",
+  "lineageValid",
+  "schemaValid",
+  "contractValid",
+  "publicationStatusValid",
+]);
+
+export function validateAuthoritativeScientificValidation(validation) {
+  const flags = validation && typeof validation === "object" ? validation : {};
+  const missing = ALL_CANONICAL_SCIENTIFIC_FLAGS.filter((key) => flags[key] === undefined);
+  const failed = ALL_CANONICAL_SCIENTIFIC_FLAGS.filter((key) => flags[key] === false);
+  return {
+    valid: missing.length === 0 && failed.length === 0,
+    all11FlagsPresent: missing.length === 0,
+    missingFlags: missing,
+    failedFlags: failed,
+    flags,
+  };
+}
+
 export function classifyCanonicalHeadValidation(validation) {
   const flags = validation && typeof validation === "object" ? validation : {};
   if (!CANONICAL_INTEGRITY_FLAGS.every((key) => flags[key] === true)) {
+    return "corrupt";
+  }
+  // Enforce authoritative temporal and numerical binding if reported
+  if (flags.temporalBindingValid === false || flags.numericalBindingValid === false) {
     return "corrupt";
   }
   if (!CANONICAL_CONTRACT_FLAGS.every((key) => flags[key] === true)) {

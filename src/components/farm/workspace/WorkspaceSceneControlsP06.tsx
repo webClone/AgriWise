@@ -1,9 +1,15 @@
 "use client";
 import {useState} from "react";
-import {Layers3, ListFilter, PenTool, Plane, FileText, X, Eye} from "lucide-react";
+import {Layers3, ListFilter, PenTool, Plane, FileText, X, Eye, FlaskConical} from "lucide-react";
 import type {WorkspaceFeatureEnvelope} from "@/lib/agribrain/workspace-feature-envelope";
 import type {SceneLayerEntry} from "./p06-scene-registry.mjs";
 import {sceneLayerForEntityKind} from "./p06-scene-registry.mjs";
+import {
+  ASMAE_13_STATE_ORDER,
+  ASMAE_13_STATE_CATALOG,
+  type AsmaeStateKey,
+  type AsmaeStateAvailabilityResult,
+} from "@/lib/agribrain/asmae-13-states";
 
 export default function WorkspaceSceneControlsP06({
  manifest,
@@ -22,6 +28,9 @@ export default function WorkspaceSceneControlsP06({
  transectActive = false,
  transectPointsCount = 0,
  onToggleTransect,
+ activeAsmaeKey = "vigor",
+ onSelectAsmaeState,
+ asmaeStatesSummary = [],
 }:{
  manifest:SceneLayerEntry[];
  entities:WorkspaceFeatureEnvelope[];
@@ -39,15 +48,39 @@ export default function WorkspaceSceneControlsP06({
  transectActive?: boolean;
  transectPointsCount?: number;
  onToggleTransect?: () => void;
+ activeAsmaeKey?: AsmaeStateKey | null;
+ onSelectAsmaeState?: (key: AsmaeStateKey) => void;
+ asmaeStatesSummary?: AsmaeStateAvailabilityResult[];
 }) {
  const [open,setOpen]=useState(false);
  const [directory,setDirectory]=useState(false);
  const [drawMenuOpen,setDrawMenuOpen]=useState(false);
  const [viewOpen,setViewOpen]=useState(false);
+ const [asmaeOpen,setAsmaeOpen]=useState(false);
  const visibleCount=manifest.filter(layer=>layer.visible).length;
  return (
   <div className="pw-scene-controls" data-testid="p06-scene-controls">
    <div className="pw-scene-header">
+    <button
+      type="button"
+      data-testid="p07-asmae-lab-toggle"
+      aria-expanded={asmaeOpen}
+      aria-controls="p07-asmae-lab-panel"
+      onClick={()=>{
+        setAsmaeOpen(!asmaeOpen);
+        setViewOpen(false);
+        setOpen(false);
+        setDirectory(false);
+        setDrawMenuOpen(false);
+      }}
+      title="ASMAE 13-State Scientific Laboratory"
+      style={{
+        background: activeAsmaeKey ? "rgba(16, 185, 129, 0.18)" : undefined,
+        borderColor: activeAsmaeKey ? "rgba(16, 185, 129, 0.4)" : undefined,
+      }}
+    >
+      <FlaskConical size={16} aria-hidden="true"/> ASMAE Lab <span>{activeAsmaeKey ? (ASMAE_13_STATE_CATALOG[activeAsmaeKey]?.shortName || "13 States") : "13 States"}</span>
+    </button>
     <button
       type="button"
       data-testid="p07-map-view-toggle"
@@ -147,6 +180,117 @@ export default function WorkspaceSceneControlsP06({
         </div>
       </div>
       <p className="pw-scene-hint">Presentation lens changes visualization only, never scientific authority.</p>
+    </section>
+   )}
+   {asmaeOpen && (
+    <section
+      id="p07-asmae-lab-panel"
+      aria-label="ASMAE 13-State Scientific Laboratory"
+      className="pw-scene-panel"
+      style={{ width: "min(340px, calc(100vw - 80px))", maxHeight: "58vh" }}
+    >
+      <div className="pw-scene-panel-title">
+        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+          <FlaskConical size={15} style={{ color: "#34d399" }} />
+          <strong>ASMAE 13-State Laboratory</strong>
+        </div>
+        <button type="button" aria-label="Close ASMAE lab" onClick={() => setAsmaeOpen(false)}>
+          <X size={15} />
+        </button>
+      </div>
+      <div style={{ fontSize: "10px", color: "var(--pw-dim, #91aa9b)", marginBottom: "8px", lineHeight: 1.3 }}>
+        Canonical latent state biophysical inversions (V1.13). Never fabricates rasters for scalar-only states.
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+        {ASMAE_13_STATE_ORDER.map((stateKey, idx) => {
+          const def = ASMAE_13_STATE_CATALOG[stateKey];
+          const summary = asmaeStatesSummary?.find((s) => s.state.key === stateKey);
+          const isSelected = activeAsmaeKey === stateKey;
+          const status = summary?.status || "UNAVAILABLE";
+          const statusColor =
+            status === "QUALIFIED_RASTER"
+              ? "#34d399"
+              : status === "SCALAR_ONLY"
+              ? "#facc15"
+              : "#94a3b8";
+          const statusLabel =
+            status === "QUALIFIED_RASTER"
+              ? "Raster Qualified"
+              : status === "SCALAR_ONLY"
+              ? "Scalar Estimate"
+              : "Unavailable";
+
+          return (
+            <button
+              key={stateKey}
+              type="button"
+              data-testid={`p07-asmae-state-${stateKey}`}
+              onClick={() => {
+                onSelectAsmaeState?.(stateKey);
+                setAsmaeOpen(false);
+              }}
+              style={{
+                display: "flex",
+                alignItems: "flex-start",
+                gap: "8px",
+                padding: "8px 10px",
+                background: isSelected ? "rgba(16, 185, 129, 0.2)" : "rgba(255, 255, 255, 0.04)",
+                border: isSelected ? "1px solid #34d399" : "1px solid rgba(255, 255, 255, 0.08)",
+                borderRadius: "8px",
+                textAlign: "left",
+                cursor: "pointer",
+                color: "#e2e8f0",
+              }}
+            >
+              <span
+                style={{
+                  fontSize: "10px",
+                  fontWeight: 800,
+                  fontFamily: "monospace",
+                  color: isSelected ? "#34d399" : "#a9c9b5",
+                  marginTop: "2px",
+                }}
+              >
+                {String(idx + 1).padStart(2, "0")}
+              </span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "6px" }}>
+                  <strong style={{ fontSize: "11px", color: isSelected ? "#ffffff" : "#f1f5f9" }}>
+                    {def.shortName}
+                  </strong>
+                  <span
+                    style={{
+                      fontSize: "9px",
+                      padding: "1px 5px",
+                      borderRadius: "10px",
+                      fontWeight: 700,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.05em",
+                      background: `${statusColor}22`,
+                      color: statusColor,
+                      border: `1px solid ${statusColor}44`,
+                    }}
+                  >
+                    {statusLabel}
+                  </span>
+                </div>
+                <div style={{ fontSize: "10px", color: "#94a3b8", marginTop: "2px" }}>
+                  {def.name}
+                </div>
+                {summary && summary.mean !== null ? (
+                  <div style={{ fontSize: "10px", color: "#34d399", fontWeight: 600, marginTop: "3px" }}>
+                    {summary.mean} {summary.sigma !== null ? `± ${summary.sigma}` : ""} {def.unit}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: "9px", color: "#64748b", fontStyle: "italic", marginTop: "2px" }}>
+                    {def.authorityCeiling.replace(/_/g, " ")}
+                  </div>
+                )}
+              </div>
+            </button>
+          );
+        })}
+      </div>
     </section>
    )}
    {drawMenuOpen && (

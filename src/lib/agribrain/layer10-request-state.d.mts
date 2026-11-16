@@ -47,6 +47,18 @@ export function isLatestLayer10Request(
   aborted?: boolean,
 ): boolean;
 
+export const ALL_CANONICAL_SCIENTIFIC_FLAGS: readonly string[];
+
+export function validateAuthoritativeScientificValidation(
+  validation?: Record<string, unknown> | null,
+): {
+  valid: boolean;
+  all11FlagsPresent: boolean;
+  missingFlags: string[];
+  failedFlags: string[];
+  flags: Record<string, unknown>;
+};
+
 export function classifyCanonicalHeadValidation(
   validation?: Record<string, unknown> | null,
 ): "valid" | "stale" | "corrupt";

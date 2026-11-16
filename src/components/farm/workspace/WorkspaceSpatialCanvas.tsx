@@ -5,6 +5,7 @@ import type { useLayer10 } from "@/hooks/useLayer10";
 import type { MapVisualLens } from "./useWorkspaceScientificAdapter";
 import type { WorkspaceFeatureEnvelope } from "@/lib/agribrain/workspace-feature-envelope";
 import type { WorkspaceDraftGeometryProps } from "@/components/farm/map/layers/WorkspaceEntityGeometryLayer";
+import type { AsmaeStateAvailabilityResult } from "@/lib/agribrain/asmae-13-states";
 
 const PlotMapShell = dynamic(() => import("@/components/farm/map/PlotMapShell"), {
   ssr: false,
@@ -41,6 +42,7 @@ interface WorkspaceSpatialCanvasProps {
     transectPointsCount: number;
     toggleTransect: () => void;
   }) => void;
+  activeAsmaeAvailability?: AsmaeStateAvailabilityResult;
 }
 
 /**
@@ -66,11 +68,19 @@ export default function WorkspaceSpatialCanvas({
   onCanvasMapClick,
   workspaceMode,
   onAnalysisStateChange,
+  activeAsmaeAvailability,
 }: WorkspaceSpatialCanvasProps) {
   const deviationSurface =
     l10.activeMode === "veg_attention"
       ? (l10.data?.surfaces.find((s) => s.type === "NDVI_DEVIATION") ?? null)
       : null;
+
+  const isScalarOrUnavailable =
+    activeAsmaeAvailability && !activeAsmaeAvailability.canRenderPixels;
+
+  const effectiveSurface = isScalarOrUnavailable
+    ? null
+    : (activeAsmaeAvailability?.rasterSurface as any) || l10.activeSurface;
 
   return (
     <div className="pw-spatial-canvas" data-testid="pw-spatial-canvas" style={{ position: "absolute", inset: 0 }}>
@@ -80,7 +90,7 @@ export default function WorkspaceSpatialCanvas({
           plots={plot ? [plot] : []}
           activeMode={l10.activeMode}
           cropName={cropName}
-          surfaceData={l10.activeSurface}
+          surfaceData={effectiveSurface}
           surfaceColors={l10.activeColors}
           confidenceSurface={l10.activeConfidenceSurface}
           reliabilitySurface={l10.activeReliabilitySurface}
@@ -109,6 +119,40 @@ export default function WorkspaceSpatialCanvas({
           workspaceMode={workspaceMode}
           onAnalysisStateChange={onAnalysisStateChange}
         />
+      )}
+
+      {/* Truthfulness Gate HUD: Appears when a state has scalar values but no certified spatial raster */}
+      {isScalarOrUnavailable && activeAsmaeAvailability && (
+        <div
+          className="pw-truthfulness-hud"
+          data-testid="pw-truthfulness-hud"
+          style={{
+            position: "absolute",
+            bottom: "80px",
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 35,
+            background: "rgba(15, 23, 42, 0.88)",
+            backdropFilter: "blur(8px)",
+            border: "1px solid rgba(56, 189, 248, 0.4)",
+            borderRadius: "8px",
+            padding: "8px 16px",
+            color: "#f8fafc",
+            fontSize: "12px",
+            boxShadow: "0 10px 25px -5px rgba(0, 0, 0, 0.5)",
+            pointerEvents: "none",
+            display: "flex",
+            alignItems: "center",
+            gap: "8px",
+          }}
+        >
+          <span style={{ color: "#38bdf8", fontWeight: 800 }}>[TRUTHFULNESS GATE]</span>
+          <span>
+            ASMAE State <strong>{activeAsmaeAvailability.state.name}</strong> is a scalar-only estimate
+            {activeAsmaeAvailability.mean !== null ? ` (${activeAsmaeAvailability.mean} ± ${activeAsmaeAvailability.sigma} ${activeAsmaeAvailability.state.unit})` : ""}.
+            Full-field spatial raster withheld.
+          </span>
+        </div>
       )}
     </div>
   );

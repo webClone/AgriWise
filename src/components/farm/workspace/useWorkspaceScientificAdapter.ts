@@ -44,11 +44,12 @@ export function useWorkspaceScientificAdapter({ farm, plot }: ScientificAdapterP
 
   // 4. Derive presentation state strictly from canonical assessment
   const injectData = pi.injectData;
+  const publicationId = l10.data?.publication_id || (l10.data as any)?.snapshot_id || "";
   useEffect(() => {
-    if (l10.data) {
+    if (l10.data && publicationId) {
       injectData(l10.data, (plot as any)?.id, l10.isApplicable);
     }
-  }, [l10.data, l10.isApplicable, injectData, (plot as any)?.id]);
+  }, [publicationId, l10.isApplicable, injectData, (plot as any)?.id]);
 
   return {
     parcelAssessment,

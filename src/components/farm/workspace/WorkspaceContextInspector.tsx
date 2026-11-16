@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { useLayer10 } from "@/hooks/useLayer10";
 import { useParcelAssessment } from "@/hooks/useParcelAssessment";
@@ -21,11 +22,22 @@ import {
   Edit3,
   Trash2,
   History,
+  Scale,
+  FlaskConical,
 } from "lucide-react";
 import type { WorkspaceFeatureEnvelope } from "@/lib/agribrain/workspace-feature-envelope";
 import {geometryBounds} from "@/lib/agribrain/workspace-geometry.mjs";
 import {summarizeWorkspaceGeometry} from "./p07-spatial-summary.mjs";
 import type { WorkspaceQuickAction } from "./WorkspaceToolDock";
+import {
+  ASMAE_13_STATE_ORDER,
+  ASMAE_13_STATE_CATALOG,
+  ASMAE_STATUS_META,
+  resolveAsmaeStateAvailability,
+  compareSensorWithCollocatedAsmae,
+  type AsmaeStateKey,
+  type AsmaeStateAvailabilityResult,
+} from "@/lib/agribrain/asmae-13-states";
 
 export default function WorkspaceContextInspector({
   farmId,
@@ -37,6 +49,10 @@ export default function WorkspaceContextInspector({
   onRevise,
   onRevoke,
   onHistory,
+  activeAsmaeKey = "vigor",
+  onSelectAsmaeState,
+  activeAsmaeAvailability,
+  sirePixelHover,
 }: {
   farmId: string;
   plotId: string;
@@ -47,7 +63,12 @@ export default function WorkspaceContextInspector({
   onRevise?: (entity: WorkspaceFeatureEnvelope) => void;
   onRevoke?: (entity: WorkspaceFeatureEnvelope) => void;
   onHistory?: (entity: WorkspaceFeatureEnvelope) => void;
+  activeAsmaeKey?: AsmaeStateKey;
+  onSelectAsmaeState?: (key: AsmaeStateKey) => void;
+  activeAsmaeAvailability?: AsmaeStateAvailabilityResult;
+  sirePixelHover?: { value: number | null; row: number; col: number; coordinate: [number, number] } | null;
 }) {
+  const [labViewMode, setLabViewMode] = useState<"farmer" | "expert">("farmer");
   const layer10 = useLayer10();
   const parcel = useParcelAssessment();
   const { state, selectEntity } = usePlotWorkspace();
@@ -61,13 +82,55 @@ export default function WorkspaceContextInspector({
     selectedEntity.kind && selectedEntity.id
       ? workspaceEntities.find(
           (e) => e.entity_id === selectedEntity.id || e.envelope_id === selectedEntity.id
-        )
+        ) || ((selectedEntity as any).metadata ? {
+          entity_id: selectedEntity.id,
+          envelope_id: selectedEntity.id,
+          entity_kind: selectedEntity.kind,
+          kind: selectedEntity.kind,
+          epistemic_class: (selectedEntity as any).metadata?.epistemic_class || "OBSERVED_TELEMETRY",
+          properties: (selectedEntity as any).metadata,
+        } as any : null)
       : null;
 
   const snapshotId =
     parcel.assessment?.identity?.snapshotId ?? layer10.data?.publication_id ?? null;
   const sourceValidForPlot = parcel.isApplicable && parcel.status === "ready";
   const analysisUrl = `/farm/${encodeURIComponent(farmId)}/plot/${encodeURIComponent(plotId)}/analysis`;
+
+  // Resolved ASMAE state context
+  const rawPub = parcel.rawPublication;
+  const posteriorRecord = rawPub?.asmae_posterior_numerical_record || null;
+  const pubSurfaces = rawPub?.surfaces || layer10.data?.surfaces || [];
+  const pubInventory = rawPub?.surface_inventory || null;
+
+  const currentAsmaeAvail =
+    activeAsmaeAvailability ||
+    resolveAsmaeStateAvailability(activeAsmaeKey, pubSurfaces, posteriorRecord, pubInventory, {
+      validationState: parcel.status === "invalid" ? "corrupt" : parcel.status === "stale" ? "stale" : "valid",
+    });
+
+  const activeDef = ASMAE_13_STATE_CATALOG[activeAsmaeKey] || ASMAE_13_STATE_CATALOG.vigor;
+  const canonicalStatusKey =
+    currentAsmaeAvail.status === "QUALIFIED_RASTER"
+      ? "QUALIFIED_SPATIAL"
+      : currentAsmaeAvail.status === "SCALAR_ONLY"
+      ? "PLOT_ESTIMATE"
+      : (currentAsmaeAvail.status as "QUALIFIED_SPATIAL" | "PLOT_ESTIMATE" | "UNAVAILABLE" | "BLOCKED");
+  const activeStatusMeta = ASMAE_STATUS_META[canonicalStatusKey] || ASMAE_STATUS_META.UNAVAILABLE;
+
+  // Collocated in-situ moisture comparison for SENSOR entities
+  const rootZoneAvail = resolveAsmaeStateAvailability("root_zone_water", pubSurfaces, posteriorRecord, pubInventory);
+  const sensorComparison =
+    matchedEntity && selectedEntity.kind === "SENSOR"
+      ? compareSensorWithCollocatedAsmae(
+          {
+            soilMoisture: (matchedEntity.properties as any)?.latestReading?.soilMoisture ?? null,
+            temperature: (matchedEntity.properties as any)?.latestReading?.temperature ?? null,
+            depthCm: matchedEntity.spatial_support?.depth_cm ?? 15,
+          },
+          rootZoneAvail
+        )
+      : null;
 
   const entityProps = (matchedEntity?.properties || {}) as Record<string, any>;
   const entityCoords = matchedEntity?.geometry?.type==="Point" ? matchedEntity.geometry.coordinates : null;
@@ -103,8 +166,8 @@ export default function WorkspaceContextInspector({
           <section className="pw-p07-entity-overview" aria-label="Selected entity overview"
             data-testid="p07-entity-overview">
             <div className="pw-p07-entity-overline">
-              <span>{matchedEntity.entity_kind.replaceAll("_"," ")}</span>
-              <span data-epistemic={matchedEntity.epistemic_class}>{matchedEntity.epistemic_class.replaceAll("_"," ")}</span>
+              <span>{(matchedEntity.entity_kind || (matchedEntity as any).kind || "").replaceAll("_"," ")}</span>
+              <span data-epistemic={matchedEntity.epistemic_class}>{(matchedEntity.epistemic_class || "OBSERVED_TELEMETRY").replaceAll("_"," ")}</span>
             </div>
             <h3>{String(entityProps.name || entityProps.deviceId || matchedEntity.entity_id)}</h3>
             <dl className="pw-p07-metrics">
@@ -219,6 +282,64 @@ export default function WorkspaceContextInspector({
                 </div>
               )}
             </dl>
+
+            {/* W1/W2 Collocated Sensor Telemetry vs. ASMAE Posterior State Comparison */}
+            {sensorComparison && (
+              <div
+                className="pw-sensor-asmae-comparison"
+                data-testid="p05-sensor-asmae-comparison"
+                style={{
+                  background: "rgba(15, 23, 42, 0.65)",
+                  border: "1px solid rgba(56, 189, 248, 0.25)",
+                  borderRadius: "8px",
+                  padding: "10px",
+                  marginTop: "8px",
+                  marginBottom: "12px",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "8px" }}>
+                  <Scale size={14} style={{ color: "#38bdf8" }} />
+                  <span style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "0.05em", color: "#38bdf8", textTransform: "uppercase" }}>
+                    Collocated Telemetry vs. ASMAE Context
+                  </span>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "8px" }}>
+                  <div style={{ background: "rgba(255,255,255,0.03)", padding: "6px 8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.06)" }}>
+                    <div style={{ fontSize: "9px", fontWeight: 800, color: "#38bdf8", letterSpacing: "0.05em" }}>OBSERVED TELEMETRY</div>
+                    <div style={{ fontSize: "13px", fontWeight: 750, color: "#f8fafc", margin: "2px 0" }}>
+                      {sensorComparison.sensorValue !== null ? `${(sensorComparison.sensorValue * 100).toFixed(1)}% VWC` : "N/A"}
+                    </div>
+                    <div style={{ fontSize: "9px", color: "#94a3b8" }}>In-situ probe ({matchedEntity.spatial_support?.depth_cm ?? 15}cm)</div>
+                  </div>
+                  <div style={{ background: "rgba(255,255,255,0.03)", padding: "6px 8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.06)" }}>
+                    <div style={{ fontSize: "9px", fontWeight: 800, color: "#34d399", letterSpacing: "0.05em" }}>SCIENTIFIC ESTIMATE</div>
+                    <div style={{ fontSize: "13px", fontWeight: 750, color: "#f8fafc", margin: "2px 0" }}>
+                      {sensorComparison.asmaeMean !== null ? `${(sensorComparison.asmaeMean * 100).toFixed(1)}%${sensorComparison.asmaeSigma !== null ? ` ± ${(sensorComparison.asmaeSigma * 100).toFixed(1)}%` : ""}` : "N/A"}
+                    </div>
+                    <div style={{ fontSize: "9px", color: "#94a3b8" }}>ASMAE root_zone_water</div>
+                  </div>
+                </div>
+                <div style={{
+                  fontSize: "10px",
+                  fontWeight: 700,
+                  padding: "3px 6px",
+                  borderRadius: "4px",
+                  display: "inline-block",
+                  background: sensorComparison.withinOneSigma ? "rgba(52, 211, 153, 0.15)" : "rgba(251, 146, 60, 0.15)",
+                  color: sensorComparison.withinOneSigma ? "#34d399" : "#fb923c",
+                  border: sensorComparison.withinOneSigma ? "1px solid rgba(52, 211, 153, 0.3)" : "1px solid rgba(251, 146, 60, 0.3)",
+                  marginBottom: "6px",
+                }}>
+                  {sensorComparison.withinOneSigma ? "✓ Consistent (Within 1σ Envelope)" : "⚠ Discrepancy (Outside 1σ)"}
+                </div>
+                <p style={{ fontSize: "10px", color: "#cbd5e1", lineHeight: 1.35, margin: "0 0 6px" }}>
+                  {sensorComparison.narrative}
+                </p>
+                <div style={{ fontSize: "8.5px", color: "#64748b", fontStyle: "italic", borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: "4px" }}>
+                  Observed telemetry is calibrated hardware ground truth; ASMAE is a multi-source resilient ETKF state. Observations are assimilated, not replaced.
+                </div>
+              </div>
+            )}
 
             <div style={{ display: "flex", gap: "8px", flexDirection: "column" }}>
               <button
@@ -612,6 +733,229 @@ export default function WorkspaceContextInspector({
             A colored basemap is not evidence of a scientific raster. Inspect
             the map&apos;s authorized pixel legend and source receipt before interpretation.
           </p>
+
+          {/* W1 Complete ASMAE 13-State Latent Laboratory Card */}
+          <div
+            className="pw-asmae-lab-card"
+            data-testid="p07-asmae-lab-inspector-card"
+            style={{
+              marginTop: "1.25rem",
+              background: "rgba(16, 24, 39, 0.7)",
+              border: "1px solid rgba(52, 211, 153, 0.25)",
+              borderRadius: "10px",
+              padding: "12px",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                <FlaskConical size={15} style={{ color: "#34d399" }} aria-hidden="true" />
+                <span style={{ fontSize: "11px", fontWeight: 800, letterSpacing: "0.05em", color: "#34d399", textTransform: "uppercase" }}>
+                  ASMAE Latent Laboratory
+                </span>
+              </div>
+              {/* Farmer / Expert Toggle */}
+              <div style={{ display: "flex", background: "rgba(0,0,0,0.5)", borderRadius: "6px", padding: "2px", border: "1px solid rgba(255,255,255,0.08)" }}>
+                <button
+                  type="button"
+                  data-testid="p07-lab-mode-farmer"
+                  onClick={() => setLabViewMode("farmer")}
+                  style={{
+                    fontSize: "9px",
+                    fontWeight: 700,
+                    padding: "3px 8px",
+                    borderRadius: "4px",
+                    cursor: "pointer",
+                    border: "none",
+                    background: labViewMode === "farmer" ? "#34d399" : "transparent",
+                    color: labViewMode === "farmer" ? "#0f172a" : "#94a3b8",
+                  }}
+                >
+                  Farmer
+                </button>
+                <button
+                  type="button"
+                  data-testid="p07-lab-mode-expert"
+                  onClick={() => setLabViewMode("expert")}
+                  style={{
+                    fontSize: "9px",
+                    fontWeight: 700,
+                    padding: "3px 8px",
+                    borderRadius: "4px",
+                    cursor: "pointer",
+                    border: "none",
+                    background: labViewMode === "expert" ? "#34d399" : "transparent",
+                    color: labViewMode === "expert" ? "#0f172a" : "#94a3b8",
+                  }}
+                >
+                  Expert
+                </button>
+              </div>
+            </div>
+
+            {/* State selector dropdown */}
+            <div style={{ marginBottom: "10px" }}>
+              <label htmlFor="p07-asmae-state-select" className="sr-only">Select ASMAE state</label>
+              <select
+                id="p07-asmae-state-select"
+                data-testid="p07-asmae-state-select"
+                value={activeAsmaeKey}
+                onChange={(e) => onSelectAsmaeState?.(e.target.value as AsmaeStateKey)}
+                style={{
+                  width: "100%",
+                  padding: "6px 8px",
+                  borderRadius: "6px",
+                  background: "rgba(0, 0, 0, 0.4)",
+                  border: "1px solid rgba(52, 211, 153, 0.35)",
+                  color: "#f8fafc",
+                  fontSize: "11px",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
+                {ASMAE_13_STATE_ORDER.map((sKey) => {
+                  const sDef = ASMAE_13_STATE_CATALOG[sKey];
+                  return (
+                    <option key={sKey} value={sKey} style={{ background: "#0f172a", color: "#f8fafc" }}>
+                      #{String(sDef.order).padStart(2, "0")} {sDef.name} ({sDef.shortName})
+                    </option>
+                  );
+                })}
+              </select>
+            </div>
+
+            {/* Active State Header */}
+            <div style={{ margin: "6px 0 10px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                <strong style={{ fontSize: "13px", color: "#f8fafc" }}>
+                  #{String(activeDef.order).padStart(2, "0")} {activeDef.name}
+                </strong>
+                <span
+                  data-testid="p07-asmae-status-badge"
+                  style={{
+                    fontSize: "9px",
+                    fontWeight: 800,
+                    textTransform: "uppercase",
+                    padding: "2px 6px",
+                    borderRadius: "10px",
+                    background: `${activeStatusMeta.color}22`,
+                    color: activeStatusMeta.color,
+                    border: `1px solid ${activeStatusMeta.color}44`,
+                  }}
+                >
+                  {activeStatusMeta.badge}
+                </span>
+              </div>
+              <p style={{ fontSize: "10.5px", color: "#94a3b8", margin: "2px 0 6px" }}>
+                {activeDef.shortName} · Surface: {activeDef.surfaceType}
+              </p>
+            </div>
+
+            {/* Content by View Mode */}
+            {labViewMode === "farmer" ? (
+              <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: "8px", padding: "10px", marginBottom: "8px" }}>
+                <div style={{ fontSize: "9.5px", color: "#a9c9b5", fontWeight: 700, marginBottom: "4px" }}>
+                  FIELD PERSPECTIVE
+                </div>
+                <div style={{ fontSize: "11.5px", color: "#e2e8f0", fontWeight: 600, marginBottom: "6px" }}>
+                  &ldquo;{activeDef.farmerQuestion}&rdquo;
+                </div>
+                <div style={{ fontSize: "10.5px", color: "#cbd5e1", lineHeight: 1.4 }}>
+                  {currentAsmaeAvail.status === "QUALIFIED_SPATIAL" || currentAsmaeAvail.status === "QUALIFIED_RASTER" ? (
+                    <span>
+                      Qualified multi-spectral satellite raster is active across the field with an average value of{" "}
+                      <strong style={{ color: "#34d399" }}>{currentAsmaeAvail.mean} {activeDef.unit}</strong>.
+                      Inspect map pixels directly to observe local canopy variation.
+                    </span>
+                  ) : currentAsmaeAvail.status === "PLOT_ESTIMATE" || currentAsmaeAvail.status === "SCALAR_ONLY" ? (
+                    <span>
+                      Field-average estimate is <strong style={{ color: "#38bdf8" }}>{currentAsmaeAvail.mean} ± {currentAsmaeAvail.sigma} {activeDef.unit}</strong>.
+                      Spatial map is withheld because individual tree-level variance is not certified for this cutoff date.
+                    </span>
+                  ) : (
+                    <span>{currentAsmaeAvail.explanation}</span>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <dl className="pw-definition-list" style={{ marginBottom: "10px" }}>
+                <div>
+                  <dt>Posterior Mean (μ)</dt>
+                  <dd style={{ color: "#34d399", fontWeight: 750 }}>
+                    {currentAsmaeAvail.mean !== null ? `${currentAsmaeAvail.mean} ${activeDef.unit}` : "No Estimate"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Uncertainty (σ)</dt>
+                  <dd style={{ color: "#38bdf8", fontWeight: 600 }}>
+                    {currentAsmaeAvail.sigma !== null ? `± ${currentAsmaeAvail.sigma} ${activeDef.unit}` : "Undefined"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Physical Range</dt>
+                  <dd>[{activeDef.range[0]}, {activeDef.range[1]}] {activeDef.unit}</dd>
+                </div>
+                <div>
+                  <dt>Authority Tier</dt>
+                  <dd style={{ fontFamily: "monospace", fontSize: "11px", color: "#e2e8f0" }}>
+                    {activeDef.authorityCeiling}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Identifiability</dt>
+                  <dd style={{ fontFamily: "monospace", fontSize: "11px", color: "#facc15" }}>
+                    {activeDef.identifiabilityClass}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Support Class</dt>
+                  <dd style={{ fontFamily: "monospace", fontSize: "11px", color: "#a855f7" }}>
+                    {currentAsmaeAvail.supportClassification}
+                  </dd>
+                </div>
+                {currentAsmaeAvail.observationEvidence.length > 0 && (
+                  <div>
+                    <dt>Admitted Sources</dt>
+                    <dd style={{ fontSize: "10px", color: "#94a3b8" }}>
+                      {currentAsmaeAvail.observationEvidence.join(" · ")}
+                    </dd>
+                  </div>
+                )}
+                {rawPub?.evidence_cutoff_at && (
+                  <div>
+                    <dt>Evidence Cutoff</dt>
+                    <dd style={{ fontSize: "10px", color: "#e2e8f0", fontFamily: "monospace" }}>
+                      {rawPub.evidence_cutoff_at}
+                    </dd>
+                  </div>
+                )}
+              </dl>
+            )}
+
+            {/* SIRE Pixel Inspection details if coordinate sampled */}
+            {sirePixelHover && (
+              <div
+                className="pw-sire-pixel-card"
+                data-testid="p07-sire-pixel-sample"
+                style={{
+                  background: "rgba(16, 185, 129, 0.1)",
+                  border: "1px solid rgba(52, 211, 153, 0.3)",
+                  borderRadius: "8px",
+                  padding: "8px 10px",
+                  marginTop: "8px",
+                }}
+              >
+                <div style={{ fontSize: "10px", fontWeight: 750, color: "#34d399", letterSpacing: "0.05em", textTransform: "uppercase" }}>
+                  SIRE Sampled Pixel
+                </div>
+                <div style={{ fontSize: "12px", color: "#f1f5f9", margin: "2px 0" }}>
+                  Value: <strong style={{ color: "#34d399" }}>{sirePixelHover.value ?? "N/A"}</strong> {activeDef.unit}
+                </div>
+                <div style={{ fontSize: "9.5px", color: "#94a3b8" }}>
+                  Row {sirePixelHover.row}, Col {sirePixelHover.col} · [{sirePixelHover.coordinate[1].toFixed(5)}°N, {sirePixelHover.coordinate[0].toFixed(5)}°E]
+                </div>
+              </div>
+            )}
+          </div>
 
           <div className="pw-section-title" style={{ marginTop: "1rem" }}>
             <span>Related tools</span>

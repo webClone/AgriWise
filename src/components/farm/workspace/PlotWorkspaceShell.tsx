@@ -28,6 +28,14 @@ import { useWorkspaceEntities } from "./useWorkspaceEntities";
 import type { PlotWorkspaceProps } from "./PlotWorkspaceFeatureGate";
 import type { PlotScope } from "./workspace-types";
 import "./plot-workspace-v2.css";
+import {
+  ASMAE_13_STATE_ORDER,
+  resolveAsmaeStateAvailability,
+  sampleSirePixel,
+  type AsmaeStateKey,
+} from "@/lib/agribrain/asmae-13-states";
+import { classifyCanonicalHeadValidation } from "@/lib/agribrain/layer10-request-state.mjs";
+import { geometryBounds } from "@/lib/agribrain/workspace-geometry.mjs";
 
 function WorkspaceStateBridge() {
   useWorkspaceStateBridging();
@@ -84,11 +92,6 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
     setEditingSession({ mode: "create" });
     clearSelection();
   }, [clearSelection]);
-
-  const handleCanvasMapClick = useCallback((coord: [number, number]) => {
-    if (!drawingKind) return;
-    setDraftCoordinates((prev) => [...prev, coord]);
-  }, [drawingKind]);
 
   const handleUndoVertex = useCallback(() => {
     setDraftCoordinates((prev) => prev.slice(0, -1));
@@ -183,6 +186,56 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
     plot: props.plot,
     cropName: props.cropName,
   });
+
+  const [activeAsmaeKey, setActiveAsmaeKey] = useState<AsmaeStateKey>("vigor");
+  const [sirePixelHover, setSirePixelHover] = useState<{
+    value: number | null;
+    row: number;
+    col: number;
+    coordinate: [number, number];
+  } | null>(null);
+
+  // Authoritative ASMAE 13-state availability & statistics derivation
+  const rawPub = scientific.parcelAssessment?.rawPublication;
+  const posteriorRecord = rawPub?.asmae_posterior_numerical_record || null;
+  const pubSurfaces = rawPub?.surfaces || scientific.l10.data?.surfaces || [];
+  const pubInventory = rawPub?.surface_inventory || null;
+  const validationState = classifyCanonicalHeadValidation(rawPub?.validation);
+
+  const asmaeStatesSummary = useMemo(() => {
+    return ASMAE_13_STATE_ORDER.map((sKey) =>
+      resolveAsmaeStateAvailability(sKey, pubSurfaces, posteriorRecord, pubInventory, {
+        validationState: scientific.parcelAssessment.status === "invalid" ? "corrupt" : scientific.parcelAssessment.status === "stale" ? "stale" : validationState,
+        isBlocked: scientific.parcelAssessment.status === "invalid",
+        blockReason: scientific.parcelAssessment.status === "invalid" ? "Publication failed cryptographic integrity validation." : undefined,
+      })
+    );
+  }, [pubSurfaces, posteriorRecord, pubInventory, validationState, scientific.parcelAssessment.status]);
+
+  const activeAsmaeAvailability = useMemo(() => {
+    return (
+      asmaeStatesSummary.find((s) => s.state.key === activeAsmaeKey) ||
+      resolveAsmaeStateAvailability(activeAsmaeKey, pubSurfaces, posteriorRecord, pubInventory, {
+        validationState,
+      })
+    );
+  }, [asmaeStatesSummary, activeAsmaeKey, pubSurfaces, posteriorRecord, pubInventory, validationState]);
+
+  const plotBounds = useMemo(() => {
+    const geo = (props.plot as any)?.geoJson?.geometry || (props.plot as any)?.geoJson;
+    return geo ? geometryBounds(geo) : null;
+  }, [props.plot]);
+
+  const handleCanvasMapClick = useCallback((coord: [number, number]) => {
+    if (drawingKind) {
+      setDraftCoordinates((prev) => [...prev, coord]);
+      return;
+    }
+    if (activeAsmaeAvailability?.canRenderPixels && activeAsmaeAvailability?.rasterSurface) {
+      const sample = sampleSirePixel(activeAsmaeAvailability.rasterSurface as any, coord, plotBounds);
+      setSirePixelHover(sample.valid ? sample : null);
+    }
+  }, [drawingKind, activeAsmaeAvailability, plotBounds]);
 
   const launchInvestigation = useCallback((kind: P04InvestigationKind) => {
     launchControlRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -364,6 +417,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
             onCanvasMapClick={handleCanvasMapClick}
             workspaceMode
             onAnalysisStateChange={setAnalysisState}
+            activeAsmaeAvailability={activeAsmaeAvailability}
             onZoneClick={(zoneId) => {
               if (drawingKind) return;
               scientific.l10.setSelectedZone(zoneId);
@@ -381,6 +435,9 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
           zones={sceneZones}
           selectedId={state.selectedEntity.id}
           onStartDrawing={handleStartDrawing}
+          activeAsmaeKey={activeAsmaeKey}
+          onSelectAsmaeState={setActiveAsmaeKey}
+          asmaeStatesSummary={asmaeStatesSummary}
           mapVisualLens={scientific.mapVisualLens}
           onPaletteChange={scientific.setMapVisualLens}
           canTransect={analysisState?.canTransect ?? false}
@@ -478,6 +535,10 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
           onRevise={handleRevise}
           onRevoke={handleRevoke}
           onHistory={handleHistory}
+          activeAsmaeKey={activeAsmaeKey}
+          onSelectAsmaeState={setActiveAsmaeKey}
+          activeAsmaeAvailability={activeAsmaeAvailability}
+          sirePixelHover={sirePixelHover}
           onCollapse={() => {
             if (window.matchMedia("(max-width: 820px)").matches) {
               setMobileInspectorOpen(false);
