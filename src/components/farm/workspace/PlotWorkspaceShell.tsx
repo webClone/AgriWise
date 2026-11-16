@@ -267,6 +267,13 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
   });
   const desktopInspectorOpen = !state.isInspectorCollapsed;
 
+  const [analysisState, setAnalysisState] = useState<{
+    canTransect: boolean;
+    transectActive: boolean;
+    transectPointsCount: number;
+    toggleTransect: () => void;
+  } | null>(null);
+
   const openTool = useCallback((tool: WorkspaceQuickAction) => {
     setActiveTool(tool);
     setActiveSpecializedTool(tool);
@@ -288,7 +295,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
     <div
       className={`pw-shell ${desktopInspectorOpen ? "pw-inspector-expanded" : "pw-inspector-collapsed"} ${mobileInspectorOpen ? "pw-mobile-inspector-open" : ""}`}
       data-testid="plot-workspace-v2"
-      data-workspace-version="p07-candidate-01"
+      data-workspace-version="p07.02-consolidated"
       data-spatial-mode={drawingKind ? editingSession?.mode === "revise" ? "revising" : "drawing" : state.selectedEntity.id ? "selected" : "idle"}
       data-workspace-generation={state.generationId}
       aria-label="Akaloris Plot Workspace"
@@ -341,6 +348,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
             } : null}
             onCanvasMapClick={handleCanvasMapClick}
             workspaceMode
+            onAnalysisStateChange={setAnalysisState}
             onZoneClick={(zoneId) => {
               if (drawingKind) return;
               scientific.l10.setSelectedZone(zoneId);
@@ -358,6 +366,12 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
           zones={sceneZones}
           selectedId={state.selectedEntity.id}
           onStartDrawing={handleStartDrawing}
+          mapVisualLens={scientific.mapVisualLens}
+          onPaletteChange={scientific.setMapVisualLens}
+          canTransect={analysisState?.canTransect ?? false}
+          transectActive={analysisState?.transectActive ?? false}
+          transectPointsCount={analysisState?.transectPointsCount ?? 0}
+          onToggleTransect={analysisState?.toggleTransect}
           onToggle={(id, visible) => {
             toggleSceneLayer(id, visible);
             if (!visible && id === "zones" && state.selectedEntity.kind === "ZONE") {

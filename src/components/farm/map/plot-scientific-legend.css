@@ -1,1 +1,106 @@
-.akaloris-scientific-legend{position:absolute;top:16px;right:16px;z-index:35;width:min(270px,calc(100% - 32px));pointer-events:none;color:#faf9f5;background:rgba(16,40,32,.95);border:1px solid rgba(198,215,195,.38);border-radius:8px;padding:14px 16px;box-shadow:0 12px 34px rgba(0,0,0,.27);font-family:var(--font-inter),Inter,system-ui,sans-serif;overflow-wrap:anywhere}.akaloris-scientific-legend-head{display:flex;justify-content:space-between;gap:8px;align-items:baseline;border-bottom:1px solid #52695b;padding-bottom:9px}.akaloris-scientific-legend-head span{font-size:9px;font-weight:800;letter-spacing:.13em;color:#d0a278}.akaloris-scientific-legend-head strong{font-size:12px;text-align:right}.akaloris-scientific-legend dl{margin:10px 0 0}.akaloris-scientific-legend dl>div{margin:0 0 9px}.akaloris-scientific-legend dt{color:#b7c9b8;font-size:9px;text-transform:uppercase;font-weight:700;letter-spacing:.07em;margin-bottom:3px}.akaloris-scientific-legend dd{margin:0;font-size:11px;line-height:1.35;font-variant-numeric:tabular-nums}.akaloris-scientific-legend p{margin:9px 0 0;border-top:1px solid #52695b;padding-top:8px;font-size:10px;color:#c4d1c4;line-height:1.45}@media(max-width:850px){.akaloris-scientific-legend{top:auto;bottom:18px;right:14px;max-height:210px;overflow:hidden;padding:10px 12px}.akaloris-scientific-legend dl{display:grid;grid-template-columns:1fr 1fr;gap:4px 8px}.akaloris-scientific-legend dl>div{margin:0}.akaloris-scientific-legend p{display:none}.akaloris-scientific-legend p:last-child{display:block;font-size:9px;padding-top:4px;margin-top:5px;color:#aebfb2}}@media(max-width:520px){.akaloris-scientific-legend{width:min(230px,55vw);max-height:170px}.akaloris-scientific-legend dl{display:block}.akaloris-scientific-legend dl>div:nth-child(n+3){display:none}}
+.akaloris-scientific-legend {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 35;
+  width: auto;
+  max-width: min(340px, calc(100% - 32px));
+  pointer-events: auto;
+  color: #faf9f5;
+  background: rgba(16, 40, 32, 0.95);
+  border: 1px solid rgba(198, 215, 195, 0.38);
+  border-radius: 8px;
+  padding: 8px 12px;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.27);
+  font-family: var(--font-inter), Inter, system-ui, sans-serif;
+  overflow-wrap: anywhere;
+  backdrop-filter: blur(8px);
+  transition: all 0.15s ease-in-out;
+}
+.akaloris-scientific-legend.is-expanded {
+  width: min(290px, calc(100% - 32px));
+  padding: 12px 14px;
+}
+.akaloris-legend-toggle {
+  background: transparent;
+  border: none;
+  color: inherit;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  padding: 0;
+  font-family: inherit;
+  text-align: left;
+}
+.akaloris-legend-toggle:focus-visible {
+  outline: 2px solid #f2b26c;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.akaloris-legend-head-tag {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.13em;
+  color: #d0a278;
+  flex: none;
+}
+.akaloris-legend-head-layer {
+  font-size: 11px;
+  font-weight: 700;
+  color: #ffffff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.akaloris-legend-head-state {
+  font-size: 10px;
+  color: #b7c9b8;
+  margin-inline-start: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.akaloris-legend-detail {
+  margin-top: 10px;
+  border-top: 1px solid #52695b;
+  padding-top: 8px;
+}
+.akaloris-legend-detail dl {
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+.akaloris-legend-detail dt {
+  color: #b7c9b8;
+  font-size: 9px;
+  text-transform: uppercase;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  margin-bottom: 2px;
+}
+.akaloris-legend-detail dd {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+.akaloris-legend-detail p {
+  margin: 8px 0 0;
+  border-top: 1px solid #52695b;
+  padding-top: 6px;
+  font-size: 10px;
+  color: #c4d1c4;
+  line-height: 1.4;
+}
+@media (max-width: 850px) {
+  .akaloris-scientific-legend {
+    top: 60px;
+    bottom: auto;
+    right: 12px;
+    width: auto;
+    max-width: calc(100% - 24px);
+    z-index: 40;
+  }
+}

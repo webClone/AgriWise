@@ -35,6 +35,12 @@ interface WorkspaceSpatialCanvasProps {
   draftGeometry?: WorkspaceDraftGeometryProps | null;
   onCanvasMapClick?: (coordinate: [number, number]) => void;
   workspaceMode?: boolean;
+  onAnalysisStateChange?: (state: {
+    canTransect: boolean;
+    transectActive: boolean;
+    transectPointsCount: number;
+    toggleTransect: () => void;
+  }) => void;
 }
 
 /**
@@ -59,6 +65,7 @@ export default function WorkspaceSpatialCanvas({
   draftGeometry,
   onCanvasMapClick,
   workspaceMode,
+  onAnalysisStateChange,
 }: WorkspaceSpatialCanvasProps) {
   const deviationSurface =
     l10.activeMode === "veg_attention"
@@ -100,6 +107,7 @@ export default function WorkspaceSpatialCanvas({
           draftGeometry={draftGeometry}
           onCanvasMapClick={onCanvasMapClick}
           workspaceMode={workspaceMode}
+          onAnalysisStateChange={onAnalysisStateChange}
         />
       )}
     </div>

@@ -73,6 +73,12 @@ interface PlotMapShellProps {
   draftGeometry?: WorkspaceDraftGeometryProps | null;
   onCanvasMapClick?: (coordinate: [number, number]) => void;
   workspaceMode?: boolean;
+  onAnalysisStateChange?: (state: {
+    canTransect: boolean;
+    transectActive: boolean;
+    transectPointsCount: number;
+    toggleTransect: () => void;
+  }) => void;
 }
 
 export default function PlotMapShell(props: PlotMapShellProps) {
@@ -148,6 +154,30 @@ export default function PlotMapShell(props: PlotMapShellProps) {
   const [hoveredSampleIndex, setHoveredSampleIndex] = useState<number | null>(null);
   const [showProxyBanner, setShowProxyBanner] = useState(false);
   const [showWorkspaceViewTools, setShowWorkspaceViewTools] = useState(false);
+
+  const handleToggleTransect = useCallback(() => {
+    if (!inspectorDiagnosisAllowed) {
+      setShowProxyBanner(true);
+      return;
+    }
+    setTransectMode(prev => {
+      const next = !prev;
+      if (next || transectPoints.length > 0) {
+        setTransectPoints([]);
+      }
+      return next;
+    });
+  }, [inspectorDiagnosisAllowed, transectPoints.length]);
+
+  const { onAnalysisStateChange } = props;
+  useEffect(() => {
+    onAnalysisStateChange?.({
+      canTransect: inspectorDiagnosisAllowed,
+      transectActive: transectMode,
+      transectPointsCount: transectPoints.length,
+      toggleTransect: handleToggleTransect,
+    });
+  }, [onAnalysisStateChange, inspectorDiagnosisAllowed, transectMode, transectPoints.length, handleToggleTransect]);
 
   // Track last hovered grid cell to avoid re-renders on sub-cell mouse movement
   const lastHoverCellRef = useRef<string | null>(null);
@@ -1050,80 +1080,62 @@ export default function PlotMapShell(props: PlotMapShellProps) {
         canInterpret={canInterpretDiagnostically}
       />}
 
-      {/* P07: Legacy retains its map dock; V2 uses a compact right-hand reveal.
-          This is a display control only; the existing scientific gates remain in place. */}
-      {props.workspaceMode && (
-        <div className="pw-p07-map-tools-trigger">
-          <button type="button" data-testid="p07-map-view-toggle"
-            aria-expanded={showWorkspaceViewTools} aria-controls="p07-map-view-panel"
-            onClick={()=>setShowWorkspaceViewTools(open=>!open)}>
-            View &amp; analysis
-          </button>
+      {/* P07: Legacy retains its floating map dock; V2 scene header hosts the unified View control */}
+      {!props.workspaceMode && (
+        <div
+          className="absolute z-40 flex flex-col gap-3 animate-fadeIn"
+          style={{ top: "340px", right: "344px" }}
+        >
+          <div className="backdrop-blur-md bg-slate-900/80 border border-white/10 rounded-xl p-3 shadow-2xl flex flex-col gap-2.5 min-w-[200px] transition-all">
+            <div className="text-white/60 text-[10px] font-bold tracking-wider uppercase">
+              Color Lens
+            </div>
+            <div className="grid grid-cols-2 gap-1.5">
+              {[
+                { id: "standard", label: "Standard", color: "bg-emerald-500" },
+                { id: "thermal", label: "Thermal", color: "bg-orange-500" },
+                { id: "chlorophyll", label: "Chlorophyll", color: "bg-pink-500" },
+                { id: "chroma", label: "Chroma", color: "bg-indigo-500" },
+              ].map(pal => (
+                <button
+                  key={pal.id}
+                  onClick={() => onPaletteChange?.(pal.id as "standard" | "thermal" | "chlorophyll" | "chroma")}
+                  className={`px-2 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-all border flex items-center gap-1.5 select-none ${paletteId === pal.id
+                      ? "bg-white/15 text-white border-white/35 shadow-lg"
+                      : "bg-slate-950/40 text-white/70 border-white/5 hover:bg-white/5 hover:text-white"
+                    }`}
+                >
+                  <span className={`w-2 h-2 rounded-full ${pal.color}`} />
+                  {pal.label}
+                </button>
+              ))}
+            </div>
+            <div className="text-[8px] text-white/40 italic leading-tight mt-0.5">
+              Color-only visualization; does not modify raw sensor bands.
+            </div>
+
+            <div className="h-px bg-white/10 my-1" />
+
+            <div className="text-white/60 text-[10px] font-bold tracking-wider uppercase">
+              Spatial Analysis
+            </div>
+            <button
+              onClick={handleToggleTransect}
+              className={`w-full py-2 rounded-lg text-xs font-semibold cursor-pointer border flex items-center justify-center gap-1.5 transition-all select-none ${!inspectorDiagnosisAllowed
+                  ? "opacity-40 cursor-not-allowed bg-slate-950/40 text-white/40 border-white/5"
+                  : transectMode
+                  ? "bg-yellow-400 text-slate-950 border-yellow-300 font-bold shadow-lg animate-pulse"
+                  : transectPoints.length > 0
+                    ? "bg-yellow-400/10 text-yellow-400 border-yellow-400/35 hover:bg-yellow-400/20"
+                    : "bg-slate-950/40 text-white/80 border-white/5 hover:bg-white/5 hover:text-white"
+                }`}
+              title={!inspectorDiagnosisAllowed ? "Cross-section requires inspector-authorized observed raster data" : "Draw a transect line on the map"}
+            >
+              📏 {transectMode ? "Placing A ➔ B..." : transectPoints.length > 0 ? "Reset Transect" : inspectorDiagnosisAllowed ? "Cross-Section" : "Cross-Section unavailable"}
+            </button>
+          </div>
         </div>
       )}
-      {(!props.workspaceMode || showWorkspaceViewTools) && <div
-        id={props.workspaceMode ? "p07-map-view-panel" : undefined} 
-        className={props.workspaceMode ? "pw-p07-map-tools-panel" : "absolute z-40 flex flex-col gap-3 animate-fadeIn"}
-        style={props.workspaceMode ? undefined : {top:"340px",right:"344px"}}
-      >
-        <div className="backdrop-blur-md bg-slate-900/80 border border-white/10 rounded-xl p-3 shadow-2xl flex flex-col gap-2.5 min-w-[200px] transition-all">
-          <div className="text-white/60 text-[10px] font-bold tracking-wider uppercase">
-            Color Lens
-          </div>
-          <div className="grid grid-cols-2 gap-1.5">
-            {[
-              { id: "standard", label: "Standard", color: "bg-emerald-500" },
-              { id: "thermal", label: "Thermal", color: "bg-orange-500" },
-              { id: "chlorophyll", label: "Chlorophyll", color: "bg-pink-500" },
-              { id: "chroma", label: "Chroma", color: "bg-indigo-500" },
-            ].map(pal => (
-              <button
-                key={pal.id}
-                onClick={() => onPaletteChange?.(pal.id as "standard" | "thermal" | "chlorophyll" | "chroma")}
-                className={`px-2 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-all border flex items-center gap-1.5 select-none ${paletteId === pal.id
-                    ? "bg-white/15 text-white border-white/35 shadow-lg"
-                    : "bg-slate-950/40 text-white/70 border-white/5 hover:bg-white/5 hover:text-white"
-                  }`}
-              >
-                <span className={`w-2 h-2 rounded-full ${pal.color}`} />
-                {pal.label}
-              </button>
-            ))}
-          </div>
-          <div className="text-[8px] text-white/40 italic leading-tight mt-0.5">
-            Color-only visualization; does not modify raw sensor bands.
-          </div>
-
-          <div className="h-px bg-white/10 my-1" />
-
-          <div className="text-white/60 text-[10px] font-bold tracking-wider uppercase">
-            Spatial Analysis
-          </div>
-          <button
-            onClick={() => {
-              if (!inspectorDiagnosisAllowed) {
-                setShowProxyBanner(true);
-                return;
-              }
-              setTransectMode(prev => !prev);
-              if (!transectMode) {
-                setTransectPoints([]);
-              }
-            }}
-            className={`w-full py-2 rounded-lg text-xs font-semibold cursor-pointer border flex items-center justify-center gap-1.5 transition-all select-none ${!inspectorDiagnosisAllowed
-                ? "opacity-40 cursor-not-allowed bg-slate-950/40 text-white/40 border-white/5"
-                : transectMode
-                ? "bg-yellow-400 text-slate-950 border-yellow-300 font-bold shadow-lg animate-pulse"
-                : transectPoints.length > 0
-                  ? "bg-yellow-400/10 text-yellow-400 border-yellow-400/35 hover:bg-yellow-400/20"
-                  : "bg-slate-950/40 text-white/80 border-white/5 hover:bg-white/5 hover:text-white"
-              }`}
-            title={!inspectorDiagnosisAllowed ? "Cross-section requires inspector-authorized observed raster data" : "Draw a transect line on the map"}
-          >
-            📏 {transectMode ? "Placing A ➔ B..." : transectPoints.length > 0 ? "Reset Transect" : inspectorDiagnosisAllowed ? "Cross-Section" : "Cross-Section unavailable"}
-          </button>
-        </div>
-      </div>}
 
       {/* --- AGRONOMIC BIOPHYSICS HUD (Top-Left) --- */}
       {activeCellData && canSamplePixel && canInterpretForScouting && (

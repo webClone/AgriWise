@@ -87,7 +87,7 @@ export function createInitialWorkspaceState({
       modifiedForcingParameters: {},
     },
     activeTool: initialTool,
-    isInspectorCollapsed: false,
+    isInspectorCollapsed: true,
     activeError: null,
   };
 }
@@ -148,6 +148,7 @@ export function workspaceReducer(state, action) {
           sourceSnapshotId: null,
           timestamp: null,
         },
+        isInspectorCollapsed: true,
         clocks: {
           scientificAsOf: null,
           operationalObserved: null,
@@ -314,6 +315,7 @@ export function workspaceReducer(state, action) {
           timestamp: timestamp || state.clocks.cursorTimestamp,
           metadata: metadata || {},
         },
+        isInspectorCollapsed: Boolean(id) ? false : true,
       };
     }
 
