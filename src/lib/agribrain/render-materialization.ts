@@ -213,7 +213,6 @@ export function validateSurfaceGrid(
     if (Math.abs(xEnd - maxLng) > COORD_TOLERANCE_DEG || Math.abs(yEnd - minLat) > COORD_TOLERANCE_DEG) {
       return { valid: false, reason: "grid_spec_affine_extent_mismatch", bounds: null, width, height };
     }
-    }
   }
 
   return {
