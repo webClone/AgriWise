@@ -139,19 +139,35 @@ export default function WorkspaceContextInspector({
   const entityProps = (matchedEntity?.properties || {}) as Record<string, any>;
   const latestMoisture = entityProps?.latestReading?.soilMoisture ?? null;
   const sensorDepth = matchedEntity?.spatial_support?.depth_cm ?? 15;
+  const channelRecords = Array.isArray(entityProps.channelReadings) && entityProps.channelReadings.length > 0
+    ? entityProps.channelReadings.map((cr: any) =>
+        normalizeRawReading({
+          deviceId: String(matchedEntity.entity_id || entityProps.deviceId || "sensor"),
+          channelId: cr.channelId || `ch_depth_${cr.depthCm ?? 15}cm`,
+          plotId: String(entityProps.plotId || plotId || "plot"),
+          variable: cr.variable || "soil_moisture_vwc",
+          rawValue: typeof cr.rawValue === "number" ? cr.rawValue : (typeof cr.soilMoisture === "number" ? cr.soilMoisture : 0),
+          rawUnit: cr.rawUnit || "pct",
+          nominalDepthCm: cr.depthCm ?? 15,
+        })
+      )
+    : latestMoisture != null
+    ? [
+        normalizeRawReading({
+          deviceId: String(matchedEntity.entity_id || entityProps.deviceId || "sensor"),
+          channelId: `ch_depth_${sensorDepth}cm`,
+          plotId: String(entityProps.plotId || plotId || "plot"),
+          variable: "soil_moisture_vwc",
+          rawValue: typeof latestMoisture === "number" ? latestMoisture : 0,
+          rawUnit: "pct",
+          nominalDepthCm: sensorDepth,
+        }),
+      ]
+    : [];
+
   const soilProfile =
-    matchedEntity && selectedEntity.kind === "SENSOR" && latestMoisture != null
-      ? buildSoilDepthProfile([
-          normalizeRawReading({
-            deviceId: String(matchedEntity.entity_id || entityProps.deviceId || "sensor"),
-            channelId: `ch_depth_${sensorDepth}cm`,
-            plotId: String(entityProps.plotId || plotId || "plot"),
-            variable: "soil_moisture_vwc",
-            rawValue: typeof latestMoisture === "number" ? latestMoisture : 0,
-            rawUnit: "pct",
-            nominalDepthCm: sensorDepth,
-          })
-        ], {
+    matchedEntity && selectedEntity.kind === "SENSOR" && channelRecords.length > 0
+      ? buildSoilDepthProfile(channelRecords, {
           plotId: String(entityProps.plotId || plotId || "plot"),
           deviceId: String(matchedEntity.entity_id || entityProps.deviceId || "sensor"),
         })
@@ -326,9 +342,19 @@ export default function WorkspaceContextInspector({
                     <span style={{ fontSize: "11px", fontWeight: 700, letterSpacing: "0.05em", color: "#38bdf8", textTransform: "uppercase" }}>
                       Soil Water Profile
                     </span>
+                    {entityProps.channelOffline && (
+                      <span style={{ fontSize: "9px", background: "rgba(239, 68, 68, 0.2)", color: "#f87171", border: "1px solid rgba(239, 68, 68, 0.4)", borderRadius: "3px", padding: "1px 5px" }}>
+                        Offline
+                      </span>
+                    )}
+                    {entityProps.calibrationExpired && (
+                      <span style={{ fontSize: "9px", background: "rgba(245, 158, 11, 0.2)", color: "#fbbf24", border: "1px solid rgba(245, 158, 11, 0.4)", borderRadius: "3px", padding: "1px 5px" }}>
+                        Cal Expired
+                      </span>
+                    )}
                   </div>
                   <span style={{ fontSize: "9px", color: "#94a3b8", background: "rgba(255,255,255,0.06)", padding: "2px 6px", borderRadius: "4px" }}>
-                    {soilProfile.measuredCount} measured depth
+                    {soilProfile.measuredCount} measured depth{soilProfile.measuredCount === 1 ? "" : "s"}
                   </span>
                 </div>
 

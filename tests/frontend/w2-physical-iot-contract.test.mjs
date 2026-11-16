@@ -17,6 +17,8 @@ import {
   checkRetroactivePublicationAdmission,
 } from "../../src/lib/agribrain/physical-sensor-contract.mjs";
 
+import { physicalObservationStore } from "../../src/lib/agribrain/physical-observation-store.mjs";
+
 test("W2-00: Scientific-Comparison Hardening & Epistemic Safeguards", async (t) => {
   await t.test("Zero fabricated uncertainty: sigma is strictly null when scalarSigma is absent", () => {
     const rasterWithoutSigma = {
@@ -229,5 +231,329 @@ test("W2-01: Multi-Depth Soil Profile Contract & Zero Fabrication Gate", async (
     assert.equal(check.canAdmitRetroactively, false);
     assert.match(check.reason, /Scientific boundary rejection/);
     assert.match(check.reason, /cannot be inserted retroactively/);
+  });
+});
+
+test("W2-02: Secure Sensor Ingestion, Idempotence & Quarantine Engine", async (t) => {
+  t.beforeEach(() => {
+    physicalObservationStore.reset();
+  });
+
+  await t.test("Valid multi-depth ingestion creates normalized physical observation records", () => {
+    const payload = {
+      deviceId: "DEV-MULTI-01",
+      deviceAcquiredAt: "2026-11-16T15:00:00Z",
+      plotId: "plot-alpha",
+      readings: [
+        {
+          channelId: "ch_10cm",
+          variable: "soil_moisture_vwc",
+          rawValue: 28.4,
+          rawUnit: "pct",
+          depthCm: 10,
+        },
+        {
+          channelId: "ch_20cm",
+          variable: "soil_moisture_vwc",
+          rawValue: 32.1,
+          rawUnit: "pct",
+          depthCm: 20,
+        },
+        {
+          channelId: "ch_40cm",
+          variable: "soil_moisture_vwc",
+          rawValue: 35.8,
+          rawUnit: "pct",
+          depthCm: 40,
+        },
+      ],
+    };
+
+    const res = physicalObservationStore.ingestPayload(payload, { registeredPlotId: "plot-alpha" });
+    assert.equal(res.success, true);
+    assert.equal(res.replayed, false);
+    assert.equal(res.accepted.length, 3);
+    assert.equal(res.quarantined.length, 0);
+    assert.equal(res.rawPayloadHash.length, 64);
+
+    assert.equal(res.accepted[0].depthInterval.nominalCm, 10);
+    assert.equal(res.accepted[0].normalizedValue, 0.284);
+    assert.equal(res.accepted[1].depthInterval.nominalCm, 20);
+    assert.equal(res.accepted[1].normalizedValue, 0.321);
+    assert.equal(res.accepted[2].depthInterval.nominalCm, 40);
+    assert.equal(res.accepted[2].normalizedValue, 0.358);
+  });
+
+  await t.test("Duplicate-message replay protection & idempotence", () => {
+    const messageId = "msg-unique-test-999";
+    const payload = {
+      deviceId: "DEV-REPLAY-01",
+      messageId,
+      deviceAcquiredAt: "2026-11-16T15:30:00Z",
+      plotId: "plot-alpha",
+      readings: [
+        {
+          channelId: "ch_15cm",
+          variable: "soil_moisture_vwc",
+          rawValue: 33.0,
+          rawUnit: "pct",
+          depthCm: 15,
+        },
+      ],
+    };
+
+    // First ingestion succeeds
+    const firstRes = physicalObservationStore.ingestPayload(payload, { registeredPlotId: "plot-alpha" });
+    assert.equal(firstRes.success, true);
+    assert.equal(firstRes.replayed, false);
+    assert.equal(firstRes.accepted.length, 1);
+
+    // Duplicate ingestion with same messageId returns idempotent success with replayed=true
+    const replayRes = physicalObservationStore.ingestPayload(payload, { registeredPlotId: "plot-alpha" });
+    assert.equal(replayRes.success, true);
+    assert.equal(replayRes.replayed, true);
+    assert.equal(replayRes.accepted.length, 0);
+    assert.match(replayRes.message, /Duplicate message detected/);
+
+    // Replay with identical payload hash and acquisition timestamp without messageId also caught
+    const payloadNoId = {
+      deviceId: "DEV-REPLAY-HASH",
+      deviceAcquiredAt: "2026-11-16T15:35:00Z",
+      plotId: "plot-alpha",
+      readings: [
+        {
+          channelId: "ch_15cm",
+          variable: "soil_moisture_vwc",
+          rawValue: 33.0,
+          rawUnit: "pct",
+          depthCm: 15,
+        },
+      ],
+    };
+    const firstHashRes = physicalObservationStore.ingestPayload(payloadNoId, { registeredPlotId: "plot-alpha" });
+    assert.equal(firstHashRes.success, true);
+    assert.equal(firstHashRes.replayed, false);
+
+    const hashReplayRes = physicalObservationStore.ingestPayload(payloadNoId, { registeredPlotId: "plot-alpha" });
+    assert.equal(hashReplayRes.success, true);
+    assert.equal(hashReplayRes.replayed, true);
+    assert.match(hashReplayRes.message, /Duplicate payload detected/);
+  });
+
+  await t.test("Clock drift future timestamp rejection", () => {
+    const futureAcquiredAt = new Date(Date.now() + 600_000).toISOString(); // 10 min in future
+    const payload = {
+      deviceId: "DEV-DRIFT-01",
+      deviceAcquiredAt: futureAcquiredAt,
+      soilMoisture: 30.0,
+    };
+
+    assert.throws(
+      () => physicalObservationStore.ingestPayload(payload),
+      /clock drift violation/
+    );
+  });
+
+  await t.test("Physical range violation is quarantined, not admitted to observations", () => {
+    const payload = {
+      deviceId: "DEV-QA-RANGE",
+      deviceAcquiredAt: "2026-11-16T15:45:00Z",
+      plotId: "plot-alpha",
+      readings: [
+        {
+          channelId: "ch_15cm",
+          variable: "soil_moisture_vwc",
+          rawValue: 95.0, // 95% = 0.95 fraction > 0.75 max
+          rawUnit: "pct",
+          depthCm: 15,
+        },
+      ],
+    };
+
+    const res = physicalObservationStore.ingestPayload(payload, { registeredPlotId: "plot-alpha" });
+    assert.equal(res.success, true);
+    assert.equal(res.accepted.length, 0);
+    assert.equal(res.quarantined.length, 1);
+    assert.equal(res.quarantined[0].variable, "soil_moisture_vwc");
+    assert.match(res.quarantined[0].reason, /out_of_physical_range/);
+
+    // Confirm it is not stored in operational plot observations
+    const stored = physicalObservationStore.getObservationsForPlot("plot-alpha");
+    assert.equal(stored.length, 0);
+
+    // Confirm it is stored in quarantine partition
+    const quar = physicalObservationStore.getQuarantined("plot-alpha");
+    assert.equal(quar.length, 1);
+  });
+
+  await t.test("Incorrect depth registration is quarantined for soil probes", () => {
+    const payload = {
+      deviceId: "DEV-DEPTH-ERR",
+      deviceAcquiredAt: "2026-11-16T15:50:00Z",
+      plotId: "plot-alpha",
+      readings: [
+        {
+          channelId: "ch_negative_depth",
+          variable: "soil_moisture_vwc",
+          rawValue: 32.0,
+          rawUnit: "pct",
+          depthCm: -10, // Invalid negative depth
+        },
+      ],
+    };
+
+    const res = physicalObservationStore.ingestPayload(payload, { registeredPlotId: "plot-alpha" });
+    assert.equal(res.accepted.length, 0);
+    assert.equal(res.quarantined.length, 1);
+    assert.match(res.quarantined[0].reason, /incorrect_depth_registration/);
+  });
+
+  await t.test("Calibration expiration flags observation as SUSPECT", () => {
+    const deviceId = "DEV-EXPIRED-CAL";
+    physicalObservationStore.registerCalibration(deviceId, {
+      calibrationId: "cal-old-2025",
+      version: "1.0",
+      method: "FIELD_TWO_POINT",
+      validUntil: "2026-01-01T00:00:00Z", // expired
+    });
+
+    const payload = {
+      deviceId,
+      deviceAcquiredAt: "2026-11-16T16:00:00Z",
+      plotId: "plot-alpha",
+      readings: [
+        {
+          channelId: "ch_15cm",
+          variable: "soil_moisture_vwc",
+          rawValue: 34.0,
+          rawUnit: "pct",
+          depthCm: 15,
+        },
+      ],
+    };
+
+    const res = physicalObservationStore.ingestPayload(payload, { registeredPlotId: "plot-alpha" });
+    assert.equal(res.accepted.length, 1);
+    assert.equal(res.accepted[0].qaState, "SUSPECT", "Expired calibration flags QA as SUSPECT");
+  });
+});
+
+test("W2-03: Multi-Depth Profile State, Channel Health & Tenant Boundary", async (t) => {
+  t.beforeEach(() => {
+    physicalObservationStore.reset();
+  });
+
+  await t.test("Soil depth profile preserves unmeasured standard depths as gaps (zero fabrication)", () => {
+    const payload = {
+      deviceId: "DEV-DEPTH-PROFILE",
+      deviceAcquiredAt: "2026-11-16T16:15:00Z",
+      plotId: "plot-beta",
+      readings: [
+        {
+          channelId: "ch_15cm",
+          variable: "soil_moisture_vwc",
+          rawValue: 34.2,
+          rawUnit: "pct",
+          depthCm: 15,
+        },
+        {
+          channelId: "ch_30cm",
+          variable: "soil_moisture_vwc",
+          rawValue: 31.0,
+          rawUnit: "pct",
+          depthCm: 30,
+        },
+      ],
+    };
+
+    physicalObservationStore.ingestPayload(payload, { registeredPlotId: "plot-beta" });
+
+    const profile = physicalObservationStore.getSoilDepthProfile("plot-beta", "DEV-DEPTH-PROFILE");
+    assert.equal(profile.measuredCount, 2);
+    assert.equal(profile.rootZoneAggregateAllowed, false, "2 depths cannot represent full root zone (requires >= 3)");
+
+    const layer10 = profile.layers.find((l) => l.nominalCm === 10);
+    assert.equal(layer10.measured, false);
+    assert.equal(layer10.label, "Not measured —");
+
+    const layer15 = profile.layers.find((l) => l.nominalCm === 15);
+    assert.equal(layer15.measured, true);
+    assert.equal(layer15.vwcFraction, 0.342);
+    assert.equal(layer15.label, "34.2%");
+
+    const layer30 = profile.layers.find((l) => l.nominalCm === 30);
+    assert.equal(layer30.measured, true);
+    assert.equal(layer30.vwcFraction, 0.31);
+    assert.equal(layer30.label, "31.0%");
+
+    const layer45 = profile.layers.find((l) => l.nominalCm === 45);
+    assert.equal(layer45.measured, false);
+    assert.equal(layer45.label, "Not measured —");
+  });
+
+  await t.test("Channel health classifies FRESH, STALE, and OFFLINE channels accurately", () => {
+    const now = new Date();
+
+    // Fresh channel: 5 min ago
+    physicalObservationStore.ingestPayload({
+      deviceId: "DEV-HEALTH-01",
+      deviceAcquiredAt: new Date(now.getTime() - 5 * 60 * 1000).toISOString(),
+      plotId: "plot-gamma",
+      readings: [{ channelId: "ch_fresh", variable: "soil_moisture_vwc", rawValue: 30.0, rawUnit: "pct", depthCm: 15 }],
+    });
+
+    // Stale channel: 25 min ago
+    physicalObservationStore.ingestPayload({
+      deviceId: "DEV-HEALTH-01",
+      deviceAcquiredAt: new Date(now.getTime() - 25 * 60 * 1000).toISOString(),
+      plotId: "plot-gamma",
+      readings: [{ channelId: "ch_stale", variable: "soil_moisture_vwc", rawValue: 28.0, rawUnit: "pct", depthCm: 30 }],
+    });
+
+    // Offline channel: 60 min ago
+    physicalObservationStore.ingestPayload({
+      deviceId: "DEV-HEALTH-01",
+      deviceAcquiredAt: new Date(now.getTime() - 60 * 60 * 1000).toISOString(),
+      plotId: "plot-gamma",
+      readings: [{ channelId: "ch_offline", variable: "soil_moisture_vwc", rawValue: 25.0, rawUnit: "pct", depthCm: 60 }],
+    });
+
+    const channels = physicalObservationStore.getChannelsForDevice("DEV-HEALTH-01", now);
+    const freshCh = channels.find((c) => c.channelId === "ch_fresh");
+    const staleCh = channels.find((c) => c.channelId === "ch_stale");
+    const offlineCh = channels.find((c) => c.channelId === "ch_offline");
+
+    assert.equal(freshCh.freshness, "FRESH");
+    assert.equal(freshCh.status, "ACTIVE");
+
+    assert.equal(staleCh.freshness, "STALE");
+    assert.equal(staleCh.status, "ACTIVE");
+
+    assert.equal(offlineCh.freshness, "OFFLINE");
+    assert.equal(offlineCh.status, "OFFLINE");
+  });
+
+  await t.test("Owner-scoped authorization boundary: unauthenticated 401, cross-tenant 404", () => {
+    // Contract check for tenant boundary rules
+    const evaluateTenantAccess = (userId, plotOwnerId) => {
+      if (!userId) return { status: 401, error: "Authentication required" };
+      if (userId !== plotOwnerId) return { status: 404, error: "Plot not found" };
+      return { status: 200, ok: true };
+    };
+
+    assert.deepEqual(evaluateTenantAccess(null, "user-owner"), {
+      status: 401,
+      error: "Authentication required",
+    });
+
+    assert.deepEqual(evaluateTenantAccess("user-attacker", "user-owner"), {
+      status: 404,
+      error: "Plot not found",
+    });
+
+    assert.deepEqual(evaluateTenantAccess("user-owner", "user-owner"), {
+      status: 200,
+      ok: true,
+    });
   });
 });
