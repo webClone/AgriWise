@@ -1,6 +1,6 @@
 "use client";
 import {useState} from "react";
-import {Layers3, ListFilter, PenTool, Plane, FileText, X, Eye, FlaskConical} from "lucide-react";
+import {Layers3, ListFilter, PenTool, Plane, FileText, X, Eye, FlaskConical, PanelRightOpen, PanelRightClose} from "lucide-react";
 import type {WorkspaceFeatureEnvelope} from "@/lib/agribrain/workspace-feature-envelope";
 import type {SceneLayerEntry} from "./p06-scene-registry.mjs";
 import {sceneLayerForEntityKind} from "./p06-scene-registry.mjs";
@@ -31,6 +31,8 @@ export default function WorkspaceSceneControlsP06({
  activeAsmaeKey = "vigor",
  onSelectAsmaeState,
  asmaeStatesSummary = [],
+ isInspectorOpen = false,
+ onToggleInspector,
 }:{
  manifest:SceneLayerEntry[];
  entities:WorkspaceFeatureEnvelope[];
@@ -51,6 +53,8 @@ export default function WorkspaceSceneControlsP06({
  activeAsmaeKey?: AsmaeStateKey | null;
  onSelectAsmaeState?: (key: AsmaeStateKey) => void;
  asmaeStatesSummary?: AsmaeStateAvailabilityResult[];
+ isInspectorOpen?: boolean;
+ onToggleInspector?: () => void;
 }) {
  const [open,setOpen]=useState(false);
  const [directory,setDirectory]=useState(false);
@@ -111,6 +115,24 @@ export default function WorkspaceSceneControlsP06({
         title="Draw planned flight route or scouting boundary"
       >
         <PenTool size={16} aria-hidden="true"/> Draw
+      </button>
+    )}
+    {onToggleInspector && (
+      <button
+        type="button"
+        data-testid="p07-scene-inspector-toggle"
+        className="pw-desktop-inspector-reopen"
+        aria-expanded={isInspectorOpen}
+        aria-controls="pw-context-inspector"
+        onClick={onToggleInspector}
+        title={isInspectorOpen ? "Collapse Context Inspector" : "Expand Context Inspector"}
+        style={{
+          background: isInspectorOpen ? "rgba(255, 255, 255, 0.18)" : undefined,
+          borderColor: isInspectorOpen ? "rgba(255, 255, 255, 0.35)" : undefined,
+        }}
+      >
+        {isInspectorOpen ? <PanelRightClose size={16} aria-hidden="true" /> : <PanelRightOpen size={16} aria-hidden="true" />}
+        Inspector
       </button>
     )}
    </div>

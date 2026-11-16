@@ -374,16 +374,6 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
         <div className="pw-scientific-status">
           <WorkspaceScientificStatus />
         </div>
-        {!desktopInspectorOpen && (
-          <button
-            type="button"
-            className="pw-desktop-inspector-reopen"
-            aria-label="Expand Context Inspector"
-            onClick={() => toggleInspector(false)}
-          >
-            <PanelRightOpen size={17} aria-hidden="true" /> Inspector
-          </button>
-        )}
         <button
           type="button"
           className="pw-mobile-inspector-button"
@@ -444,6 +434,8 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
           transectActive={analysisState?.transectActive ?? false}
           transectPointsCount={analysisState?.transectPointsCount ?? 0}
           onToggleTransect={analysisState?.toggleTransect}
+          isInspectorOpen={desktopInspectorOpen}
+          onToggleInspector={() => toggleInspector(desktopInspectorOpen)}
           onToggle={(id, visible) => {
             toggleSceneLayer(id, visible);
             if (!visible && id === "zones" && state.selectedEntity.kind === "ZONE") {

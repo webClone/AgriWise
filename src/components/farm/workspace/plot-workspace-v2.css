@@ -164,6 +164,12 @@
   display: flex;
   justify-content: center;
 }
+@media (min-width: 1024px) {
+  .pw-scientific-status {
+    inset-inline-start: 240px;
+    inset-inline-end: 580px;
+  }
+}
 .pw-trust-strip {
   max-width: min(830px, 100%);
   display: flex;
@@ -239,7 +245,6 @@
 .pw-icon-button,
 .pw-timeline-toggle,
 .pw-mobile-inspector-button,
-.pw-desktop-inspector-reopen,
 .pw-secondary-button {
   border: 1px solid var(--pw-border);
   background: var(--pw-elevated);
@@ -293,14 +298,6 @@
   font-size: 12px;
   font-weight: 700;
   text-decoration: none;
-}
-.pw-desktop-inspector-reopen {
-  position: absolute;
-  z-index: 39;
-  inset-block-start: var(--pw-topbar-clearance);
-  inset-inline-end: 15px;
-  padding: 0 13px;
-  font-size: 11px;
 }
 .pw-mobile-inspector-button { display: none; }
 .pw-rtl-icon { display: none; }
@@ -414,7 +411,6 @@
     padding: 0 12px;
     font-size: 11px;
   }
-  .pw-desktop-inspector-reopen { display: none; }
   .pw-timeline-heading span { display: none; }
 }
 @media (max-width: 600px) {
