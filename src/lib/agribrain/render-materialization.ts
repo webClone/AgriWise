@@ -181,17 +181,24 @@ export function validateSurfaceGrid(
     if (!Array.isArray(spec.transform) || spec.transform.length !== 6 || !spec.transform.every((v) => typeof v === "number" && Number.isFinite(v))) {
       return { valid: false, reason: "grid_spec_affine_invalid", bounds: null, width, height };
     }
-    const [x0, dx, , y0, , dy] = spec.transform;
+    const [x0, dx, rx, y0, ry, dy] = spec.transform;
     if (Math.abs(dx) <= 0 || Math.abs(dy) <= 0) {
       return { valid: false, reason: "grid_spec_affine_degenerate", bounds: null, width, height };
+    }
+    // 1. Require unrotated, unsheared transform
+    if (Math.abs(rx || 0) > 1e-7 || Math.abs(ry || 0) > 1e-7) {
+      return { valid: false, reason: "grid_spec_affine_rotated_or_sheared", bounds: null, width, height };
+    }
+    // 2. Require north-up orientation: dx > 0 (west-to-east), dy < 0 (north-to-south)
+    if (dx <= 0 || dy >= 0) {
+      return { valid: false, reason: "grid_spec_affine_orientation_not_north_up", bounds: null, width, height };
     }
     const cellTolX = Math.abs(dx) * 0.5;
     const cellTolY = Math.abs(dy) * 0.5;
     if (Math.abs(x0 - minLng) > cellTolX) {
       return { valid: false, reason: "grid_spec_affine_bounds_mismatch", bounds: null, width, height };
     }
-    const expectedY0 = dy < 0 ? maxLat : minLat;
-    if (Math.abs(y0 - expectedY0) > cellTolY) {
+    if (Math.abs(y0 - maxLat) > cellTolY) {
       return { valid: false, reason: "grid_spec_affine_bounds_mismatch", bounds: null, width, height };
     }
   }

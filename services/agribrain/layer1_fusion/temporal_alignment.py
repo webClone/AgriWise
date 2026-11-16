@@ -241,27 +241,30 @@ def is_available_at_cutoff(
                     return False, f"MALFORMED_FIRST_AVAILABLE_AT: malformed receipt first_available_at '{rcpt.first_available_at}'"
             
             # Check 2: Exact-content publication receipt with published_at <= cutoff
-            v_published = getattr(item, "verified_published_at", None)
-            if v_published is not None and getattr(item, "publication_receipt_verified", False):
-                try:
-                    p_dt = ensure_utc(v_published if isinstance(v_published, datetime) else datetime.fromisoformat(str(v_published)))
-                    if p_dt <= cutoff_utc:
-                        has_auth_availability = True
-                    else:
-                        return False, f"PUBLISHED_AFTER_CUTOFF: publication receipt published_at {p_dt} > cutoff {cutoff_utc}"
-                except Exception:
-                    return False, f"MALFORMED_PUBLICATION_TIMESTAMP: malformed publication timestamp '{v_published}'"
-            elif pub_rcpt is not None and getattr(item, "publication_receipt_verified", False):
-                p_val = getattr(pub_rcpt, "published_at", None)
-                if p_val:
+            # Exact matching content digest required between publication receipt and measurement.
+            rcpt_digest = (rcpt.get("content_digest") if isinstance(rcpt, dict) else getattr(rcpt, "content_digest", None)) if rcpt is not None else None
+            item_digest = getattr(item, "content_hash", None) or rcpt_digest
+            pub_hash = (pub_rcpt.get("content_hash") if isinstance(pub_rcpt, dict) else getattr(pub_rcpt, "content_hash", None)) if pub_rcpt is not None else None
+
+            has_matching_content_hash = bool(
+                pub_hash and str(pub_hash).strip()
+                and item_digest and str(item_digest).strip()
+                and str(pub_hash).strip() == str(item_digest).strip()
+            )
+
+            if has_matching_content_hash and getattr(item, "publication_receipt_verified", False):
+                v_published = getattr(item, "verified_published_at", None)
+                if v_published is None and pub_rcpt is not None:
+                    v_published = pub_rcpt.get("published_at") if isinstance(pub_rcpt, dict) else getattr(pub_rcpt, "published_at", None)
+                if v_published is not None:
                     try:
-                        p_dt = ensure_utc(datetime.fromisoformat(str(p_val)) if isinstance(p_val, str) else p_val)
+                        p_dt = ensure_utc(v_published if isinstance(v_published, datetime) else datetime.fromisoformat(str(v_published)))
                         if p_dt <= cutoff_utc:
                             has_auth_availability = True
                         else:
                             return False, f"PUBLISHED_AFTER_CUTOFF: publication receipt published_at {p_dt} > cutoff {cutoff_utc}"
                     except Exception:
-                        return False, f"MALFORMED_PUBLICATION_TIMESTAMP: malformed publication timestamp '{p_val}'"
+                        return False, f"MALFORMED_PUBLICATION_TIMESTAMP: malformed publication timestamp '{v_published}'"
 
             if not has_auth_availability:
                 # Signed sensor without authenticated first-availability timestamp <= cutoff.
