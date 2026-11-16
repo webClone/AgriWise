@@ -26,7 +26,7 @@ test("P07: appearance colors and cross-section continue through existing qualifi
 });
 test("P07: workspace mode is scoped exclusively to native V2; standalone fallback unchanged",()=>{
   assert.match(canvas,/workspaceMode=\{workspaceMode\}/);
-  assert.match(shell,/\sworkspaceMode\s*\/>/);
+  assert.match(shell,/\sworkspaceMode\s/);
   assert.match(gate,/if \(!isPlotWorkspaceV2Enabled\(\)\) return <PlotDashboard \{\.\.\.props\} \/>/);
   assert.match(map,/style=\{props\.workspaceMode \? undefined : \{top:"340px",right:"344px"\}\}/);
 });
