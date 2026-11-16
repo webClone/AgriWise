@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import type { WorkspaceFeatureEnvelope } from "@/lib/agribrain/workspace-feature-envelope";
 import {geometryBounds} from "@/lib/agribrain/workspace-geometry.mjs";
+import {summarizeWorkspaceGeometry} from "./p07-spatial-summary.mjs";
 import type { WorkspaceQuickAction } from "./WorkspaceToolDock";
 
 export default function WorkspaceContextInspector({
@@ -72,6 +73,7 @@ export default function WorkspaceContextInspector({
   const entityCoords = matchedEntity?.geometry?.type==="Point" ? matchedEntity.geometry.coordinates : null;
   const footprintBounds = matchedEntity?.geometry?.type !== "Point" ? geometryBounds(matchedEntity?.geometry) : null;
   const ownerDeclared=matchedEntity?.spatial_support?.location_source==="USER_DECLARED";
+  const spatialSummary=summarizeWorkspaceGeometry(matchedEntity?.geometry ?? null);
   const isFixture = entityProps.is_benchmark_fixture === true || matchedEntity?.epistemic_class === "SIMULATED";
   const isOnline = isFixture ? false : (entityProps.isOnline ?? true);
   const latest = entityProps.latestReading;
@@ -96,6 +98,37 @@ export default function WorkspaceContextInspector({
       </header>
 
       <div className="pw-inspector-content">
+        {matchedEntity && (
+          <section className="pw-p07-entity-overview" aria-label="Selected entity overview"
+            data-testid="p07-entity-overview">
+            <div className="pw-p07-entity-overline">
+              <span>{matchedEntity.entity_kind.replaceAll("_"," ")}</span>
+              <span data-epistemic={matchedEntity.epistemic_class}>{matchedEntity.epistemic_class.replaceAll("_"," ")}</span>
+            </div>
+            <h3>{String(entityProps.name || entityProps.deviceId || matchedEntity.entity_id)}</h3>
+            <dl className="pw-p07-metrics">
+              <div><dt>Mapped shape</dt><dd>{matchedEntity.geometry?.type || "Location not registered"}</dd></div>
+              {spatialSummary?.areaM2 != null && <div><dt>Drawn area</dt><dd>{(spatialSummary.areaM2/10000).toFixed(2)} ha</dd></div>}
+              {spatialSummary?.perimeterM != null && <div><dt>Perimeter</dt><dd>{Math.round(spatialSummary.perimeterM)} m</dd></div>}
+              {spatialSummary?.lengthM != null && <div><dt>Route length</dt><dd>{Math.round(spatialSummary.lengthM)} m</dd></div>}
+              {spatialSummary && <div><dt>Vertices</dt><dd>{spatialSummary.vertexCount}</dd></div>}
+              {ownerDeclared && <div><dt>Revision</dt><dd>{String(entityProps.revision || 1)}</dd></div>}
+              {matchedEntity.provenance?.record_digest && <div><dt>Envelope integrity</dt>
+                <dd className="pw-p07-digest">{matchedEntity.provenance.record_digest.slice(0,12)}…</dd></div>}
+            </dl>
+            {ownerDeclared && <>
+              <p className="pw-p07-entity-note">Owner-declared geometry. Dimensions are calculated from submitted vertices, not a verified survey or scientific publication.</p>
+              <div className="pw-p07-entity-actions" aria-label="Geometry lifecycle actions">
+                <button type="button" className="pw-p07-action-primary" data-testid="p06-revise-btn"
+                  onClick={()=>onRevise?.(matchedEntity)}><Edit3 size={14}/> Adjust vertices</button>
+                <button type="button" data-testid="p06-history-btn"
+                  onClick={()=>onHistory?.(matchedEntity)}><History size={14}/> History</button>
+                <button type="button" className="pw-p07-action-danger" data-testid="p06-revoke-btn"
+                  onClick={()=>onRevoke?.(matchedEntity)}><Trash2 size={14}/> Revoke</button>
+              </div>
+            </>}
+          </section>
+        )}
         {/* 1. Selected SENSOR Section */}
         {selectedEntity.kind === "SENSOR" && matchedEntity ? (
           <div className="pw-info-section" data-testid="p05-sensor-inspector">
@@ -306,50 +339,7 @@ export default function WorkspaceContextInspector({
               >
                 <Camera size={15} /> {ownerDeclared ? "Open evidence workspace" : "View Visual Stream"}
               </button>
-              {ownerDeclared && (
-                <div style={{ display: "flex", gap: "6px", width: "100%" }}>
-                  <button
-                    type="button"
-                    data-testid="p06-revise-btn"
-                    onClick={() => onRevise?.(matchedEntity)}
-                    style={{
-                      flex: 1, padding: "7px 10px", background: "rgba(217, 119, 6, 0.15)",
-                      border: "1px solid rgba(217, 119, 6, 0.35)", color: "#fbbf24",
-                      borderRadius: "6px", fontSize: "12px", fontWeight: 600, cursor: "pointer",
-                      display: "flex", alignItems: "center", justifyContent: "center", gap: "5px"
-                    }}
-                  >
-                    <Edit3 size={13} /> Revise
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="p06-revoke-btn"
-                    onClick={() => onRevoke?.(matchedEntity)}
-                    style={{
-                      flex: 1, padding: "7px 10px", background: "rgba(225, 29, 72, 0.15)",
-                      border: "1px solid rgba(225, 29, 72, 0.35)", color: "#fb7185",
-                      borderRadius: "6px", fontSize: "12px", fontWeight: 600, cursor: "pointer",
-                      display: "flex", alignItems: "center", justifyContent: "center", gap: "5px"
-                    }}
-                  >
-                    <Trash2 size={13} /> Revoke
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="p06-history-btn"
-                    onClick={() => onHistory?.(matchedEntity)}
-                    title="View revision audit trail"
-                    style={{
-                      padding: "7px 10px", background: "rgba(56, 189, 248, 0.15)",
-                      border: "1px solid rgba(56, 189, 248, 0.35)", color: "#38bdf8",
-                      borderRadius: "6px", fontSize: "12px", fontWeight: 600, cursor: "pointer",
-                      display: "flex", alignItems: "center", justifyContent: "center"
-                    }}
-                  >
-                    <History size={13} />
-                  </button>
-                </div>
-              )}
+              
               <button
                 type="button"
                 className="pw-secondary-button"
@@ -439,50 +429,7 @@ export default function WorkspaceContextInspector({
               >
                 <Plane size={15} /> Open Mission Control
               </button>
-              {ownerDeclared && (
-                <div style={{ display: "flex", gap: "6px", width: "100%" }}>
-                  <button
-                    type="button"
-                    data-testid="p06-revise-btn"
-                    onClick={() => onRevise?.(matchedEntity)}
-                    style={{
-                      flex: 1, padding: "7px 10px", background: "rgba(217, 119, 6, 0.15)",
-                      border: "1px solid rgba(217, 119, 6, 0.35)", color: "#fbbf24",
-                      borderRadius: "6px", fontSize: "12px", fontWeight: 600, cursor: "pointer",
-                      display: "flex", alignItems: "center", justifyContent: "center", gap: "5px"
-                    }}
-                  >
-                    <Edit3 size={13} /> Revise
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="p06-revoke-btn"
-                    onClick={() => onRevoke?.(matchedEntity)}
-                    style={{
-                      flex: 1, padding: "7px 10px", background: "rgba(225, 29, 72, 0.15)",
-                      border: "1px solid rgba(225, 29, 72, 0.35)", color: "#fb7185",
-                      borderRadius: "6px", fontSize: "12px", fontWeight: 600, cursor: "pointer",
-                      display: "flex", alignItems: "center", justifyContent: "center", gap: "5px"
-                    }}
-                  >
-                    <Trash2 size={13} /> Revoke
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="p06-history-btn"
-                    onClick={() => onHistory?.(matchedEntity)}
-                    title="View revision audit trail"
-                    style={{
-                      padding: "7px 10px", background: "rgba(56, 189, 248, 0.15)",
-                      border: "1px solid rgba(56, 189, 248, 0.35)", color: "#38bdf8",
-                      borderRadius: "6px", fontSize: "12px", fontWeight: 600, cursor: "pointer",
-                      display: "flex", alignItems: "center", justifyContent: "center"
-                    }}
-                  >
-                    <History size={13} />
-                  </button>
-                </div>
-              )}
+              
               <button
                 type="button"
                 className="pw-secondary-button"
@@ -570,50 +517,7 @@ export default function WorkspaceContextInspector({
               >
                 <FileText size={15} /> Add / View Evidence
               </button>
-              {ownerDeclared && (
-                <div style={{ display: "flex", gap: "6px", width: "100%" }}>
-                  <button
-                    type="button"
-                    data-testid="p06-revise-btn"
-                    onClick={() => onRevise?.(matchedEntity)}
-                    style={{
-                      flex: 1, padding: "7px 10px", background: "rgba(217, 119, 6, 0.15)",
-                      border: "1px solid rgba(217, 119, 6, 0.35)", color: "#fbbf24",
-                      borderRadius: "6px", fontSize: "12px", fontWeight: 600, cursor: "pointer",
-                      display: "flex", alignItems: "center", justifyContent: "center", gap: "5px"
-                    }}
-                  >
-                    <Edit3 size={13} /> Revise
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="p06-revoke-btn"
-                    onClick={() => onRevoke?.(matchedEntity)}
-                    style={{
-                      flex: 1, padding: "7px 10px", background: "rgba(225, 29, 72, 0.15)",
-                      border: "1px solid rgba(225, 29, 72, 0.35)", color: "#fb7185",
-                      borderRadius: "6px", fontSize: "12px", fontWeight: 600, cursor: "pointer",
-                      display: "flex", alignItems: "center", justifyContent: "center", gap: "5px"
-                    }}
-                  >
-                    <Trash2 size={13} /> Revoke
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="p06-history-btn"
-                    onClick={() => onHistory?.(matchedEntity)}
-                    title="View revision audit trail"
-                    style={{
-                      padding: "7px 10px", background: "rgba(56, 189, 248, 0.15)",
-                      border: "1px solid rgba(56, 189, 248, 0.35)", color: "#38bdf8",
-                      borderRadius: "6px", fontSize: "12px", fontWeight: 600, cursor: "pointer",
-                      display: "flex", alignItems: "center", justifyContent: "center"
-                    }}
-                  >
-                    <History size={13} />
-                  </button>
-                </div>
-              )}
+              
               <button
                 type="button"
                 className="pw-secondary-button"

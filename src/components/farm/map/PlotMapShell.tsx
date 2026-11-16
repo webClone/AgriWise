@@ -1074,7 +1074,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
             {[
               { id: "standard", label: "Standard", color: "bg-emerald-500" },
               { id: "thermal", label: "Thermal", color: "bg-orange-500" },
-              { id: "chlorophyll", label: "Chluoro", color: "bg-pink-500" },
+              { id: "chlorophyll", label: "Chlorophyll", color: "bg-pink-500" },
               { id: "chroma", label: "Chroma", color: "bg-indigo-500" },
             ].map(pal => (
               <button
@@ -1127,13 +1127,13 @@ export default function PlotMapShell(props: PlotMapShellProps) {
 
       {/* --- AGRONOMIC BIOPHYSICS HUD (Top-Left) --- */}
       {activeCellData && canSamplePixel && canInterpretForScouting && (
-        <div 
+        <div
           className="absolute backdrop-blur-md bg-slate-950/75 border border-white/10 rounded-xl p-4 shadow-2xl min-w-[280px] pointer-events-none animate-fadeIn transition-all"
-          style={{
-            top: "260px",
-            left: "344px",
+          style={props.workspaceMode ? {
+            top: "calc(var(--pw-topbar-clearance, 111px) + 56px)",
+            left: "14px",
             zIndex: 40,
-          }}
+          } : {top: "260px",left: "344px",zIndex: 40}}
         >
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider">
