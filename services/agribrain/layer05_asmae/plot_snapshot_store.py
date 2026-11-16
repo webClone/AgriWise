@@ -404,6 +404,24 @@ def publish_canonical_plot_snapshot(
                     "crop_evidence_ledger_hash", "crop_influence_manifest_hash",
                 )
             )
+            existing_num_hash = (
+                (existing.get("scientific_result") or {}).get("asmae_numerical_digest")
+                or ((existing.get("frontend_payload") or {}).get("asmae_posterior_numerical_record") or {}).get("numerical_vector_hash")
+                or (existing.get("asmae") or {}).get("asmae_numerical_digest")
+            )
+            incoming_num_hash = (
+                (envelope.get("scientific_result") or {}).get("asmae_numerical_digest")
+                or ((envelope.get("frontend_payload") or {}).get("asmae_posterior_numerical_record") or {}).get("numerical_vector_hash")
+                or (envelope.get("asmae") or {}).get("asmae_numerical_digest")
+                or ((immutable_frontend_payload.get("asmae_posterior_numerical_record") or {})).get("numerical_vector_hash")
+            )
+            if existing_num_hash and incoming_num_hash and existing_num_hash != incoming_num_hash:
+                raise ValueError(
+                    f"immutable plot snapshot collision: numerical record mismatch (existing={existing_num_hash}, incoming={incoming_num_hash})"
+                )
+            if existing_num_hash and not incoming_num_hash:
+                raise ValueError("immutable plot snapshot collision: numerical record presence mismatch")
+
             if any(
                 (
                     (existing.get(key) or "asmae") != envelope.get(key)
@@ -773,6 +791,11 @@ def publish_canonical_layer10_snapshot(
                 else payload.get("crop_influence_manifest_hash")
             )
         ),
+        "asmae_numerical_digest": (
+            num_rec.get("numerical_vector_hash")
+            if isinstance(num_rec, dict) and num_rec.get("numerical_vector_hash")
+            else None
+        ),
     }
     scientific_identity["content_hash"] = hashlib.sha256(
         _json_bytes(scientific_identity)
@@ -957,6 +980,23 @@ def load_latest_plot_snapshot(
     # Cryptographic ASMAE numerical binding validation (R12-06 production reader)
     num_rec = publication_frontend.get("asmae_posterior_numerical_record")
     numerical_binding_valid: Optional[bool] = None
+
+    # Check cross-artifact agreement between immutable node and published frontend
+    node_num_hash = (
+        (node.get("scientific_result") or {}).get("asmae_numerical_digest")
+        or ((node.get("frontend_payload") or {}).get("asmae_posterior_numerical_record") or {}).get("numerical_vector_hash")
+        or (node.get("asmae") or {}).get("asmae_numerical_digest")
+    )
+    claims_numerical_authority = bool(
+        publication_frontend.get("claims_numerical_authority") is True
+        or publication_frontend.get("numerical_authority_claimed") is True
+        or (publication_frontend.get("asmae_proof") or {}).get("numerical_vector_hash")
+        or (publication_frontend.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
+        or node_num_hash
+        or (node.get("snapshot_kind") == "asmae" and (node.get("asmae") or {}).get("state_means"))
+    )
+
+    node_agreement_valid = True
     if num_rec is not None:
         if isinstance(num_rec, dict) and "states" in num_rec:
             try:
@@ -979,11 +1019,19 @@ def load_latest_plot_snapshot(
                     and claimed_proof_hash == recomputed_num_hash
                     and claimed_lineage_hash == recomputed_num_hash
                 )
+                if node_num_hash and claimed_num_hash != node_num_hash:
+                    is_valid = False
+                    node_agreement_valid = False
+
                 numerical_binding_valid = bool(is_valid)
             except Exception:
                 numerical_binding_valid = False
         else:
             numerical_binding_valid = False
+    elif claims_numerical_authority:
+        # Numerical authority claimed but numerical record is missing
+        numerical_binding_valid = False
+        node_agreement_valid = False
 
     validation_flags = {
         "nodeValid": bool(node.get("node_hash") and node.get("node_hash") == head.get("node_hash") and node.get("node_hash") == computed_node_hash),
@@ -992,6 +1040,7 @@ def load_latest_plot_snapshot(
         "inventoryValid": bool(head.get("surface_inventory_hash") and computed_inv_hash and head.get("surface_inventory_hash") == computed_inv_hash),
         "temporalBindingValid": temporal_binding_valid,
         "numericalBindingValid": numerical_binding_valid,
+        "nodeAgreementValid": bool(node_agreement_valid),
         "bindingValid": bool(
             head.get("snapshot_id") == snapshot_id
             and head.get("plot_id") == ns.plot_id
@@ -1005,6 +1054,7 @@ def load_latest_plot_snapshot(
             == publication.get("publication_hash")
             and temporal_binding_valid
             and (numerical_binding_valid is not False)
+            and node_agreement_valid
         ),
         "lineageValid": bool(
             node.get("snapshot_kind") != "asmae"
@@ -1030,19 +1080,25 @@ def load_latest_plot_snapshot(
         # flags are deliberately separate so callers can refresh a stale head
         # without misreporting it as cryptographic corruption.
         "schemaValid": published_schema_version == SURFACES_SCHEMA_VERSION,
-        "contractValid": derived_publication_status in VALID_PUBLICATION_STATUSES and (numerical_binding_valid is not False),
+        "contractValid": derived_publication_status in VALID_PUBLICATION_STATUSES and (numerical_binding_valid is not False) and node_agreement_valid,
         "publicationStatusValid": declared_status_valid,
     }
     effective_publication_status = (
         derived_publication_status
-        if numerical_binding_valid is not False
+        if (numerical_binding_valid is not False and node_agreement_valid)
         else "INVALID_NUMERICAL_BINDING"
     )
-    effective_contract_reason = (
-        contract_reason
-        if numerical_binding_valid is not False
-        else "ASMAE numerical vector hash contradicts stored states/sigmas"
-    )
+    if not node_agreement_valid:
+        effective_contract_reason = (
+            "Publication numerical record contradicts stored immutable node"
+            if (node_num_hash and num_rec is not None)
+            else "Numerical authority claimed but asmae_posterior_numerical_record is missing"
+        )
+    elif numerical_binding_valid is False:
+        effective_contract_reason = "ASMAE numerical vector hash contradicts stored states/sigmas"
+    else:
+        effective_contract_reason = contract_reason
+
     node["validation"] = validation_flags
     node["contract_validation"] = {
         "current_surface_schema_version": SURFACES_SCHEMA_VERSION,
@@ -1051,9 +1107,9 @@ def load_latest_plot_snapshot(
         "contract_reason": effective_contract_reason,
         "declared_status_reason": declared_status_reason,
         "numerical_binding_valid": numerical_binding_valid,
-        "numerical_authority_verified": bool(numerical_binding_valid is True),
+        "numerical_authority_verified": bool(numerical_binding_valid is True and node_agreement_valid),
     }
-    if numerical_binding_valid is False:
+    if numerical_binding_valid is False or not node_agreement_valid:
         node["scientific_authority_certified"] = False
         node["scientific_publication_authorized"] = False
     node["refresh_required"] = bool(

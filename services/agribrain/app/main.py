@@ -569,6 +569,21 @@ def api_v2_exact_snapshot(
     if not validated or str(validated.get("snapshot_id") or "") != snapshot_id:
         raise HTTPException(status_code=409, detail="Exact snapshot was superseded; no substitution is allowed")
 
+    # Cross-artifact node verification
+    if existing.get("node_hash") != validated.get("node_hash"):
+        raise HTTPException(status_code=409, detail="Exact snapshot immutable node hash contradicts validated head")
+
+    existing_num_hash = (
+        (existing.get("scientific_result") or {}).get("asmae_numerical_digest")
+        or (existing.get("frontend_payload") or {}).get("asmae_posterior_numerical_record", {}).get("numerical_vector_hash")
+        or (existing.get("asmae") or {}).get("asmae_numerical_digest")
+    )
+    validated_num_hash = (
+        (validated.get("frontend_payload") or {}).get("asmae_posterior_numerical_record", {}).get("numerical_vector_hash")
+    )
+    if existing_num_hash and validated_num_hash and existing_num_hash != validated_num_hash:
+        raise HTTPException(status_code=409, detail="Exact snapshot numerical record contradicts immutable node")
+
     validation = validated.get("validation") or {}
     required_flags = (
         "nodeValid", "publicationValid", "receiptValid",
@@ -577,6 +592,20 @@ def api_v2_exact_snapshot(
     )
     if not all(validation.get(flag) is True for flag in required_flags):
         raise HTTPException(status_code=409, detail="Exact snapshot integrity or schema validation failed")
+
+    # If publication claims numerical authority, numericalBindingValid must be True (cannot be null or false)
+    claims_num = bool(
+        validated.get("snapshot_kind") == "asmae"
+        or str(snapshot_id).startswith("ASMAE-SNAPSHOT-")
+        or (validated.get("contract_validation") or {}).get("numerical_authority_verified") is True
+        or (validated.get("frontend_payload") or {}).get("claims_numerical_authority") is True
+        or existing_num_hash
+    )
+    if claims_num and validation.get("numericalBindingValid") is not True:
+        raise HTTPException(
+            status_code=409,
+            detail="Exact snapshot missing verified numerical authority binding"
+        )
     if not isinstance(validated.get("frontend_payload"), dict):
         raise HTTPException(status_code=409, detail="Exact snapshot has no validated frontend publication")
 
@@ -633,6 +662,15 @@ def api_v2_canonical_plot_snapshot(
     invalid_integrity_flags = [
         key for key in integrity_keys if validation.get(key) is not True
     ]
+    claims_num = bool(
+        snapshot.get("snapshot_kind") == "asmae"
+        or str(snapshot.get("snapshot_id") or "").startswith("ASMAE-SNAPSHOT-")
+        or (snapshot.get("contract_validation") or {}).get("numerical_authority_verified") is True
+        or (snapshot.get("frontend_payload") or {}).get("claims_numerical_authority") is True
+        or (snapshot.get("scientific_result") or {}).get("asmae_numerical_digest")
+    )
+    if claims_num and validation.get("numericalBindingValid") is not True:
+        invalid_integrity_flags.append("numericalBindingValid")
     if invalid_integrity_flags:
         # A corrupt or incompletely bound head remains on disk as immutable
         # audit evidence, but it is quarantined from browser/scientific

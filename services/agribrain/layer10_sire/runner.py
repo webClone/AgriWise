@@ -310,6 +310,14 @@ def validate_spatial_grid_spec(grid_spec: Any, width: int, height: int) -> tuple
         affine_span = (abs(a) * width + abs(b) * height, abs(d) * width + abs(e) * height)
         if max(abs(gdal_determinant), abs(affine_determinant)) <= 1e-15:
             return False, "zero_affine_determinant"
+
+        # Canonical display-grid orientation convention:
+        # A geographic raster must describe a north-up (dy < 0), eastward (dx > 0) unrotated grid.
+        # South-up (dy > 0) or westward (dx < 0) transforms are rejected as unsupported orientations.
+        is_gdal_north_up = (b > 0 and f < 0 and abs(c) <= 1e-7 and abs(e) <= 1e-7)
+        is_affine_north_up = (a > 0 and e < 0 and abs(b) <= 1e-7 and abs(d) <= 1e-7)
+        if not is_gdal_north_up and not is_affine_north_up:
+            return False, "unsupported_grid_orientation_not_north_up"
         if int(get("width", width)) != int(width) or int(get("height", height)) != int(height):
             return False, "grid_dimension_mismatch"
         bounds_span = (max_x - min_x, max_y - min_y)

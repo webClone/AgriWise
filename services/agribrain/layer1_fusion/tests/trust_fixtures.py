@@ -110,6 +110,7 @@ def create_signed_sensor_receipt(
         )
 
     eff_epoch = get_revocation_store().revocation_epoch if revocation_epoch is None else int(revocation_epoch)
+    eff_first_avail = observation_instant if first_available_at is None else (None if first_available_at is False else first_available_at)
     sig = sign_test_sensor_receipt_data(
         receipt_id=receipt_id,
         issuer=issuer,
@@ -120,7 +121,7 @@ def create_signed_sensor_receipt(
         status=status,
         content_digest=content_digest,
         observation_instant=observation_instant,
-        first_available_at=first_available_at,
+        first_available_at=eff_first_avail,
         revocation_epoch=eff_epoch,
         private_key=private_key,
     )
@@ -134,7 +135,7 @@ def create_signed_sensor_receipt(
         status=status,
         content_digest=content_digest,
         observation_instant=observation_instant,
-        first_available_at=first_available_at,
+        first_available_at=eff_first_avail,
         revocation_epoch=eff_epoch,
         signature=sig,
     )

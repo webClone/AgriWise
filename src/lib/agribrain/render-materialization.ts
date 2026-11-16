@@ -186,12 +186,13 @@ export function validateSurfaceGrid(
       return { valid: false, reason: "grid_spec_affine_invalid", bounds: null, width, height };
     }
     const [x0, dx, rx, y0, ry, dy] = spec.transform;
-
+    if (Math.abs(dx) <= 0 || Math.abs(dy) <= 0) {
+      return { valid: false, reason: "grid_spec_affine_degenerate", bounds: null, width, height };
+    }
     // 1. Require unrotated, unsheared transform
-    if (Math.abs(rx) > 1e-7 || Math.abs(ry) > 1e-7) {
+    if (Math.abs(rx || 0) > 1e-7 || Math.abs(ry || 0) > 1e-7) {
       return { valid: false, reason: "grid_spec_affine_rotated_or_sheared", bounds: null, width, height };
     }
-
     // 2. Require north-up orientation: dx > 0 (west-to-east), dy < 0 (north-to-south)
     if (dx <= 0 || dy >= 0) {
       return { valid: false, reason: "grid_spec_affine_orientation_not_north_up", bounds: null, width, height };
@@ -211,6 +212,7 @@ export function validateSurfaceGrid(
     const yEnd = y0 + height * dy;
     if (Math.abs(xEnd - maxLng) > COORD_TOLERANCE_DEG || Math.abs(yEnd - minLat) > COORD_TOLERANCE_DEG) {
       return { valid: false, reason: "grid_spec_affine_extent_mismatch", bounds: null, width, height };
+    }
     }
   }
 
