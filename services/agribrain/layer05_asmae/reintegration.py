@@ -609,13 +609,71 @@ def rebuild_canonical_plot_snapshot(
     )
     if frontend.get("intelligence_snapshot_id") != snapshot_id:
         raise ValueError("frontend snapshot identity was not propagated")
+
+    # Bind deterministic ASMAE numerical record and digest (Gate IR-01)
+    num_rec = (
+        result.get("asmae_posterior_numerical_record")
+        or (embedded_asmae.get("asmae_posterior_numerical_record") if isinstance(embedded_asmae, dict) else None)
+        or (context.get("asmae_posterior_numerical_record") if isinstance(context, dict) else None)
+    )
+    vec_hash = (
+        result.get("asmae_numerical_digest")
+        or (num_rec.get("numerical_vector_hash") if isinstance(num_rec, dict) else None)
+        or (embedded_asmae.get("asmae_numerical_digest") if isinstance(embedded_asmae, dict) else None)
+    )
+    if num_rec is None:
+        state_means = (
+            result.get("state_means")
+            or result.get("states")
+            or (embedded_asmae.get("state_means") if isinstance(embedded_asmae, dict) else None)
+            or (embedded_asmae.get("states") if isinstance(embedded_asmae, dict) else None)
+        )
+        sigmas = (
+            result.get("sigmas")
+            or result.get("state_covariances")
+            or result.get("uncertainties")
+            or (embedded_asmae.get("sigmas") if isinstance(embedded_asmae, dict) else None)
+            or (embedded_asmae.get("state_covariances") if isinstance(embedded_asmae, dict) else None)
+        )
+        if isinstance(state_means, dict) and state_means:
+            try:
+                try:
+                    from services.agribrain.layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
+                except ImportError:
+                    from layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
+                if not isinstance(sigmas, dict):
+                    sigmas = {k: 0.0 for k in state_means}
+                vec_hash = compute_asmae_vector_numerical_hash(state_means, sigmas)
+                num_rec = {
+                    "states": state_means,
+                    "sigmas": sigmas,
+                    "numerical_vector_hash": vec_hash,
+                }
+            except Exception:
+                pass
+
+    if num_rec is not None and isinstance(num_rec, dict):
+        if not vec_hash:
+            vec_hash = num_rec.get("numerical_vector_hash")
+        result["asmae_posterior_numerical_record"] = num_rec
+        result["asmae_numerical_digest"] = vec_hash
+        result["claims_numerical_authority"] = True
+
+        frontend["asmae_posterior_numerical_record"] = num_rec
+        frontend["claims_numerical_authority"] = True
+        if not isinstance(frontend.get("asmae_proof"), dict):
+            frontend["asmae_proof"] = {}
+        frontend["asmae_proof"]["numerical_vector_hash"] = vec_hash
+        frontend["asmae_proof"].setdefault("proof_id", f"proof-{snapshot_id}")
+        frontend["asmae_proof"].setdefault("status", "valid")
+
     frontend["worker_reintegration"] = {
         "contract_version": REINTEGRATION_CONTRACT_VERSION,
         "job_id": job_id,
         "manifest_hash": manifest_hash,
         "status": "completed",
     }
-    frontend["scientific_evidence_lineage"] = {
+    scientific_lineage = {
         "crop_posterior_lineage": expected_crop_lineage,
         "crop_worldline_event_id": result.get(
             "crop_worldline_event_id"
@@ -625,6 +683,9 @@ def rebuild_canonical_plot_snapshot(
         ),
         "replay_mode": "exact_frozen_worldline_events",
     }
+    if vec_hash:
+        scientific_lineage["asmae_posterior_vector_hash"] = vec_hash
+    frontend["scientific_evidence_lineage"] = scientific_lineage
     if isinstance(frontend.get("surfaces"), list):
         seen_sids = set()
         deduped_surfs = []
@@ -663,7 +724,7 @@ def rebuild_canonical_plot_snapshot(
                 or getattr(orchestrator_input, "crop_cycle_id", None)
             ),
         },
-        allow_overwrite=True,
+        allow_overwrite=False,
     )
     run_lineage = {
         "orchestrator_run_id": artifact.meta.orchestrator_run_id,

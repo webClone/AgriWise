@@ -22,6 +22,7 @@ Verifies end-to-end execution of ASMAE (Adaptive Scientific MicroZone Assimilati
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List
@@ -51,6 +52,10 @@ class ComprehensiveASMAEPipelineExecutionTests(unittest.TestCase):
     """Deep verification of the ASMAE scientific pipeline with real cached provider data."""
 
     def setUp(self):
+        self._temp_metrics_dir = tempfile.TemporaryDirectory()
+        self._orig_metrics_root = os.environ.get("AGRIBRAIN_METRICS_ROOT")
+        os.environ["AGRIBRAIN_METRICS_ROOT"] = self._temp_metrics_dir.name
+
         # Real registered plot with cached Sentinel-2 and Sentinel-1 scenes
         self.plot_id = "6a09d9e91dd0c7ed6fce7d50"
         self.run_id = f"test_run_comprehensive_{datetime.now().strftime('%Y%m%d%H%M%S')}"
@@ -206,6 +211,15 @@ class ComprehensiveASMAEPipelineExecutionTests(unittest.TestCase):
             "rollout_state": "registered_active",
             "emergency_kill_active": False,
         }
+
+    def tearDown(self):
+        if hasattr(self, "_temp_metrics_dir"):
+            self._temp_metrics_dir.cleanup()
+        if hasattr(self, "_orig_metrics_root"):
+            if self._orig_metrics_root is not None:
+                os.environ["AGRIBRAIN_METRICS_ROOT"] = self._orig_metrics_root
+            else:
+                os.environ.pop("AGRIBRAIN_METRICS_ROOT", None)
 
     def test_comprehensive_asmae_pipeline_full_feature_suite(self):
         """Execute and deeply verify ASMAE with Archive, Real Rasters, EnKF, Radiometric, BMA, and Retrovalidation."""

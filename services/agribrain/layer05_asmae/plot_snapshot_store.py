@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import copy
 import json
+import logging
 import os
 import threading
 import time
@@ -23,6 +24,7 @@ from services.agribrain.layer10_sire.surface_contract import (
 )
 
 PLOT_SNAPSHOT_CONTRACT_VERSION = "canonical_plot_snapshot_v1"
+logger = logging.getLogger(__name__)
 PLOT_SNAPSHOT_RECEIPT_CONTRACT_VERSION = "canonical_plot_snapshot_publication_receipt_v1"
 PLOT_PUBLICATION_CONTRACT_VERSION = "canonical_plot_frontend_publication_v1"
 PLOT_SNAPSHOT_ROOT = (
@@ -264,11 +266,16 @@ def publish_canonical_plot_snapshot(
         immutable_frontend_payload["surface_inventory_hash"] = inv_hash
 
     publication_timestamp = datetime.now(timezone.utc).isoformat()
-    published_at_str = (
-        immutable_frontend_payload.get("published_at")
-        or immutable_frontend_payload.get("publishedAt")
-        or publication_timestamp
-    )
+    existing_node_for_retry = _read(node_path) if node_path.exists() else None
+    if existing_node_for_retry and existing_node_for_retry.get("published_at"):
+        published_at_str = str(existing_node_for_retry.get("published_at"))
+        publication_timestamp = str(existing_node_for_retry.get("recorded_at") or publication_timestamp)
+    else:
+        published_at_str = (
+            immutable_frontend_payload.get("published_at")
+            or immutable_frontend_payload.get("publishedAt")
+            or publication_timestamp
+        )
     evidence_cutoff_str = (
         scientific_result.get("evidence_cutoff_at")
         or scientific_result.get("evidence_cutoff")
@@ -374,76 +381,86 @@ def publish_canonical_plot_snapshot(
     hashable_envelope = {k: v for k, v in envelope.items() if not k.endswith("_ref")}
     envelope["node_hash"] = hashlib.sha256(_json_bytes(hashable_envelope)).hexdigest()
 
-    if allow_overwrite:
-        _atomic(node_path, envelope)
+    if node_path.exists():
+        existing = _read(node_path)
+        if not existing:
+            with open(node_path, "wb") as handle:
+                handle.write(_json_bytes(envelope))
+                handle.flush()
+                os.fsync(handle.fileno())
+            existing = envelope
+        comparable_keys = (
+            (
+                "contract_version", "snapshot_kind", "snapshot_id",
+                "tenant_id", "farm_id", "plot_id", "geometry_hash",
+                "asmae_content_hash", "crop_posterior_lineage",
+                "crop_worldline_event_id", "phenology_worldline_event_id",
+                "crop_evidence_ledger_hash", "crop_influence_manifest_hash",
+            )
+            if normalized_kind == "asmae"
+            else (
+                "contract_version", "snapshot_kind", "snapshot_id",
+                "tenant_id", "farm_id", "plot_id", "geometry_hash",
+                "scientific_content_hash", "crop_posterior_lineage",
+                "crop_worldline_event_id", "phenology_worldline_event_id",
+                "crop_evidence_ledger_hash", "crop_influence_manifest_hash",
+            )
+        )
+        existing_num_hash = (
+            (existing.get("scientific_result") or {}).get("asmae_numerical_digest")
+            or ((existing.get("frontend_payload") or {}).get("asmae_posterior_numerical_record") or {}).get("numerical_vector_hash")
+            or (existing.get("asmae") or {}).get("asmae_numerical_digest")
+        )
+        incoming_num_hash = (
+            (envelope.get("scientific_result") or {}).get("asmae_numerical_digest")
+            or ((envelope.get("frontend_payload") or {}).get("asmae_posterior_numerical_record") or {}).get("numerical_vector_hash")
+            or (envelope.get("asmae") or {}).get("asmae_numerical_digest")
+            or ((immutable_frontend_payload.get("asmae_posterior_numerical_record") or {})).get("numerical_vector_hash")
+        )
+        if existing_num_hash and incoming_num_hash and existing_num_hash != incoming_num_hash:
+            raise ValueError(
+                f"immutable plot snapshot collision: numerical record mismatch (existing={existing_num_hash}, incoming={incoming_num_hash})"
+            )
+        if existing_num_hash and not incoming_num_hash:
+            raise ValueError("immutable plot snapshot collision: numerical record presence mismatch")
+        if not existing_num_hash and incoming_num_hash:
+            raise ValueError("immutable plot snapshot collision: numerical record presence mismatch")
+
+        if any(
+            (
+                (existing.get(key) or "asmae") != envelope.get(key)
+                if key == "snapshot_kind" and normalized_kind == "asmae"
+                else existing.get(key) != envelope.get(key)
+            )
+            for key in comparable_keys
+        ):
+            raise ValueError("immutable plot snapshot collision")
+        existing_sci = existing.get("asmae") or existing.get("scientific_result")
+        incoming_sci = envelope.get("asmae") or envelope.get("scientific_result")
+        if existing_sci and incoming_sci and existing_sci != incoming_sci:
+            raise ValueError("immutable plot snapshot collision: scientific result mismatch")
+        existing_hashable = {
+            key: value for key, value in existing.items() if key != "node_hash"
+        }
+        if existing.get("node_hash") != hashlib.sha256(
+            _json_bytes(existing_hashable)
+        ).hexdigest():
+            raise ValueError("existing immutable plot snapshot hash is invalid")
+        envelope = existing
     else:
         try:
             descriptor = os.open(str(node_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            existing = _read(node_path)
-            if not existing:
-                with open(node_path, "wb") as handle:
-                    handle.write(_json_bytes(envelope))
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                existing = envelope
-            comparable_keys = (
-                (
-                    "contract_version", "snapshot_kind", "snapshot_id",
-                    "tenant_id", "farm_id", "plot_id", "geometry_hash",
-                    "asmae_content_hash", "crop_posterior_lineage",
-                    "crop_worldline_event_id", "phenology_worldline_event_id",
-                    "crop_evidence_ledger_hash", "crop_influence_manifest_hash",
-                )
-                if normalized_kind == "asmae"
-                else (
-                    "contract_version", "snapshot_kind", "snapshot_id",
-                    "tenant_id", "farm_id", "plot_id", "geometry_hash",
-                    "scientific_content_hash", "crop_posterior_lineage",
-                    "crop_worldline_event_id", "phenology_worldline_event_id",
-                    "crop_evidence_ledger_hash", "crop_influence_manifest_hash",
-                )
-            )
-            existing_num_hash = (
-                (existing.get("scientific_result") or {}).get("asmae_numerical_digest")
-                or ((existing.get("frontend_payload") or {}).get("asmae_posterior_numerical_record") or {}).get("numerical_vector_hash")
-                or (existing.get("asmae") or {}).get("asmae_numerical_digest")
-            )
-            incoming_num_hash = (
-                (envelope.get("scientific_result") or {}).get("asmae_numerical_digest")
-                or ((envelope.get("frontend_payload") or {}).get("asmae_posterior_numerical_record") or {}).get("numerical_vector_hash")
-                or (envelope.get("asmae") or {}).get("asmae_numerical_digest")
-                or ((immutable_frontend_payload.get("asmae_posterior_numerical_record") or {})).get("numerical_vector_hash")
-            )
-            if existing_num_hash and incoming_num_hash and existing_num_hash != incoming_num_hash:
-                raise ValueError(
-                    f"immutable plot snapshot collision: numerical record mismatch (existing={existing_num_hash}, incoming={incoming_num_hash})"
-                )
-            if existing_num_hash and not incoming_num_hash:
-                raise ValueError("immutable plot snapshot collision: numerical record presence mismatch")
-
-            if any(
-                (
-                    (existing.get(key) or "asmae") != envelope.get(key)
-                    if key == "snapshot_kind" and normalized_kind == "asmae"
-                    else existing.get(key) != envelope.get(key)
-                )
-                for key in comparable_keys
-            ):
-                raise ValueError("immutable plot snapshot collision")
-            existing_hashable = {
-                key: value for key, value in existing.items() if key != "node_hash"
-            }
-            if existing.get("node_hash") != hashlib.sha256(
-                _json_bytes(existing_hashable)
-            ).hexdigest():
-                raise ValueError("existing immutable plot snapshot hash is invalid")
-            envelope = existing
-        else:
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(_json_bytes(envelope))
                 handle.flush()
                 os.fsync(handle.fileno())
+        except FileExistsError:
+            existing = _read(node_path)
+            existing_sci = existing.get("asmae") or existing.get("scientific_result")
+            incoming_sci = envelope.get("asmae") or envelope.get("scientific_result")
+            if existing_sci and incoming_sci and existing_sci != incoming_sci:
+                raise ValueError("immutable plot snapshot collision: scientific result mismatch")
+            envelope = existing
 
     publication_dir = directory / "publications"
     publication_dir.mkdir(parents=True, exist_ok=True)
@@ -479,40 +496,43 @@ def publish_canonical_plot_snapshot(
     hashable_pub = {k: v for k, v in publication.items() if not k.endswith("_ref")}
     publication["publication_hash"] = hashlib.sha256(_json_bytes(hashable_pub)).hexdigest()
 
-    if allow_overwrite:
-        _atomic(publication_path, publication)
+    if publication_path.exists():
+        existing_publication = _read(publication_path)
+        if not existing_publication:
+            with open(publication_path, "wb") as handle:
+                handle.write(_json_bytes(publication))
+                handle.flush()
+                os.fsync(handle.fileno())
+            existing_publication = publication
+        if (
+            existing_publication.get("job_id") != str(job_id)
+            or existing_publication.get("manifest_hash") != str(manifest_hash)
+            or existing_publication.get("snapshot_id") != snapshot_id
+            or existing_publication.get("node_hash") != envelope.get("node_hash")
+            or existing_publication.get("frontend_payload") != publication.get("frontend_payload")
+        ):
+            raise ValueError("immutable plot frontend publication collision")
+        existing_hashable = {
+            key: value for key, value in existing_publication.items()
+            if not key.endswith("_ref") and key != "publication_hash"
+        }
+        if existing_publication.get("publication_hash") != hashlib.sha256(
+            _json_bytes(existing_hashable)
+        ).hexdigest():
+            raise ValueError("existing frontend publication hash is invalid")
+        publication = existing_publication
     else:
         try:
             publication_descriptor = os.open(str(publication_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            existing_publication = _read(publication_path)
-            if not existing_publication:
-                with open(publication_path, "wb") as handle:
-                    handle.write(_json_bytes(publication))
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                existing_publication = publication
-            if (
-                existing_publication.get("job_id") != str(job_id)
-                or existing_publication.get("manifest_hash") != str(manifest_hash)
-                or existing_publication.get("snapshot_id") != snapshot_id
-                or existing_publication.get("node_hash") != envelope.get("node_hash")
-            ):
-                raise ValueError("immutable plot frontend publication collision")
-            existing_hashable = {
-                key: value for key, value in existing_publication.items()
-                if not key.endswith("_ref") and key != "publication_hash"
-            }
-            if existing_publication.get("publication_hash") != hashlib.sha256(
-                _json_bytes(existing_hashable)
-            ).hexdigest():
-                raise ValueError("existing frontend publication hash is invalid")
-            publication = existing_publication
-        else:
             with os.fdopen(publication_descriptor, "wb") as handle:
                 handle.write(_json_bytes(publication))
                 handle.flush()
                 os.fsync(handle.fileno())
+        except FileExistsError:
+            existing_publication = _read(publication_path)
+            if existing_publication.get("publication_hash") != publication.get("publication_hash"):
+                raise ValueError("immutable plot frontend publication collision")
+            publication = existing_publication
 
     # Receipt construction is deliberately last: node -> publication ->
     # receipt.  This avoids the former mutation cycle where receipt fields
@@ -556,29 +576,33 @@ def publish_canonical_plot_snapshot(
         _json_bytes(hashable_receipt)
     ).hexdigest()
 
-    if allow_overwrite:
-        _atomic(receipt_path, receipt)
+    if receipt_path.exists():
+        existing_receipt = _read(receipt_path)
+        if not existing_receipt:
+            with open(receipt_path, "wb") as handle:
+                handle.write(_json_bytes(receipt))
+                handle.flush()
+                os.fsync(handle.fileno())
+            existing_receipt = receipt
+        comparable = {k: receipt.get(k) for k in receipt if k not in {"recorded_at", "receipt_hash"}}
+        existing_comparable = {k: existing_receipt.get(k) for k in receipt if k not in {"recorded_at", "receipt_hash"}}
+        if comparable != existing_comparable:
+            raise ValueError("immutable plot snapshot publication receipt collision")
+        receipt = existing_receipt
     else:
         try:
             receipt_descriptor = os.open(str(receipt_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(receipt_descriptor, "wb") as handle:
+                handle.write(_json_bytes(receipt))
+                handle.flush()
+                os.fsync(handle.fileno())
         except FileExistsError:
             existing_receipt = _read(receipt_path)
-            if not existing_receipt:
-                with open(receipt_path, "wb") as handle:
-                    handle.write(_json_bytes(receipt))
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                existing_receipt = receipt
             comparable = {k: receipt.get(k) for k in receipt if k not in {"recorded_at", "receipt_hash"}}
             existing_comparable = {k: existing_receipt.get(k) for k in receipt if k not in {"recorded_at", "receipt_hash"}}
             if comparable != existing_comparable:
                 raise ValueError("immutable plot snapshot publication receipt collision")
             receipt = existing_receipt
-        else:
-            with os.fdopen(receipt_descriptor, "wb") as handle:
-                handle.write(_json_bytes(receipt))
-                handle.flush()
-                os.fsync(handle.fileno())
 
     head = {
         "contract_version": PLOT_SNAPSHOT_CONTRACT_VERSION,
@@ -674,17 +698,50 @@ def publish_canonical_layer10_snapshot(
         if same_geometry and same_cycle:
             # Prefer a verified ASMAE head only for the very same scientific scope.
             verified_head = load_latest_plot_snapshot(ns, geometry_hash or None)
-            if not verified_head or verified_head.get("snapshot_id") != existing_head.get("snapshot_id"):
-                raise ValueError("Existing ASMAE head failed canonical validation")
-            return {
-                "snapshot_id": existing_head.get("snapshot_id"),
-                "node_hash": existing_head.get("node_hash"),
-                "frontend_publication_hash": existing_head.get("frontend_publication_hash"),
-                "publication_receipt_hash": existing_head.get("publication_receipt_hash"),
-                "surface_inventory_hash": existing_head.get("surface_inventory_hash"),
-            }
+            validation = (verified_head.get("validation") or {}) if isinstance(verified_head, dict) else {}
+            # Check complete API admission equivalence (R01-V01):
+            # All integrity keys, temporal/numerical binding, and contract/schema keys must pass.
+            api_integrity_keys = (
+                "nodeValid",
+                "publicationValid",
+                "receiptValid",
+                "inventoryValid",
+                "bindingValid",
+                "lineageValid",
+                "temporalBindingValid",
+                "numericalBindingValid",
+                "nodeAgreementValid",
+            )
+            api_contract_keys = (
+                "schemaValid",
+                "contractValid",
+                "publicationStatusValid",
+            )
+            is_valid_asmae = (
+                bool(verified_head)
+                and verified_head.get("snapshot_id") == existing_head.get("snapshot_id")
+                and all(validation.get(k) is True for k in api_integrity_keys)
+                and all(validation.get(k) is True for k in api_contract_keys)
+            )
+            if is_valid_asmae:
+                return {
+                    "snapshot_id": existing_head.get("snapshot_id"),
+                    "node_hash": existing_head.get("node_hash"),
+                    "frontend_publication_hash": existing_head.get("frontend_publication_hash"),
+                    "publication_receipt_hash": existing_head.get("publication_receipt_hash"),
+                    "surface_inventory_hash": existing_head.get("surface_inventory_hash"),
+                }
+            else:
+                logger.warning(
+                    "[SNAPSHOT_STORE] Existing ASMAE head %s failed canonical validation/numerical binding (quarantined). Allowing terminal Layer 10 fallback publication to proceed.",
+                    existing_head.get("snapshot_id"),
+                )
         if existing_head.get("crop_cycle_id") and not requested_crop_cycle_id:
-            raise ValueError("Cannot replace ASMAE head without a declared crop-cycle scope")
+            verified_head = load_latest_plot_snapshot(ns, geometry_hash or None)
+            validation = (verified_head.get("validation") or {}) if isinstance(verified_head, dict) else {}
+            if validation.get("numericalBindingValid") is True and validation.get("nodeValid") is True:
+                raise ValueError("Cannot replace ASMAE head without a declared crop-cycle scope")
+            requested_crop_cycle_id = existing_head.get("crop_cycle_id")
         # Old-scope ASMAE nodes remain immutable in history; the new context
         # may publish its own terminal head without inheriting old authority.
 

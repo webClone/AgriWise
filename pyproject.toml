@@ -20,7 +20,7 @@ include = ["services", "services.*"]
 dependencies = { file = ["services/agribrain/requirements.txt"] }
 
 [tool.pytest.ini_options]
-testpaths = ["services/agribrain/tests", "services/agribrain/mesia/tests"]
+testpaths = ["services/agribrain/tests", "services/agribrain/mesia/tests", "services/agribrain/layer05_asmae/tests"]
 python_files = ["test_*.py"]
 pythonpath = ["services/agribrain", "."]
 addopts = ["--import-mode=importlib"]

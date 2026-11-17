@@ -13,6 +13,10 @@ from pathlib import Path
 
 class ArchiveMetricsStore:
     def __init__(self, workspace_root=None, agribrain_root=None, metrics_root=None):
+        env_metrics_root = os.environ.get("AGRIBRAIN_METRICS_ROOT")
+        if metrics_root is None and env_metrics_root:
+            metrics_root = env_metrics_root
+
         if metrics_root is not None:
             self.metrics_root = str(Path(metrics_root).resolve())
             self.workspace_root = workspace_root or str(Path(self.metrics_root).parents[2])
