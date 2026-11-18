@@ -19,6 +19,8 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -417,6 +419,109 @@ class ASMAER01PublicationIntegrityTests(unittest.TestCase):
         new_head = json.loads(_head_path(self.ns).read_text(encoding="utf-8"))
         self.assertEqual(new_head["snapshot_id"], "L10-SNAPSHOT-FALLBACK-002")
 
+    def test_case_03c_warm_cache_artifact_tampering_triggers_revalidation_and_fallback(self):
+        """Warm reader cache must not mask underlying node, publication, or receipt tampering on disk (R01-Q02)."""
+        asmae_id = "ASMAE-SNAPSHOT-CASE03C"
+        asmae_result, frontend = self._generate_valid_worker_payload(asmae_id, "job-c3c", "man-c3c")
+
+        publish_canonical_plot_snapshot(
+            namespace=self.ns,
+            plot_id=self.plot_id,
+            tenant_id=self.tenant_id,
+            farm_id=self.farm_id,
+            geometry_hash=self.geometry_hash,
+            snapshot_id=asmae_id,
+            asmae_result=asmae_result,
+            frontend_payload=frontend,
+            job_id="job-c3c",
+            manifest_hash="man-c3c",
+            execution_identity={"crop_cycle_id": self.crop_cycle_id},
+            allow_overwrite=False,
+        )
+
+        # 1. Warm the cache by loading the snapshot
+        warm1 = load_latest_plot_snapshot(self.ns, self.geometry_hash)
+        self.assertIsNotNone(warm1)
+        self.assertTrue(warm1["validation"]["bindingValid"])
+        self.assertTrue(warm1["validation"]["nodeValid"])
+        self.assertTrue(warm1["validation"]["publicationValid"])
+        self.assertTrue(warm1["validation"]["receiptValid"])
+
+        # 2. Tamper with the node on disk WITHOUT modifying head.json or clearing memory cache
+        node_path = _plot_dir(self.ns) / "nodes" / f"{asmae_id}.json"
+        node_data = json.loads(node_path.read_text(encoding="utf-8"))
+        node_data["crop_influence_manifest_hash"] = "tampered_manifest_hash_on_disk"
+        node_path.write_text(json.dumps(node_data), encoding="utf-8")
+
+        # 3. Read again through warm reader: cache must miss due to node_mtime change and flag nodeValid=False
+        warm2 = load_latest_plot_snapshot(self.ns, self.geometry_hash)
+        self.assertIsNotNone(warm2)
+        self.assertFalse(warm2["validation"]["nodeValid"], "Tampered node must fail nodeValid")
+        self.assertFalse(warm2["validation"]["bindingValid"], "Tampered node must fail bindingValid")
+
+        # 4. Test publication tampering on disk using a separate snapshot
+        asmae_id_pub = "ASMAE-SNAPSHOT-CASE03C-PUB"
+        job_id_pub = "job-c3c-pub"
+        asmae_res_pub, front_pub = self._generate_valid_worker_payload(asmae_id_pub, job_id_pub, "man-c3c-pub")
+        publish_canonical_plot_snapshot(
+            namespace=self.ns,
+            plot_id=self.plot_id,
+            tenant_id=self.tenant_id,
+            farm_id=self.farm_id,
+            geometry_hash=self.geometry_hash,
+            snapshot_id=asmae_id_pub,
+            asmae_result=asmae_res_pub,
+            frontend_payload=front_pub,
+            job_id=job_id_pub,
+            manifest_hash="man-c3c-pub",
+            execution_identity={"crop_cycle_id": self.crop_cycle_id},
+            allow_overwrite=False,
+        )
+        warm3 = load_latest_plot_snapshot(self.ns, self.geometry_hash)
+        self.assertTrue(warm3["validation"]["bindingValid"])
+
+        safe_job_id_pub = hashlib.sha256(job_id_pub.encode()).hexdigest()[:32]
+        pub_path = _plot_dir(self.ns) / "publications" / f"{safe_job_id_pub}.json"
+        pub_data = json.loads(pub_path.read_text(encoding="utf-8"))
+        pub_data["frontend_payload"]["asmae_posterior_numerical_record"]["states"]["root_zone_moisture"] = 0.999
+        pub_path.write_text(json.dumps(pub_data), encoding="utf-8")
+
+        warm4 = load_latest_plot_snapshot(self.ns, self.geometry_hash)
+        self.assertIsNotNone(warm4)
+        self.assertFalse(warm4["validation"]["publicationValid"])
+        self.assertFalse(warm4["validation"]["numericalBindingValid"])
+
+        # 5. Fallback must succeed because load_latest_plot_snapshot detects disk corruption
+        layer10_payload = {
+            "snapshot_id": "L10-SNAPSHOT-FALLBACK-003",
+            "intelligence_snapshot_id": "L10-SNAPSHOT-FALLBACK-003",
+            "plot_id": self.plot_id,
+            "tenant_id": self.tenant_id,
+            "farm_id": self.farm_id,
+            "crop_cycle_id": self.crop_cycle_id,
+            "pipeline_state": "terminal_layer10_published",
+            "surfaces": [
+                {
+                    "surface_id": "surface-satellite-fallback-03",
+                    "surface_type": "canopy_vigor",
+                    "values": [[0.55]],
+                    "resolution_m": 10.0,
+                    "content_hash": hashlib.sha256(b"surf-fallback-03").hexdigest(),
+                }
+            ],
+        }
+
+        fallback_summary = publish_canonical_layer10_snapshot(
+            namespace=self.ns,
+            geometry_hash=self.geometry_hash,
+            frontend_payload=layer10_payload,
+            request_run_id="run-layer10-fallback-03",
+            crop_cycle_id=self.crop_cycle_id,
+        )
+        self.assertEqual(fallback_summary["snapshot_id"], "L10-SNAPSHOT-FALLBACK-003")
+        new_head = json.loads(_head_path(self.ns).read_text(encoding="utf-8"))
+        self.assertEqual(new_head["snapshot_id"], "L10-SNAPSHOT-FALLBACK-003")
+
     # =========================================================================
     # Case 4: Same snapshot ID with conflicting content -> Reject Collision
     # =========================================================================
@@ -526,6 +631,112 @@ class ASMAER01PublicationIntegrityTests(unittest.TestCase):
         )
         self.assertTrue(crash_node_path.stat().st_size > 0, "Crash file must be safely recovered and written")
         self.assertEqual(h3["snapshot_id"], crash_snap_id)
+
+    def test_case_05b_multiprocess_concurrent_publish_and_collision(self):
+        """Simultaneous publishers in separate OS processes: identical succeeds idempotently, conflicting rejected as collision (R01-Q03)."""
+        cli_module = "services.agribrain.layer05_asmae.tests.helpers.snapshot_publish_cli"
+        python_exe = sys.executable
+
+        # 1. Identical simultaneous publishers in separate OS processes
+        snap_id_identical = "ASMAE-SNAPSHOT-CONCURRENT-IDENTICAL"
+        cmd_base = [
+            python_exe,
+            "-m",
+            cli_module,
+            "--root", str(self.snapshot_root),
+            "--plot-id", self.plot_id,
+            "--tenant-id", self.tenant_id,
+            "--farm-id", self.farm_id,
+            "--geometry-hash", self.geometry_hash,
+            "--crop-cycle-id", self.crop_cycle_id,
+            "--snapshot-id", snap_id_identical,
+            "--job-id", "job-concurrent-id",
+            "--manifest-hash", "manifest-concurrent-id",
+            "--root-moisture", "0.382",
+            "--canopy-vigor", "0.615",
+        ]
+
+        # Launch two separate OS processes concurrently
+        proc1 = subprocess.Popen(cmd_base, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc2 = subprocess.Popen(cmd_base, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        out1, err1 = proc1.communicate(timeout=15)
+        out2, err2 = proc2.communicate(timeout=15)
+
+        self.assertEqual(proc1.returncode, 0, f"Process 1 failed: {err1} {out1}")
+        self.assertEqual(proc2.returncode, 0, f"Process 2 failed: {err2} {out2}")
+        self.assertTrue(out1.startswith("OK:"), f"Expected OK: from proc1, got {out1}")
+        self.assertTrue(out2.startswith("OK:"), f"Expected OK: from proc2, got {out2}")
+        # Both must produce the exact identical node and publication hashes
+        self.assertEqual(out1.strip(), out2.strip())
+
+        # Verify disk node is intact and valid
+        with plot_snapshot_store._SNAPSHOT_CACHE_LOCK:
+            plot_snapshot_store._CANONICAL_SNAPSHOT_CACHE.clear()
+        loaded = load_latest_plot_snapshot(self.ns, self.geometry_hash)
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded["snapshot_id"], snap_id_identical)
+        self.assertTrue(loaded["validation"]["nodeValid"])
+        self.assertTrue(loaded["validation"]["publicationValid"])
+
+        # 2. Conflicting simultaneous publishers in separate OS processes
+        snap_id_conflict = "ASMAE-SNAPSHOT-CONCURRENT-CONFLICT"
+        cmd_conflict_a = [
+            python_exe,
+            "-m",
+            cli_module,
+            "--root", str(self.snapshot_root),
+            "--plot-id", self.plot_id,
+            "--tenant-id", self.tenant_id,
+            "--farm-id", self.farm_id,
+            "--geometry-hash", self.geometry_hash,
+            "--crop-cycle-id", self.crop_cycle_id,
+            "--snapshot-id", snap_id_conflict,
+            "--job-id", "job-conflict-a",
+            "--manifest-hash", "manifest-conflict-a",
+            "--root-moisture", "0.250",
+            "--canopy-vigor", "0.450",
+        ]
+        cmd_conflict_b = [
+            python_exe,
+            "-m",
+            cli_module,
+            "--root", str(self.snapshot_root),
+            "--plot-id", self.plot_id,
+            "--tenant-id", self.tenant_id,
+            "--farm-id", self.farm_id,
+            "--geometry-hash", self.geometry_hash,
+            "--crop-cycle-id", self.crop_cycle_id,
+            "--snapshot-id", snap_id_conflict,
+            "--job-id", "job-conflict-b",
+            "--manifest-hash", "manifest-conflict-b",
+            "--root-moisture", "0.850",
+            "--canopy-vigor", "0.950",
+        ]
+
+        proc_a = subprocess.Popen(cmd_conflict_a, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc_b = subprocess.Popen(cmd_conflict_b, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        out_a, err_a = proc_a.communicate(timeout=15)
+        out_b, err_b = proc_b.communicate(timeout=15)
+
+        returncodes = sorted([proc_a.returncode, proc_b.returncode])
+        # Exactly one must succeed (0) and the other must reject collision with exit code 2
+        self.assertEqual(returncodes, [0, 2], f"Expected exactly one 0 (success) and one 2 (collision): A={proc_a.returncode} ({out_a}), B={proc_b.returncode} ({out_b})")
+
+        winner_out = out_a if proc_a.returncode == 0 else out_b
+        loser_out = out_b if proc_a.returncode == 0 else out_a
+        self.assertTrue(winner_out.startswith("OK:"))
+        self.assertTrue(loser_out.startswith("COLLISION:"))
+
+        # Verify on-disk artifact remains completely uncorrupted and matches winner
+        with plot_snapshot_store._SNAPSHOT_CACHE_LOCK:
+            plot_snapshot_store._CANONICAL_SNAPSHOT_CACHE.clear()
+        loaded_conflict = load_latest_plot_snapshot(self.ns, self.geometry_hash)
+        self.assertIsNotNone(loaded_conflict)
+        self.assertEqual(loaded_conflict["snapshot_id"], snap_id_conflict)
+        self.assertTrue(loaded_conflict["validation"]["nodeValid"])
+        self.assertTrue(loaded_conflict["validation"]["bindingValid"])
 
     # =========================================================================
     # Case 6: Security and Multi-Tenant Isolation

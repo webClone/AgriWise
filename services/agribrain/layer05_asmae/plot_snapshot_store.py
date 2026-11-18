@@ -57,8 +57,14 @@ _ASMAE_FROZEN_LINEAGE_FIELDS = (
     "crop_influence_manifest_hash",
 )
 
-_CANONICAL_SNAPSHOT_CACHE: Dict[Tuple[str, int, str, str], Dict[str, Any]] = {}
+_CANONICAL_SNAPSHOT_CACHE: Dict[Tuple[str, int, int, int, int, str, str], Dict[str, Any]] = {}
 _SNAPSHOT_CACHE_LOCK = threading.Lock()
+
+
+def clear_canonical_snapshot_cache() -> None:
+    """Clear memory snapshot cache across all namespaces."""
+    with _SNAPSHOT_CACHE_LOCK:
+        _CANONICAL_SNAPSHOT_CACHE.clear()
 
 
 def _plot_key(namespace: PlotNamespace) -> str:
@@ -912,9 +918,31 @@ def load_latest_plot_snapshot(
     if not snapshot_id:
         return None
 
+    directory = _plot_dir(ns)
+    safe_job_id = hashlib.sha256(str(head.get("publication_job_id", "")).encode("utf-8")).hexdigest()[:32]
+    node_path = directory / "nodes" / f"{snapshot_id}.json"
+    pub_path = directory / "publications" / f"{safe_job_id}.json"
+    receipt_path = directory / "receipts" / f"{safe_job_id}.json"
+
+    try:
+        node_mtime = node_path.stat().st_mtime_ns if node_path.exists() else 0
+    except OSError:
+        node_mtime = 0
+    try:
+        pub_mtime = pub_path.stat().st_mtime_ns if pub_path.exists() else 0
+    except OSError:
+        pub_mtime = 0
+    try:
+        receipt_mtime = receipt_path.stat().st_mtime_ns if receipt_path.exists() else 0
+    except OSError:
+        receipt_mtime = 0
+
     cache_key = (
         ns.stable_key(),
         head_mtime,
+        node_mtime,
+        pub_mtime,
+        receipt_mtime,
         str(snapshot_id),
         str(head.get("frontend_publication_hash") or ""),
     )
@@ -923,8 +951,6 @@ def load_latest_plot_snapshot(
         if cached is not None:
             return copy.deepcopy(cached)
 
-    directory = _plot_dir(ns)
-    node_path = directory / "nodes" / f"{snapshot_id}.json"
     if not node_path.exists():
         return None
 
@@ -949,11 +975,7 @@ def load_latest_plot_snapshot(
     except (ValueError, TypeError):
         node["snapshot_age_seconds"] = None
 
-    safe_job_id = hashlib.sha256(str(head.get("publication_job_id", "")).encode("utf-8")).hexdigest()[:32]
-    pub_path = directory / "publications" / f"{safe_job_id}.json"
     publication = _read(pub_path)
-
-    receipt_path = directory / "receipts" / f"{safe_job_id}.json"
     receipt = _read(receipt_path)
 
     node["snapshot_ref"] = f"nodes/{snapshot_id}.json"
@@ -1112,6 +1134,7 @@ def load_latest_plot_snapshot(
             and temporal_binding_valid
             and (numerical_binding_valid is not False)
             and node_agreement_valid
+            and (node.get("node_hash") == computed_node_hash)
         ),
         "lineageValid": bool(
             node.get("snapshot_kind") != "asmae"

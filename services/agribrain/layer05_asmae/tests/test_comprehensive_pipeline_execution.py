@@ -27,6 +27,7 @@ import unittest
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List
 import numpy as np
+import pytest
 
 from services.agribrain.layer05_asmae.engine import ASMAEEngine
 from services.agribrain.layer05_asmae.schema import ASMAEInput, ASMAEOutput
@@ -48,6 +49,8 @@ from services.agribrain.layer05_asmae.history.archive_metrics_store import Archi
 from services.agribrain.layer05_asmae.resilient_posterior import ARCHIVE_POSTERIOR_CONTRACT_VERSION
 
 
+@pytest.mark.slow
+@pytest.mark.scientific
 class ComprehensiveASMAEPipelineExecutionTests(unittest.TestCase):
     """Deep verification of the ASMAE scientific pipeline with real cached provider data."""
 
