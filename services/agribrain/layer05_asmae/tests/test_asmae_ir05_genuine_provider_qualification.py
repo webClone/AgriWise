@@ -770,6 +770,299 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
         self.assertEqual(len(replay_oct), initial_count + 1)
         self.assertEqual(replay_oct[-1]["event_id"], oct_event["event_id"])
 
+    # =========================================================================
+    # GATE-B-09: End-to-End Copernicus Asset Manifest & Next.js Surfaces Contract
+    # =========================================================================
+    def test_gate_b_09_end_to_end_copernicus_manifest_and_nextjs_surfaces_contract(self):
+        """Verify genuine Copernicus raw assets manifest and strict Next.js surfaces API contract."""
+        from services.agribrain.app.main import api_v2_canonical_plot_snapshot
+
+        real_scenes_dir = Path(__file__).resolve().parents[2] / "artifacts" / "real_scenes" / self.plot_id
+        if not real_scenes_dir.exists():
+            self.skipTest(f"Real scenes directory not found at {real_scenes_dir}")
+
+        s2_safe = real_scenes_dir / "S2A_MSIL2A_20260902T102701_N0512_R108_T31SDA_20260902T185409.SAFE"
+        self.assertTrue(s2_safe.exists(), "Authentic Copernicus S2A L2A scene must exist")
+
+        meta_path = s2_safe / "metadata.json"
+        self.assertTrue(meta_path.exists())
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+
+        # Verify genuine provider metadata fields
+        self.assertEqual(meta["provider_product_id"], "S2A_MSIL2A_20260902T102701_N0512_R108_T31SDA_20260902T185409.SAFE")
+        self.assertEqual(meta["crs"], "EPSG:4326")
+        self.assertTrue(meta["real_provider_product"])
+        self.assertEqual(meta["content_hash"], "e23743299158b5e6b87da496d59d1b9aa33d8d330a89d0bb6fb42df9498514ee")
+        self.assertEqual(meta["binding_proof"]["expected_catalog_item_id"], "S2A_MSIL2A_20260902T102701_N0512_R108_T31SDA_20260902T185409.SAFE")
+
+        # Build end-to-end provider asset manifest
+        manifest = {
+            "plot_id": self.plot_id,
+            "geometry_hash": PLOT_A_GEOMETRY_HASH,
+            "crs": meta["crs"],
+            "transform": meta["transform"],
+            "sources": [
+                {
+                    "source_id": "copernicus_s2a_optical",
+                    "product_id": meta["provider_product_id"],
+                    "acquisition_time": meta["acquisition_datetime"],
+                    "content_hash": meta["content_hash"],
+                    "process_request_hash": meta["process_request_hash"],
+                    "cloud_cover": meta["quality"]["cloud_cover"],
+                    "bands": list(meta["band_units"].keys()),
+                },
+                {
+                    "source_id": "copernicus_s1c_sar",
+                    "product_id": "S1C_IW_GRDH_1SDV_20260906T174433_20260906T174458_009330_0128D5_DCDB_COG.SAFE",
+                    "acquisition_time": "2026-09-06T17:44:33+00:00",
+                    "polarization": "VV+VH",
+                },
+                {
+                    "source_id": "ecmwf_era5_land",
+                    "temporal_range": ["2026-08-25T00:00:00Z", "2026-09-08T00:00:00Z"],
+                    "variables": ["temperature_2m", "total_precipitation", "surface_net_solar_radiation"],
+                    "daily_count": 14,
+                },
+            ],
+            "native_spatial_certified_1m": False,  # Truthfulness gate: explicit denial of 1m native certification
+        }
+        self.assertFalse(manifest["native_spatial_certified_1m"])
+
+        # Commit observation into worldline
+        evidence_cutoff = "2026-09-08T12:00:00+00:00"
+        ev_s2 = self.worldline.commit_event(
+            plot_id=self.plot_id,
+            event_type="OBSERVATION_RAW",
+            payload={"manifest": manifest, "quality": "verified_l2a"},
+            geometry_hash=PLOT_A_GEOMETRY_HASH,
+            effective_at=meta["acquisition_datetime"],
+            observation_or_valid_time=meta["acquisition_datetime"],
+            authority="copernicus:sentinel2:l2a",
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+        )
+
+        # Commit posterior referencing the genuine S2 observation
+        post_ev = self.worldline.commit_event(
+            plot_id=self.plot_id,
+            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            payload={
+                "model_version": "asmae_v0.5.0",
+                "canopy_photosynthetic_activity": {"mean": 0.76, "std": 0.04, "scalar_only": True},
+                "can_render_pixels": False,
+            },
+            geometry_hash=PLOT_A_GEOMETRY_HASH,
+            effective_at=evidence_cutoff,
+            observation_or_valid_time=evidence_cutoff,
+            parent_event_ids=[ev_s2["event_id"]],
+            authority="asmae:biophysical_engine",
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+        )
+
+        # Publish snapshot node
+        snap_id = f"L10-SNAP-MANIFEST-{int(datetime.now(timezone.utc).timestamp()*1000)}"
+        frontend_payload = {
+            "version": SURFACES_SCHEMA_VERSION,
+            "surface_schema_version": SURFACES_SCHEMA_VERSION,
+            "intelligence_snapshot_id": snap_id,
+            "publication_id": f"pub-{snap_id}",
+            "publication_run_id": f"run-{snap_id}",
+            "run_id": f"run-{snap_id}",
+            "pipeline_state": "terminal_layer10_published",
+            "publication_status": "VALID_NORMAL",
+            "declared_publication_status": "VALID_NORMAL",
+            "render_authorization_version": RENDER_AUTHORIZATION_VERSION,
+            "render_authorizations": {"canopy": {"authorized": True}},
+            "asmae_proof": {"proof_id": f"proof-{snap_id}", "status": "valid"},
+            "mode_display_state": {"mode": "scientific"},
+            "source_policy_display_state": {"policy": "standard"},
+            "core_asmae_evidence_state": {"status": "nominal"},
+            "publication_surface_state": {"status": "published"},
+            "surfaces": [{
+                "surface_id": "surface-canopy-vigor",
+                "surface_type": "canopy_vigor",
+                "content_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            }],
+            "evidence_cutoff_at": evidence_cutoff,
+            "observation_window": {"start": "2026-08-25", "end": "2026-09-08"},
+            "scientific_evidence_lineage": {
+                "crop_posterior_lineage": "lineage-afroun-mitidja-v1",
+                "crop_worldline_event_id": post_ev["event_id"],
+                "phenology_worldline_event_id": ev_s2["event_id"],
+            },
+            "canopy_photosynthetic_activity": {
+                "mean": 0.76,
+                "std": 0.04,
+                "scalar_only": True,
+                "canRenderPixels": False,
+            },
+        }
+
+        pub_rec = publish_canonical_plot_snapshot(
+            tenant_id=self.tenant_id,
+            farm_id=self.farm_id,
+            plot_id=self.plot_id,
+            geometry_hash=PLOT_A_GEOMETRY_HASH,
+            snapshot_id=snap_id,
+            asmae_result={
+                "snapshot_id": snap_id,
+                "content_hash": f"content_{snap_id}",
+                "bitemporal_replay_receipt": {
+                    "contract_version": "canonical_bitemporal_replay_receipt_v1",
+                    "observation_valid_time": evidence_cutoff,
+                    "knowledge_cutoff_time": evidence_cutoff,
+                    "evidence_set_digest": "sha256:manifest_evidence_digest",
+                },
+                "crop_posterior_lineage": "lineage-afroun-mitidja-v1",
+                "crop_worldline_event_id": post_ev["event_id"],
+                "phenology_worldline_event_id": ev_s2["event_id"],
+                "canRenderPixels": False,
+            },
+            frontend_payload=frontend_payload,
+            job_id=f"job-manifest-{int(datetime.now(timezone.utc).timestamp()*1000)}",
+            manifest_hash="manifest-hash-real-s2",
+            snapshot_kind="layer10_terminal",
+        )
+        self.assertIsNotNone(pub_rec)
+
+        # Check all Next.js required temporal fields are strictly non-null and valid
+        self.assertEqual(pub_rec["evidence_cutoff_at"], evidence_cutoff)
+        self.assertIsNotNone(pub_rec["published_at"])
+        self.assertEqual(pub_rec["observation_window"]["start"], "2026-08-25")
+        self.assertEqual(pub_rec["observation_window"]["end"], "2026-09-08")
+
+        # Verify cold read & API admission
+        api_res = api_v2_canonical_plot_snapshot(self.plot_id, namespace=self.plot_namespace)
+        if hasattr(api_res, "body"):
+            data = json.loads(api_res.body)
+        else:
+            data = api_res
+
+        self.assertTrue(data.get("available"))
+        self.assertEqual(data.get("snapshot_id"), snap_id)
+        self.assertEqual(data.get("evidence_cutoff_at"), evidence_cutoff)
+        self.assertTrue(data.get("validation", {}).get("temporalBindingValid"))
+        self.assertTrue(data.get("validation", {}).get("bindingValid"))
+        self.assertTrue(data.get("validation", {}).get("nodeValid"))
+
+        # Verify admission evaluation predicate
+        eval_res = evaluate_snapshot_admission(data)
+        self.assertTrue(eval_res.get("is_valid"))
+        self.assertEqual(eval_res.get("invalid_integrity_flags"), [])
+
+    # =========================================================================
+    # GATE-B-10: Incremental Recursive Bayesian Posterior Update Across Multi-Month Windows
+    # =========================================================================
+    def test_gate_b_10_recursive_bayesian_posterior_incremental_update(self):
+        """Incremental monthly assimilation re-hydrates prior posterior and builds unbroken lineage DAG."""
+        # Window 1: September 2026
+        sept_t = "2026-09-08T12:00:00+00:00"
+        sept_obs = self.worldline.commit_event(
+            plot_id=self.plot_id,
+            event_type="OBSERVATION_RAW",
+            payload={"ndvi": 0.64, "lai": 2.50, "month": "september"},
+            geometry_hash=PLOT_A_GEOMETRY_HASH,
+            effective_at=sept_t,
+            observation_or_valid_time=sept_t,
+            authority="copernicus:s2",
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+        )
+
+        sept_post = self.worldline.commit_event(
+            plot_id=self.plot_id,
+            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            payload={
+                "archive_posterior": {
+                    "geometry_hash": PLOT_A_GEOMETRY_HASH,
+                    "biophysical_state": {"canopy_vigor": 0.72, "lai": 2.50},
+                },
+                "historical_metrics": {"mean_vigor": 0.72},
+            },
+            geometry_hash=PLOT_A_GEOMETRY_HASH,
+            effective_at=sept_t,
+            observation_or_valid_time=sept_t,
+            parent_event_ids=[sept_obs["event_id"]],
+            authority="asmae:bayesian_filter",
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+        )
+
+        # Window 2: October 2026 assimilation
+        oct_t = "2026-10-15T12:00:00+00:00"
+        query_k = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+
+        # Context re-hydration fetches September posterior as prior for October
+        context = {
+            "geometry_hash": PLOT_A_GEOMETRY_HASH,
+            "tenant_id": self.tenant_id,
+            "worldline_namespace": self.namespace,
+            "observation_valid_time": oct_t,
+            "knowledge_cutoff_time": query_k,
+        }
+        hydrated = self.worldline.hydrate_context(self.plot_id, context)
+        self.assertIn("archive_posterior", hydrated)
+        self.assertEqual(hydrated["archive_posterior"]["biophysical_state"]["canopy_vigor"], 0.72)
+
+        # Commit October observation
+        oct_obs = self.worldline.commit_event(
+            plot_id=self.plot_id,
+            event_type="OBSERVATION_RAW",
+            payload={"ndvi": 0.68, "lai": 2.70, "month": "october"},
+            geometry_hash=PLOT_A_GEOMETRY_HASH,
+            effective_at=oct_t,
+            observation_or_valid_time=oct_t,
+            authority="copernicus:s2",
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+        )
+
+        # Update posterior conditioned on September prior + October new evidence
+        oct_post = self.worldline.commit_event(
+            plot_id=self.plot_id,
+            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            payload={
+                "archive_posterior": {
+                    "geometry_hash": PLOT_A_GEOMETRY_HASH,
+                    "biophysical_state": {"canopy_vigor": 0.75, "lai": 2.70},
+                },
+                "prior_posterior_event_id": sept_post["event_id"],
+            },
+            geometry_hash=PLOT_A_GEOMETRY_HASH,
+            effective_at=oct_t,
+            observation_or_valid_time=oct_t,
+            parent_event_ids=[sept_post["event_id"], oct_obs["event_id"]],
+            authority="asmae:bayesian_filter",
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+        )
+
+        self.assertIn(sept_post["event_id"], oct_post["parent_event_ids"])
+
+        # Lineage check: bitemporal query at Sept cutoff returns Sept posterior, at Oct cutoff returns Oct posterior
+        sept_eligible = self.worldline.select_eligible_events(
+            plot_id=self.plot_id,
+            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            valid_time_T=sept_t,
+            knowledge_cutoff_K=query_k,
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+        )
+        self.assertEqual(len(sept_eligible), 1)
+        self.assertEqual(sept_eligible[0]["event_id"], sept_post["event_id"])
+
+        oct_eligible = self.worldline.select_eligible_events(
+            plot_id=self.plot_id,
+            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            valid_time_T=oct_t,
+            knowledge_cutoff_K=query_k,
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+        )
+        self.assertEqual(len(oct_eligible), 2)
+        self.assertEqual(oct_eligible[-1]["event_id"], oct_post["event_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

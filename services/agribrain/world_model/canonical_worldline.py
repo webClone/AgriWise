@@ -139,6 +139,39 @@ def _canonical_parent(parent: Any) -> tuple[str, Optional[Dict[str, Any]]]:
     raise ValueError("parent references must be ParentRef, ExternalParentRef, or nonblank internal event ID")
 
 
+def compute_canonical_journal_digest(events: Sequence[Mapping[str, Any]]) -> str:
+    """Compute SHA-256 digest over canonical bitemporal event entries.
+
+    Binds bitemporal authority across:
+    - sequence: continuous integer sequence
+    - event_id: canonical v2 event identity
+    - committed_at: physical transaction commit timestamp
+    - observation_or_valid_time: valid time T
+    - effective_at: effective timestamp
+    - payload_hash: cryptographic hash of scientific payload
+    - parent_event_ids: sorted parent lineage
+    - authority: signing/authorizing authority reference
+    - event_type: typed event role
+
+    Any post-hoc mutation of committed_at, sequence, or lineage produces
+    an immediate digest mismatch and fails closed.
+    """
+    tokens = []
+    for e in events:
+        seq = str(e.get("sequence") or "")
+        ev_id = str(e.get("event_id") or "")
+        comm = str(e.get("committed_at") or "")
+        valid_t = str(e.get("observation_or_valid_time") or "")
+        eff_t = str(e.get("effective_at") or "")
+        p_hash = str(e.get("payload_hash") or "")
+        parents = ",".join(sorted(str(p) for p in (e.get("parent_event_ids") or [])))
+        auth = str(e.get("authority") or e.get("authority_ref") or "")
+        ev_type = str(e.get("event_type") or "")
+        token = f"{seq}|{ev_id}|{comm}|{valid_t}|{eff_t}|{p_hash}|{parents}|{auth}|{ev_type}"
+        tokens.append(token)
+    return hashlib.sha256("::".join(tokens).encode("utf-8")).hexdigest() if tokens else ""
+
+
 class CanonicalWorldlineService:
     """System-wide canonical worldline service.
 
@@ -612,12 +645,14 @@ class CanonicalWorldlineService:
 
         head = self.load_head(plot_id, tenant_id, namespace)
         seq = watermark_sequence if watermark_sequence is not None else int(head.get("sequence", 0) or 0)
-        last_ev = latest_event_id or head.get("latest_event_id")
+        events = self.load_all_events(plot_id, tenant_id, namespace, fail_on_corrupt=False)
+        last_ev = latest_event_id or (events[seq - 1].get("event_id") if seq > 0 and len(events) >= seq else head.get("latest_event_id"))
+        last_comm = events[seq - 1].get("committed_at") if seq > 0 and len(events) >= seq else None
 
         if journal_digest is None:
-            events = self.load_all_events(plot_id, tenant_id, namespace, fail_on_corrupt=False)
-            slice_evs = [e.get("event_id", "") for e in events[:seq] if e.get("event_id")]
-            journal_digest = hashlib.sha256("::".join(slice_evs).encode("utf-8")).hexdigest() if slice_evs else ""
+            journal_digest = compute_canonical_journal_digest(events[:seq])
+
+        trust_root_id = hashlib.sha256(f"{tenant_id}::{namespace}::{plot_id}::{seq}".encode()).hexdigest()[:16]
 
         record = {
             "checkpoint_id": clean_id,
@@ -626,22 +661,65 @@ class CanonicalWorldlineService:
             "plot_id": plot_id,
             "sequence": seq,
             "watermark_sequence": seq,
+            "checkpoint_generation": seq,
             "latest_event_id": last_ev,
+            "latest_committed_at": last_comm,
             "journal_digest": journal_digest,
+            "trust_root_id": trust_root_id,
             "committed_at": _now(),
             "payload": _public(payload or {}),
         }
 
-        # Write local
+        # Check existing checkpoint immutability & conflicting writers
         local_cp_dir = self._plot_dir(plot_id, tenant_id, namespace) / "checkpoints"
         local_cp_dir.mkdir(parents=True, exist_ok=True)
-        self._atomic(local_cp_dir / f"{clean_id}.json", record)
+        local_cp_path = local_cp_dir / f"{clean_id}.json"
 
-        # Write out-of-band durable anchor
+        anchor_cp_path = None
         if self.durable_anchor_root:
             anchor_cp_dir = self.durable_anchor_root / str(tenant_id).strip() / str(namespace).strip() / self._plot_key(plot_id) / "checkpoints"
             anchor_cp_dir.mkdir(parents=True, exist_ok=True)
-            self._atomic(anchor_cp_dir / f"{clean_id}.json", record)
+            anchor_cp_path = anchor_cp_dir / f"{clean_id}.json"
+
+        for check_path in [local_cp_path, anchor_cp_path]:
+            if check_path and check_path.exists():
+                try:
+                    existing = self._read(check_path)
+                    if isinstance(existing, dict):
+                        ex_digest = existing.get("journal_digest")
+                        ex_seq = int(existing.get("sequence") or existing.get("watermark_sequence") or 0)
+                        ex_ev = existing.get("latest_event_id")
+                        if (ex_digest and ex_digest != journal_digest) or ex_seq != seq or (ex_ev and ex_ev != last_ev):
+                            raise CorruptedWorldlineError(
+                                f"Conflicting checkpoint write detected for generation {clean_id}: "
+                                f"checkpoint is immutable and cannot be rewritten with conflicting state"
+                            )
+                except Exception as exc:
+                    if isinstance(exc, CorruptedWorldlineError):
+                        raise
+                    raise CorruptedWorldlineError(f"Failed to verify existing checkpoint at {check_path}: {exc}") from exc
+
+        # Verify no conflicting write exists for the same sequence with different ID and different digest
+        for cp_f in local_cp_dir.glob("*.json"):
+            if cp_f.name != f"{clean_id}.json":
+                try:
+                    other_cp = self._read(cp_f)
+                    other_seq = int(other_cp.get("sequence") or other_cp.get("watermark_sequence") or 0)
+                    if other_seq == seq and other_cp.get("journal_digest") and other_cp.get("journal_digest") != journal_digest:
+                        raise CorruptedWorldlineError(
+                            f"Conflicting concurrent checkpoint write for sequence {seq}: "
+                            f"existing checkpoint {cp_f.name} has conflicting digest"
+                        )
+                except Exception as exc:
+                    if isinstance(exc, CorruptedWorldlineError):
+                        raise
+
+        # Write local
+        self._atomic(local_cp_path, record)
+
+        # Write out-of-band durable anchor
+        if anchor_cp_path:
+            self._atomic(anchor_cp_path, record)
 
         return record
 
@@ -740,11 +818,48 @@ class CanonicalWorldlineService:
                     f"Worldline journal missing head watermark for plot {plot_id} while {len(events)} events exist"
                 )
 
-            # 3. Check against durable checkpoints to detect joint head+journal rollback and event substitution
+            # 3. Check against durable checkpoints to detect joint head+journal rollback, event substitution,
+            # and committed_at / bitemporal authority tampering.
             candidate_checkpoint_dirs = [self._plot_dir(plot_id, tenant_id, namespace) / "checkpoints"]
+            anchor_cp_dir = None
             if self.durable_anchor_root:
                 anchor_cp_dir = self.durable_anchor_root / str(tenant_id).strip() / str(namespace).strip() / self._plot_key(plot_id) / "checkpoints"
                 candidate_checkpoint_dirs.append(anchor_cp_dir)
+
+            # Detect outdated, regressed, or missing durable anchor
+            local_max_cp_seq = 0
+            local_cp_dir = candidate_checkpoint_dirs[0]
+            if local_cp_dir.exists() and local_cp_dir.is_dir():
+                for cp_file in local_cp_dir.glob("*.json"):
+                    try:
+                        cdata = self._read(cp_file)
+                        cseq = int(cdata.get("sequence") or cdata.get("watermark_sequence") or 0)
+                        if cseq > local_max_cp_seq:
+                            local_max_cp_seq = cseq
+                    except Exception:
+                        pass
+
+            if anchor_cp_dir is not None:
+                if not anchor_cp_dir.exists() or not anchor_cp_dir.is_dir():
+                    if effective_require_anchor:
+                        raise CorruptedWorldlineError(
+                            f"Durable anchor checkpoints directory missing or unmounted for plot {plot_id}: {anchor_cp_dir}"
+                        )
+                else:
+                    anchor_max_cp_seq = 0
+                    for cp_file in anchor_cp_dir.glob("*.json"):
+                        try:
+                            cdata = self._read(cp_file)
+                            cseq = int(cdata.get("sequence") or cdata.get("watermark_sequence") or 0)
+                            if cseq > anchor_max_cp_seq:
+                                anchor_max_cp_seq = cseq
+                        except Exception:
+                            pass
+                    if effective_require_anchor and local_max_cp_seq > 0 and anchor_max_cp_seq < local_max_cp_seq:
+                        raise CorruptedWorldlineError(
+                            f"Outdated or rolled-back durable anchor mounted for plot {plot_id}: "
+                            f"local checkpoint watermark {local_max_cp_seq} exceeds mounted durable anchor watermark {anchor_max_cp_seq}"
+                        )
 
             for checkpoints_dir in candidate_checkpoint_dirs:
                 if checkpoints_dir.exists() and checkpoints_dir.is_dir():
@@ -770,7 +885,7 @@ class CanonicalWorldlineService:
                                 f"Worldline journal rollback detected for plot {plot_id}: checkpoint watermark sequence {cp_seq} exceeds current head sequence {head_seq}"
                             )
 
-                        # Detect same-length event substitution
+                        # Detect same-length event substitution and bitemporal authority tampering
                         if cp_seq > 0 and cp_seq <= len(events):
                             ev_at_seq = events[cp_seq - 1]
                             expected_ev_id = cp_data.get("latest_event_id") or cp_data.get("event_id")
@@ -778,12 +893,18 @@ class CanonicalWorldlineService:
                                 raise CorruptedWorldlineError(
                                     f"Worldline same-length event substitution detected for plot {plot_id} at sequence {cp_seq}: expected event {expected_ev_id}, found {ev_at_seq.get('event_id')}"
                                 )
+                            expected_comm = cp_data.get("latest_committed_at")
+                            if expected_comm and ev_at_seq.get("committed_at") != expected_comm:
+                                raise CorruptedWorldlineError(
+                                    f"Worldline committed_at tampering detected for plot {plot_id} at sequence {cp_seq}: expected committed_at {expected_comm}, found {ev_at_seq.get('committed_at')}"
+                                )
                             expected_digest = cp_data.get("journal_digest")
                             if expected_digest:
-                                slice_digest = hashlib.sha256("::".join(e.get("event_id", "") for e in events[:cp_seq] if e.get("event_id")).encode("utf-8")).hexdigest()
-                                if slice_digest != expected_digest:
+                                slice_digest = compute_canonical_journal_digest(events[:cp_seq])
+                                legacy_digest = hashlib.sha256("::".join(e.get("event_id", "") for e in events[:cp_seq] if e.get("event_id")).encode("utf-8")).hexdigest()
+                                if slice_digest != expected_digest and legacy_digest != expected_digest:
                                     raise CorruptedWorldlineError(
-                                        f"Worldline same-length journal substitution detected for plot {plot_id} at sequence {cp_seq}: digest mismatch {slice_digest} != {expected_digest}"
+                                        f"Worldline journal bitemporal authority tampering detected for plot {plot_id} at sequence {cp_seq}: digest mismatch {slice_digest} != {expected_digest}"
                                     )
         return events
 
@@ -1364,6 +1485,10 @@ class CanonicalWorldlineService:
                 json.dumps(selected_evidence_set, sort_keys=True).encode("utf-8")
             ).hexdigest()
 
+            head = self.load_head(plot_id, tenant_id, namespace)
+            head_seq = int(head.get("sequence") or 0) if head else 0
+            anchor_bound = bool(self.durable_anchor_root and self.durable_anchor_root.exists())
+
             replay_receipt = {
                 "contract_version": "canonical_bitemporal_replay_receipt_v1",
                 "replay_mode": "bitemporal_deterministic_v1",
@@ -1376,6 +1501,10 @@ class CanonicalWorldlineService:
                 },
                 "selected_evidence_set": selected_evidence_set,
                 "evidence_set_digest": f"sha256:{evidence_digest}",
+                "journal_generation": head_seq,
+                "durable_anchor_generation": head_seq if anchor_bound else 0,
+                "durable_anchor_bound": anchor_bound,
+                "durable_anchor_root": str(self.durable_anchor_root) if self.durable_anchor_root else "unmounted",
                 "status": "replayed",
             }
             context["bitemporal_replay_receipt"] = replay_receipt

@@ -1275,7 +1275,11 @@ class ASMAEIR03BitemporalReplayContractTests(unittest.TestCase):
         # load_all_events MUST fail closed detecting the same-length journal substitution
         with self.assertRaises(CorruptedWorldlineError) as ctx_sub:
             wl.load_all_events(self.plot_id, self.tenant_id, fail_on_corrupt=True)
-        self.assertIn("substitution detected", str(ctx_sub.exception).lower())
+        self.assertTrue(
+            "substitution detected" in str(ctx_sub.exception).lower()
+            or "tampering detected" in str(ctx_sub.exception).lower()
+            or "digest mismatch" in str(ctx_sub.exception).lower()
+        )
 
     # =========================================================================
     # IR03-T24: Corrupt Checkpoint File Fails Closed with No Silent Pass (B59-01)
@@ -1329,6 +1333,126 @@ class ASMAEIR03BitemporalReplayContractTests(unittest.TestCase):
             data = json.loads(cf.read_text(encoding="utf-8"))
             self.assertEqual(data["sequence"], 1)
             self.assertIn("payload", data)
+
+    # =========================================================================
+    # IR03-T26: Committed_at Tampering with Identical Event ID Fails Closed
+    # =========================================================================
+    def test_ir03_t26_committed_at_tampering_with_identical_event_id_fails_closed(self):
+        """Modifying committed_at on an event while keeping its canonical event ID unchanged fails closed."""
+        ev1 = self._commit_worldline_event("OBSERVATION_RAW", 1, 1, {"metric": 10})
+        ev2 = self._commit_worldline_event("OBSERVATION_RAW", 2, 2, {"metric": 20})
+        ev3 = self._commit_worldline_event("OBSERVATION_RAW", 3, 3, {"metric": 30})
+
+        durable_anchor_dir = Path(self.temp_dir) / "durable_anchor_t26"
+        wl = CanonicalWorldlineService(root=self.worldline_root, durable_anchor_root=durable_anchor_dir)
+        wl.save_durable_checkpoint(
+            plot_id=self.plot_id,
+            checkpoint_id="cp_seq3_authoritative_t26",
+            tenant_id=self.tenant_id,
+            watermark_sequence=3,
+            latest_event_id=ev3["event_id"],
+        )
+
+        # Baseline: load_all_events succeeds
+        events_nominal = wl.load_all_events(self.plot_id, self.tenant_id, fail_on_corrupt=True)
+        self.assertEqual(len(events_nominal), 3)
+
+        # Adversary attack: modify ONLY committed_at on ev2, keeping event_id completely identical!
+        ev2_path = self.worldline_root / self.tenant_id / "default" / wl._plot_key(self.plot_id) / "events" / f"{ev2['event_id']}.json"
+        ev2_data = json.loads(ev2_path.read_text(encoding="utf-8"))
+        original_comm = ev2_data["committed_at"]
+        # Backdate committed_at by 2 days to smuggle knowledge into an earlier K cutoff
+        ev2_data["committed_at"] = "2026-08-01T00:00:00+00:00"
+        ev2_path.write_text(json.dumps(ev2_data), encoding="utf-8")
+
+        # load_all_events MUST fail closed detecting bitemporal authority tampering
+        with self.assertRaises(CorruptedWorldlineError) as ctx_t26:
+            wl.load_all_events(self.plot_id, self.tenant_id, fail_on_corrupt=True)
+        self.assertTrue(
+            "tampering detected" in str(ctx_t26.exception).lower()
+            or "digest mismatch" in str(ctx_t26.exception).lower()
+        )
+
+    # =========================================================================
+    # IR03-T27: Conflicting Checkpoint Writers CAS Immutability
+    # =========================================================================
+    def test_ir03_t27_conflicting_checkpoint_writers_cas_immutability(self):
+        """Competing writers attempting to overwrite a checkpoint generation fail closed."""
+        self._commit_worldline_event("OBSERVATION_RAW", 1, 1, {"metric": 10})
+        durable_anchor_dir = Path(self.temp_dir) / "durable_anchor_t27"
+        wl = CanonicalWorldlineService(root=self.worldline_root, durable_anchor_root=durable_anchor_dir)
+
+        # Writer 1 commits generation cp_gen1
+        wl.save_durable_checkpoint(
+            plot_id=self.plot_id,
+            checkpoint_id="cp_gen1",
+            watermark_sequence=1,
+            tenant_id=self.tenant_id,
+            journal_digest="digest_writer_1_original",
+        )
+
+        # Competing writer attempts to overwrite cp_gen1 with conflicting journal digest
+        with self.assertRaises(CorruptedWorldlineError) as ctx_conflict:
+            wl.save_durable_checkpoint(
+                plot_id=self.plot_id,
+                checkpoint_id="cp_gen1",
+                watermark_sequence=1,
+                tenant_id=self.tenant_id,
+                journal_digest="digest_competing_writer_conflicting",
+            )
+        self.assertIn("conflicting checkpoint write", str(ctx_conflict.exception).lower())
+
+    # =========================================================================
+    # IR03-T28: Outdated or Regressed Durable Anchor Fails Closed
+    # =========================================================================
+    def test_ir03_t28_outdated_or_regressed_durable_anchor_fails_closed(self):
+        """Mounting an outdated or rolled-back durable anchor fails closed under mandatory policy."""
+        ev1 = self._commit_worldline_event("OBSERVATION_RAW", 1, 1, {"metric": 10})
+        ev2 = self._commit_worldline_event("OBSERVATION_RAW", 2, 2, {"metric": 20})
+        ev3 = self._commit_worldline_event("OBSERVATION_RAW", 3, 3, {"metric": 30})
+
+        # Local worldline creates checkpoints up to sequence 3
+        durable_anchor_dir = Path(self.temp_dir) / "durable_anchor_t28"
+        wl = CanonicalWorldlineService(root=self.worldline_root, durable_anchor_root=durable_anchor_dir)
+        wl.save_durable_checkpoint(self.plot_id, "cp_local_1", watermark_sequence=1, tenant_id=self.tenant_id)
+        wl.save_durable_checkpoint(self.plot_id, "cp_local_3", watermark_sequence=3, tenant_id=self.tenant_id)
+
+        # Simulate operator mounting an outdated anchor directory that only has cp_local_1 (watermark=1)
+        anchor_cp_dir = durable_anchor_dir / self.tenant_id / "default" / wl._plot_key(self.plot_id) / "checkpoints"
+        cp3_anchor = anchor_cp_dir / "cp_local_3.json"
+        if cp3_anchor.exists():
+            cp3_anchor.unlink()
+
+        # Under mandatory durable anchor, must reject the regressed/outdated anchor
+        with self.assertRaises(CorruptedWorldlineError) as ctx_outdated:
+            wl.load_all_events(self.plot_id, self.tenant_id, fail_on_corrupt=True, require_durable_anchor=True)
+        self.assertIn("outdated or rolled-back durable anchor", str(ctx_outdated.exception).lower())
+
+    # =========================================================================
+    # IR03-T29: Replay Receipt Binds Trust Root and Canonical Journal Generation
+    # =========================================================================
+    def test_ir03_t29_replay_receipt_binds_trust_root_and_canonical_journal_generation(self):
+        """Bitemporal replay receipt binds journal_generation, trust_root_bound, and parameters."""
+        ev1 = self._commit_worldline_event("ARCHIVE_POSTERIOR_VALIDATED", 1, 1, {"metric": 10})
+        durable_anchor_dir = Path(self.temp_dir) / "durable_anchor_t29"
+        durable_anchor_dir.mkdir(parents=True, exist_ok=True)
+        wl = CanonicalWorldlineService(root=self.worldline_root, durable_anchor_root=durable_anchor_dir)
+
+        context = {
+            "tenant_id": self.tenant_id,
+            "worldline_namespace": "default",
+            "observation_valid_time": "2026-09-08T12:00:00+00:00",
+            "knowledge_cutoff_time": "2026-09-08T12:00:00+00:00",
+            "worldline_root": str(self.worldline_root),
+        }
+        hydrated = wl.hydrate_context(self.plot_id, context)
+        receipt = hydrated.get("bitemporal_replay_receipt")
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt.get("contract_version"), "canonical_bitemporal_replay_receipt_v1")
+        self.assertIn("journal_generation", receipt)
+        self.assertIn("evidence_set_digest", receipt)
+        self.assertTrue(receipt.get("durable_anchor_bound"))
+        self.assertEqual(receipt.get("durable_anchor_root"), str(durable_anchor_dir))
 
 
 if __name__ == "__main__":
