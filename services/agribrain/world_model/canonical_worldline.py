@@ -146,7 +146,11 @@ class CanonicalWorldlineService:
     ASMAE and other layers interact through proposals, not direct writes.
     """
 
-    def __init__(self, root: Optional[Union[Path, str]] = None) -> None:
+    def __init__(
+        self,
+        root: Optional[Union[Path, str]] = None,
+        durable_anchor_root: Optional[Union[Path, str]] = None,
+    ) -> None:
         if root is not None:
             clean_str = str(root).strip()
             if not clean_str:
@@ -156,6 +160,15 @@ class CanonicalWorldlineService:
             self.root = Path(clean_str).resolve()
         else:
             self.root = Path(CANONICAL_WORLDLINE_ROOT).resolve()
+
+        anchor_env = durable_anchor_root or os.environ.get("CANONICAL_DURABLE_CHECKPOINT_ROOT")
+        if anchor_env:
+            clean_anchor = str(anchor_env).strip()
+            if ".." in clean_anchor.split("/") or ".." in clean_anchor.split("\\"):
+                raise SecurityViolation(f"Path traversal in durable checkpoint root: {clean_anchor}")
+            self.durable_anchor_root: Optional[Path] = Path(clean_anchor).resolve()
+        else:
+            self.durable_anchor_root = None
 
     @staticmethod
     def _plot_key(plot_id: str) -> str:
@@ -520,6 +533,11 @@ class CanonicalWorldlineService:
 
             self._atomic(cp_path, record)
 
+            if self.durable_anchor_root:
+                anchor_cp_dir = self.durable_anchor_root / str(tenant_id).strip() / str(namespace).strip() / self._plot_key(plot_id) / "checkpoints"
+                anchor_cp_dir.mkdir(parents=True, exist_ok=True)
+                self._atomic(anchor_cp_dir / f"{clean_id}.json", record)
+
             scoped_heads[f"{cycle_id}::{geometry_version}"] = checkpoint_id
             scoped_seqs = dict(current_head.get("scoped_sequences", {}) or {})
             cp_seqs = dict(current_head.get("checkpoint_sequences", {}) or {})
@@ -640,20 +658,25 @@ class CanonicalWorldlineService:
                 )
 
             # 3. Check against durable checkpoints to detect joint head+journal rollback
-            checkpoints_dir = self._plot_dir(plot_id, tenant_id, namespace) / "checkpoints"
-            if checkpoints_dir.exists() and checkpoints_dir.is_dir():
-                for cp_file in checkpoints_dir.glob("*.json"):
-                    try:
-                        cp_data = self._read(cp_file)
-                        cp_seq = int(cp_data.get("sequence") or cp_data.get("head_sequence") or 0)
-                        if cp_seq > head_seq:
-                            raise CorruptedWorldlineError(
-                                f"Worldline journal rollback detected for plot {plot_id}: checkpoint watermark sequence {cp_seq} exceeds current head sequence {head_seq}"
-                            )
-                    except Exception as exc:
-                        if isinstance(exc, CorruptedWorldlineError):
-                            raise
-                        logger.warning("Could not read checkpoint %s: %s", cp_file, exc)
+            candidate_checkpoint_dirs = [self._plot_dir(plot_id, tenant_id, namespace) / "checkpoints"]
+            if self.durable_anchor_root:
+                anchor_cp_dir = self.durable_anchor_root / str(tenant_id).strip() / str(namespace).strip() / self._plot_key(plot_id) / "checkpoints"
+                candidate_checkpoint_dirs.append(anchor_cp_dir)
+
+            for checkpoints_dir in candidate_checkpoint_dirs:
+                if checkpoints_dir.exists() and checkpoints_dir.is_dir():
+                    for cp_file in checkpoints_dir.glob("*.json"):
+                        try:
+                            cp_data = self._read(cp_file)
+                            cp_seq = int(cp_data.get("sequence") or cp_data.get("head_sequence") or 0)
+                            if cp_seq > head_seq:
+                                raise CorruptedWorldlineError(
+                                    f"Worldline journal rollback detected for plot {plot_id}: checkpoint watermark sequence {cp_seq} exceeds current head sequence {head_seq}"
+                                )
+                        except Exception as exc:
+                            if isinstance(exc, CorruptedWorldlineError):
+                                raise
+                            logger.warning("Could not read checkpoint %s: %s", cp_file, exc)
         return events
 
     def select_eligible_events(

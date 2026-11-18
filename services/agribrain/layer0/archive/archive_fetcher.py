@@ -22,6 +22,52 @@ from .archive_query import ArchiveQueryManager
 from .archive_download_plan import ArchiveDownloadPlanner
 from .stac_client import STACClient
 
+
+def load_raster_data(file_path: str) -> np.ndarray:
+    """Safely decode satellite band data from GeoTIFF (.tif/.tiff), .npz, or .npy containers.
+
+    Supports rasterio, tifffile, PIL, and native NumPy arrays.
+    """
+    if not file_path or not os.path.exists(file_path):
+        raise FileNotFoundError(f"Raster file not found: {file_path}")
+
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext in {".tif", ".tiff"}:
+        try:
+            import rasterio
+            with rasterio.open(file_path) as src:
+                arr = src.read(1)
+                return np.asarray(arr, dtype=np.float32)
+        except Exception:
+            try:
+                import tifffile
+                arr = tifffile.imread(file_path)
+                if arr.ndim > 2:
+                    arr = arr[0]
+                return np.asarray(arr, dtype=np.float32)
+            except Exception:
+                from PIL import Image
+                with Image.open(file_path) as img:
+                    arr = np.array(img)
+                    if arr.ndim > 2:
+                        arr = arr[:, :, 0]
+                    return np.asarray(arr, dtype=np.float32)
+    elif ext in {".npz"}:
+        with np.load(file_path, allow_pickle=False) as loader:
+            return np.asarray(loader["data"], dtype=np.float32)
+    elif ext in {".npy"}:
+        return np.asarray(np.load(file_path, allow_pickle=False), dtype=np.float32)
+    else:
+        # Fallback probe: try rasterio then npz
+        try:
+            import rasterio
+            with rasterio.open(file_path) as src:
+                return np.asarray(src.read(1), dtype=np.float32)
+        except Exception:
+            with np.load(file_path, allow_pickle=False) as loader:
+                return np.asarray(loader["data"], dtype=np.float32)
+
+
 class ArchiveFetcher:
     def __init__(self, cache_dir: Optional[str] = None, stac_client: Optional[STACClient] = None):
         if not cache_dir:
@@ -178,13 +224,11 @@ class ArchiveFetcher:
                 for band in target_bands:
                     b_path = local_cache_refs.get(band)
                     if b_path and os.path.exists(b_path):
-                        with np.load(b_path, allow_pickle=False) as loader:
-                            bands_dict[band.lower()] = loader["data"]
+                        bands_dict[band.lower()] = load_raster_data(b_path)
                 for mask in target_masks:
                     m_path = local_cache_refs.get(mask)
                     if m_path and os.path.exists(m_path):
-                        with np.load(m_path, allow_pickle=False) as loader:
-                            bands_dict[mask.lower()] = loader["data"]
+                        bands_dict[mask.lower()] = load_raster_data(m_path)
 
                 if scene.source == "sentinel2":
                     from .s2_harmonizer import S2Harmonizer
@@ -220,11 +264,12 @@ class ArchiveFetcher:
                 for ref_name, ref_path in sorted(local_cache_refs.items()):
                     hasher.update(ref_name.encode("utf-8"))
                     try:
-                        with np.load(ref_path, allow_pickle=False) as loader:
-                            arr = loader["data"]
-                            hasher.update(arr.tobytes())
-                    except Exception:
-                        pass
+                        arr = load_raster_data(ref_path)
+                        hasher.update(arr.tobytes())
+                    except Exception as err:
+                        raise RuntimeError(
+                            f"Cryptographic provenance failure: could not load and hash raster asset {ref_name} at {ref_path}: {err}"
+                        ) from err
             else:
                 hasher.update(str(scene.remote_hash).encode("utf-8"))
             source_content_hash = hasher.hexdigest()

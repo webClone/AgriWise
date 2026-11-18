@@ -197,9 +197,10 @@ class ArchiveBootstrapService:
                     "last_committed_event_id": checkpoint.last_committed_event_id,
                     "checkpoint": checkpoint.to_dict(),
                 }
-            # Target expanded: transition back to IN_PROGRESS from previous target_end
+            # Target expanded: transition back to IN_PROGRESS from previous cursor/end
+            prev_cursor = checkpoint.target_end_date
             checkpoint.target_end_date = target_end
-            checkpoint.current_cursor = checkpoint.target_end_date
+            checkpoint.current_cursor = prev_cursor
             checkpoint.status = "IN_PROGRESS"
             self.save_checkpoint(checkpoint)
 

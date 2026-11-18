@@ -971,6 +971,24 @@ class ASMAEIR03BitemporalReplayContractTests(unittest.TestCase):
             self.worldline.load_all_events(self.plot_id, self.tenant_id, fail_on_corrupt=True)
         self.assertIn("missing head watermark", str(ctx_missing.exception).lower())
 
+        # Test out-of-band isolated durable checkpoint anchor catches rollback
+        # even if local checkpoints directory is deleted/tampered
+        isolated_anchor_root = Path(self.temp_dir) / "isolated_anchor_storage"
+        wl_anchored = CanonicalWorldlineService(root=self.worldline_root, durable_anchor_root=isolated_anchor_root)
+        anchor_cp_dir = isolated_anchor_root / self.tenant_id / "default" / self.worldline._plot_key(self.plot_id) / "checkpoints"
+        anchor_cp_dir.mkdir(parents=True, exist_ok=True)
+        (anchor_cp_dir / "external_anchor_seq5.json").write_text(
+            json.dumps({"checkpoint_id": "ext5", "sequence": 5, "timestamp": now_str}), encoding="utf-8"
+        )
+        # Restore head to sequence 2
+        head_path.write_text(json.dumps(head_data), encoding="utf-8")
+        # Wipe local checkpoints dir entirely
+        shutil.rmtree(checkpoints_dir)
+        with self.assertRaises(CorruptedWorldlineError) as ctx_anchor:
+            wl_anchored.load_all_events(self.plot_id, self.tenant_id, fail_on_corrupt=True)
+        self.assertIn("rollback detected", str(ctx_anchor.exception).lower())
+        self.assertIn("watermark sequence 5", str(ctx_anchor.exception).lower())
+
     # =========================================================================
     # IR03-T19: Ancestor Observed Post-T or Derived Post-K BMA Rejected (IR03-V04)
     # =========================================================================
