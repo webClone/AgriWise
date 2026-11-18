@@ -1325,12 +1325,16 @@ def run_orchestrator(
                         s2_scenes = fetch_experimental_composite_s2_stack(plot_id, run_id, (start_date, end_date), raster_composites)
                         l0_output.layer0_source_packages["experimental_s2_proxy"] = to_layer0_sentinel2_package({
                             "plot_id": plot_id,
+                            "tenant_id": inputs.tenant_id,
+                            "farm_id": inputs.farm_id,
                             "plot_geometry_hash": inputs.geometry_hash or "",
                             "data": [s.to_dict() for s in s2_scenes]
                         })
                     else:
                         l0_output.layer0_source_packages["asmae_sentinel2_real"] = to_layer0_sentinel2_package({
                             "plot_id": plot_id,
+                            "tenant_id": inputs.tenant_id,
+                            "farm_id": inputs.farm_id,
                             "plot_geometry_hash": inputs.geometry_hash or "",
                             "data": [s.to_dict() for s in s2_res]
                         })
@@ -1340,6 +1344,8 @@ def run_orchestrator(
                     s2_scenes = fetch_experimental_composite_s2_stack(plot_id, run_id, (start_date, end_date), raster_composites)
                     l0_output.layer0_source_packages["experimental_s2_proxy"] = to_layer0_sentinel2_package({
                         "plot_id": plot_id,
+                        "tenant_id": inputs.tenant_id,
+                        "farm_id": inputs.farm_id,
                         "plot_geometry_hash": inputs.geometry_hash or "",
                         "data": [s.to_dict() for s in s2_scenes]
                     })
@@ -1352,12 +1358,16 @@ def run_orchestrator(
                         s1_scenes = fetch_experimental_composite_s1_stack(plot_id, run_id, (start_date, end_date), raster_composites)
                         l0_output.layer0_source_packages["experimental_s1_proxy"] = to_layer0_sentinel1_package({
                             "plot_id": plot_id,
+                            "tenant_id": inputs.tenant_id,
+                            "farm_id": inputs.farm_id,
                             "plot_geometry_hash": inputs.geometry_hash or "",
                             "data": [s.to_dict() for s in s1_scenes]
                         })
                     else:
                         l0_output.layer0_source_packages["asmae_sentinel1_real"] = to_layer0_sentinel1_package({
                             "plot_id": plot_id,
+                            "tenant_id": inputs.tenant_id,
+                            "farm_id": inputs.farm_id,
                             "plot_geometry_hash": inputs.geometry_hash or "",
                             "data": [s.to_dict() for s in s1_res]
                         })
@@ -1367,6 +1377,8 @@ def run_orchestrator(
                     s1_scenes = fetch_experimental_composite_s1_stack(plot_id, run_id, (start_date, end_date), raster_composites)
                     l0_output.layer0_source_packages["experimental_s1_proxy"] = to_layer0_sentinel1_package({
                         "plot_id": plot_id,
+                        "tenant_id": inputs.tenant_id,
+                        "farm_id": inputs.farm_id,
                         "plot_geometry_hash": inputs.geometry_hash or "",
                         "data": [s.to_dict() for s in s1_scenes]
                     })
@@ -1964,15 +1976,34 @@ def run_orchestrator(
         asmae_runner = ASMAERunner()
 
         if not str(crop_worldline_event_id or "").strip():
-            raise ValueError(
-                "ASMAE submission requires an exact crop worldline event"
-            )
-        if not str(phenology_worldline_event_id or "").strip():
-            raise ValueError(
-                "ASMAE submission requires an exact phenology worldline event"
-            )
+            logger.info("ASMAE submission skipped: exact crop worldline event unavailable")
+            asmae_run_record = {
+                "requested": True,
+                "status": "skipped",
+                "reason": "missing_crop_worldline_event",
+                "mode": asmae_mode,
+                "run_id": None,
+                "error": None
+            }
+        elif not str(phenology_worldline_event_id or "").strip():
+            if asmae_mode == "quick_visual":
+                logger.info(
+                    "Phenology worldline event is unavailable; proceeding with ASMAE in diagnostic quick_visual mode."
+                )
+                pre_asmae_layer2a_context["phenology_state"] = "unavailable"
+                pre_asmae_layer2a_context["phenology_worldline_event_id"] = None
+            else:
+                logger.info("Standard ASMAE submission skipped: exact phenology worldline event unavailable")
+                asmae_run_record = {
+                    "requested": True,
+                    "status": "skipped",
+                    "reason": "missing_phenology_worldline_event",
+                    "mode": asmae_mode,
+                    "run_id": None,
+                    "error": None
+                }
         
-        if asmae_runner.is_enabled(inputs.plot_id):
+        if asmae_run_record.get("status") != "skipped" and asmae_runner.is_enabled(inputs.plot_id):
             if asmae_mode == "quick_visual":
                 # Build strict ASMAEInput context structure
                 s2_pkgs = l0_output.layer0_source_packages.get("sentinel2", []) if l0_output else []
@@ -2134,6 +2165,16 @@ def run_orchestrator(
                         "failure_code": asmae_failure_code,
                         "error": asmae_output.get("reason", "unknown error"),
                         "error_type": asmae_output.get("error_type"),
+                    }
+                elif status_val == "unavailable":
+                    asmae_run_record = {
+                        "requested": True,
+                        "status": "completed_degraded",
+                        "reason": asmae_output.get("reason", "quick_visual_unavailable"),
+                        "mode": "quick_visual",
+                        "run_id": asmae_output.get("run_id") or asmae_scientific_run_id,
+                        "output_ref": None,
+                        "error": None
                     }
                 else:
                     cache_key = asmae_output.get("cache_key") or ""

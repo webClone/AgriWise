@@ -1457,3 +1457,289 @@ def load_plot_snapshot_by_id(
         return node
 
     return None
+
+
+def load_and_validate_plot_snapshot_by_id(
+    snapshot_id: str,
+    namespace: Optional[PlotNamespace] = None,
+    tenant_id: str = "",
+    farm_id: str = "",
+    plot_id: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Load and independently validate any snapshot (head or historical benchmark).
+
+    Recomputes cryptographic hashes across node, publication, and receipt,
+    verifying surface inventory, temporal consistency, and lifecycle contracts.
+    """
+    if not snapshot_id:
+        return None
+
+    if namespace is not None and namespace.is_valid():
+        ns = namespace
+    elif tenant_id and farm_id and plot_id:
+        ns = PlotNamespace(tenant_id=tenant_id, farm_id=farm_id, plot_id=plot_id)
+    else:
+        return None
+
+    # Check if this matches the current canonical plot head first
+    latest = load_latest_plot_snapshot(ns)
+    if latest and str(latest.get("snapshot_id") or "") == snapshot_id:
+        return copy.deepcopy(latest)
+
+    directory = _plot_dir(ns)
+    node_path = directory / "nodes" / f"{snapshot_id}.json"
+    if not node_path.exists():
+        return None
+
+    node = _read(node_path)
+    if (
+        node.get("contract_version") != PLOT_SNAPSHOT_CONTRACT_VERSION
+        or node.get("plot_id") != ns.plot_id
+        or node.get("tenant_id") != ns.tenant_id
+        or node.get("farm_id") != ns.farm_id
+        or node.get("snapshot_id") != snapshot_id
+    ):
+        return None
+
+    # Verify node cryptographic hash
+    hashable_node = {
+        k: v for k, v in node.items()
+        if not k.endswith("_ref") and k not in (
+            "node_hash", "snapshot_age_seconds", "snapshot_ref",
+            "publication_receipt_ref", "publication_receipt_hash",
+            "publication_job_id", "frontend_publication_hash",
+            "surface_inventory_hash", "validation", "historical"
+        )
+    }
+    computed_node_hash = hashlib.sha256(_json_bytes(hashable_node)).hexdigest()
+    if not node.get("node_hash") or node.get("node_hash") != computed_node_hash:
+        return None
+
+    job_id = node.get("job_id") or node.get("publication_job_id")
+    if not job_id:
+        return None
+
+    safe_job_id = hashlib.sha256(str(job_id).encode("utf-8")).hexdigest()[:32]
+    pub_path = directory / "publications" / f"{safe_job_id}.json"
+    receipt_path = directory / "receipts" / f"{safe_job_id}.json"
+    if not pub_path.exists() or not receipt_path.exists():
+        return None
+
+    publication = _read(pub_path)
+    receipt = _read(receipt_path)
+
+    # Recompute cryptographic publication and receipt hashes
+    hashable_pub = {
+        k: v for k, v in publication.items()
+        if not k.endswith("_ref") and k != "publication_hash"
+    }
+    computed_pub_hash = hashlib.sha256(_json_bytes(hashable_pub)).hexdigest()
+    if not publication.get("publication_hash") or publication.get("publication_hash") != computed_pub_hash:
+        return None
+
+    hashable_receipt = {
+        k: v for k, v in receipt.items()
+        if not k.endswith("_ref") and k != "receipt_hash"
+    }
+    computed_receipt_hash = hashlib.sha256(_json_bytes(hashable_receipt)).hexdigest()
+    if not receipt.get("receipt_hash") or receipt.get("receipt_hash") != computed_receipt_hash:
+        return None
+
+    # Cross-artifact binding
+    if publication.get("snapshot_id") != snapshot_id or receipt.get("snapshot_id") != snapshot_id:
+        return None
+    if publication.get("node_hash") != node.get("node_hash") or receipt.get("node_hash") != node.get("node_hash"):
+        return None
+    if receipt.get("frontend_publication_hash") != publication.get("publication_hash"):
+        return None
+
+    publication_frontend = publication.get("frontend_payload") or {}
+    payload_surfaces = publication_frontend.get("surfaces") or publication_frontend.get("surface_pack") or []
+    try:
+        computed_inv_hash = (
+            compute_surface_inventory_hash(payload_surfaces)
+            if isinstance(payload_surfaces, list)
+            else None
+        )
+    except (TypeError, ValueError):
+        computed_inv_hash = None
+
+    expected_inv_hash = (
+        publication_frontend.get("surface_inventory_hash")
+        or receipt.get("surface_inventory_hash")
+        or node.get("surface_inventory_hash")
+    )
+    inventory_valid = bool(
+        computed_inv_hash and (
+            not expected_inv_hash or computed_inv_hash == expected_inv_hash
+        )
+    )
+
+    # Temporal fields
+    authoritative_published_at = (
+        publication.get("published_at")
+        or node.get("published_at")
+        or node.get("recorded_at")
+    )
+    authoritative_evidence_cutoff = (
+        publication.get("evidence_cutoff_at")
+        or node.get("evidence_cutoff_at")
+    )
+    authoritative_observation_window = (
+        publication.get("observation_window")
+        or node.get("observation_window")
+    )
+    temporal_binding_valid = bool(
+        (node.get("published_at") or authoritative_published_at) == authoritative_published_at
+        and (node.get("evidence_cutoff_at") or authoritative_evidence_cutoff) == authoritative_evidence_cutoff
+        and (node.get("observation_window") or authoritative_observation_window) == authoritative_observation_window
+    )
+
+    # Bitemporal replay receipt verification
+    replay_receipt_valid = True
+    if node.get("bitemporal_replay_receipt"):
+        n_rr = node.get("bitemporal_replay_receipt") or {}
+        p_rr = publication.get("bitemporal_replay_receipt") or {}
+        r_rr = receipt.get("bitemporal_replay_receipt") or {}
+        expected_digest = node.get("evidence_set_digest")
+        if not expected_digest or n_rr.get("evidence_set_digest") != expected_digest:
+            replay_receipt_valid = False
+        if p_rr and p_rr.get("evidence_set_digest") != expected_digest:
+            replay_receipt_valid = False
+        if r_rr and r_rr.get("evidence_set_digest") != expected_digest:
+            replay_receipt_valid = False
+
+    # Numerical binding verification
+    num_rec = publication_frontend.get("asmae_posterior_numerical_record")
+    node_num_hash = (
+        (node.get("scientific_result") or {}).get("asmae_numerical_digest")
+        or ((node.get("frontend_payload") or {}).get("asmae_posterior_numerical_record") or {}).get("numerical_vector_hash")
+        or (node.get("asmae") or {}).get("asmae_numerical_digest")
+    )
+    claims_numerical_authority = bool(
+        publication_frontend.get("claims_numerical_authority") is True
+        or publication_frontend.get("numerical_authority_claimed") is True
+        or (publication_frontend.get("asmae_proof") or {}).get("numerical_vector_hash")
+        or (publication_frontend.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
+        or node_num_hash
+        or (node.get("snapshot_kind") == "asmae" and (node.get("asmae") or {}).get("state_means"))
+    )
+    numerical_binding_valid: Optional[bool] = None
+    node_agreement_valid = True
+    if num_rec is not None:
+        if isinstance(num_rec, dict) and "states" in num_rec:
+            try:
+                try:
+                    from services.agribrain.layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
+                except ImportError:
+                    from layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
+                states = num_rec.get("states", {})
+                sigmas = num_rec.get("sigmas", {})
+                recomputed_num_hash = compute_asmae_vector_numerical_hash(states, sigmas)
+                claimed_num_hash = num_rec.get("numerical_vector_hash")
+                claimed_proof_hash = (publication_frontend.get("asmae_proof") or {}).get("numerical_vector_hash")
+                claimed_lineage_hash = (publication_frontend.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
+
+                is_valid = (
+                    bool(claimed_num_hash)
+                    and bool(claimed_proof_hash)
+                    and bool(claimed_lineage_hash)
+                    and claimed_num_hash == recomputed_num_hash
+                    and claimed_proof_hash == recomputed_num_hash
+                    and claimed_lineage_hash == recomputed_num_hash
+                )
+                if node_num_hash and claimed_num_hash != node_num_hash:
+                    is_valid = False
+                    node_agreement_valid = False
+
+                numerical_binding_valid = bool(is_valid)
+            except Exception:
+                numerical_binding_valid = False
+        else:
+            numerical_binding_valid = False
+    elif claims_numerical_authority:
+        numerical_binding_valid = False
+        node_agreement_valid = False
+
+    derived_publication_status, contract_reason = classify_surface_publication(publication_frontend)
+    declared_status_valid, _, declared_status_reason = validate_declared_publication_status(publication_frontend)
+    published_schema_version = str(
+        publication_frontend.get("surface_schema_version")
+        or publication_frontend.get("schema_version")
+        or publication_frontend.get("version")
+        or (publication_frontend.get("provenance") or {}).get("surface_schema_version")
+        or ""
+    )
+
+    validation_flags = {
+        "nodeValid": True,
+        "publicationValid": True,
+        "receiptValid": True,
+        "inventoryValid": inventory_valid,
+        "temporalBindingValid": temporal_binding_valid,
+        "numericalBindingValid": numerical_binding_valid,
+        "nodeAgreementValid": bool(node_agreement_valid),
+        "replayReceiptValid": replay_receipt_valid,
+        "bindingValid": bool(
+            publication.get("snapshot_id") == snapshot_id
+            and publication.get("node_hash") == node.get("node_hash")
+            and receipt.get("snapshot_id") == snapshot_id
+            and receipt.get("node_hash") == node.get("node_hash")
+            and receipt.get("frontend_publication_hash") == publication.get("publication_hash")
+            and temporal_binding_valid
+            and (numerical_binding_valid is not False)
+            and node_agreement_valid
+            and replay_receipt_valid
+        ),
+        "lineageValid": bool(
+            node.get("snapshot_kind") != "asmae"
+            or (
+                node.get("crop_posterior_lineage")
+                and node.get("crop_worldline_event_id")
+                and node.get("phenology_worldline_event_id")
+                and publication.get("crop_posterior_lineage") == node.get("crop_posterior_lineage")
+                and receipt.get("crop_posterior_lineage") == node.get("crop_posterior_lineage")
+                and publication.get("crop_worldline_event_id") == node.get("crop_worldline_event_id")
+                and receipt.get("crop_worldline_event_id") == node.get("crop_worldline_event_id")
+                and publication.get("phenology_worldline_event_id") == node.get("phenology_worldline_event_id")
+                and receipt.get("phenology_worldline_event_id") == node.get("phenology_worldline_event_id")
+            )
+        ),
+        "schemaValid": bool(published_schema_version == SURFACES_SCHEMA_VERSION),
+        "contractValid": bool(derived_publication_status in VALID_PUBLICATION_STATUSES),
+        "publicationStatusValid": bool(declared_status_valid),
+    }
+
+    try:
+        recorded = datetime.fromisoformat(
+            str(node.get("recorded_at", "")).replace("Z", "+00:00")
+        )
+        node["snapshot_age_seconds"] = max(
+            0.0,
+            (datetime.now(timezone.utc) - recorded.astimezone(timezone.utc)).total_seconds(),
+        )
+    except (ValueError, TypeError):
+        node["snapshot_age_seconds"] = None
+
+    node["snapshot_ref"] = f"nodes/{snapshot_id}.json"
+    node["publication_receipt_ref"] = f"receipts/{safe_job_id}.json"
+    node["publication_receipt_hash"] = receipt.get("receipt_hash")
+    node["publication_job_id"] = job_id
+    node["frontend_publication_hash"] = publication.get("publication_hash")
+    node["surface_inventory_hash"] = computed_inv_hash or expected_inv_hash
+    node["frontend_payload"] = copy.deepcopy(publication_frontend)
+    node["published_at"] = authoritative_published_at
+    node["evidence_cutoff_at"] = authoritative_evidence_cutoff
+    node["observation_window"] = authoritative_observation_window
+    node["validation"] = validation_flags
+    node["contract_validation"] = {
+        "schema_valid": validation_flags["schemaValid"],
+        "contract_valid": validation_flags["contractValid"],
+        "publication_status_valid": validation_flags["publicationStatusValid"],
+        "published_schema_version": published_schema_version,
+        "derived_publication_status": derived_publication_status,
+        "numerical_authority_verified": bool(numerical_binding_valid is True),
+        "temporal_binding_verified": bool(temporal_binding_valid),
+    }
+    node["historical"] = True
+    return node

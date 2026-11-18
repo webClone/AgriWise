@@ -155,6 +155,28 @@ function publicRunResponse(outcome: RunOutcome, mode: RunRequest["mode"]) {
   }
   const raw = outcome.payload?.data ?? outcome.payload ?? {};
   const plotState = raw.source_policy_display_state?.asmaePlotState ?? {};
+  
+  const isTerminalDegraded =
+    raw.status === "completed_degraded" ||
+    raw.status === "terminal_no_data" ||
+    raw.terminal_reason === "no_data" ||
+    raw.publication_status === "terminal_no_data" ||
+    plotState.status === "degraded";
+
+  if (isTerminalDegraded) {
+    return {
+      success: true,
+      status: "terminal_no_data",
+      runId: outcome.runId,
+      scientificRequestId: outcome.scientificRequestId,
+      reason: raw.terminal_reason || raw.reason || "degraded_no_admissible_evidence",
+      publication: {
+        required: false,
+        endpoint: "/api/agribrain/surfaces/latest",
+      },
+    };
+  }
+
   return {
     success: true,
     status: "publication_pending",

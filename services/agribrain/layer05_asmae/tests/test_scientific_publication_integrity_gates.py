@@ -600,10 +600,20 @@ def test_g3_exact_and_latest_apis_consistency_and_cold_restart(tmp_path, monkeyp
         assert resp_latest_2.status_code == 200
         assert resp_latest_2.json()["snapshot_id"] == snap_id_2
 
-        # Superseded historical ID snap_id_1 is blocked with 409 Conflict
-        resp_superseded = client.get(f"/v2/snapshots/{snap_id_1}")
-        assert resp_superseded.status_code == 409
-        assert "Exact snapshot was superseded; no substitution is allowed" in resp_superseded.text
+        # Verified historical snapshot snap_id_1 is served with 200 and historical=True
+        resp_historical = client.get(f"/v2/snapshots/{snap_id_1}")
+        assert resp_historical.status_code == 200
+        assert resp_historical.json()["snapshot_id"] == snap_id_1
+        assert resp_historical.json()["historical"] is True
+
+        # Corrupted historical node is strictly rejected with 409 Conflict
+        corrupt_node_path = tmp_path / plot_snapshot_store._plot_key(ns) / "nodes" / f"{snap_id_1}.json"
+        corrupt_data = json.loads(corrupt_node_path.read_text(encoding="utf-8"))
+        corrupt_data["node_hash"] = "0" * 64
+        corrupt_node_path.write_text(json.dumps(corrupt_data), encoding="utf-8")
+        resp_corrupted = client.get(f"/v2/snapshots/{snap_id_1}")
+        assert resp_corrupted.status_code == 409
+        assert "Exact snapshot integrity or schema validation failed" in resp_corrupted.text
     finally:
         app.dependency_overrides.pop(require_internal_service_request, None)
 

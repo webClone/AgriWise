@@ -554,35 +554,27 @@ def api_v2_exact_snapshot(
 ):
     """Read an exact validated publication. A superseded ID is never replaced.
 
-    Until historical snapshot receipts have an independent integrity validator,
-    only the verified current head can be served through this public API.
+    Historical snapshot receipts and current heads are independently verified
+    through authoritative cryptographic and contract integrity validators.
     """
     from services.agribrain.layer05_asmae.plot_snapshot_store import (
-        load_plot_snapshot_by_id, load_latest_plot_snapshot,
+        load_plot_snapshot_by_id, load_and_validate_plot_snapshot_by_id,
+        evaluate_snapshot_admission,
     )
 
-    existing = load_plot_snapshot_by_id(snapshot_id, namespace=namespace)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Exact snapshot not found for namespace")
+    validated = load_and_validate_plot_snapshot_by_id(snapshot_id, namespace=namespace)
+    if validated is None:
+        existing = load_plot_snapshot_by_id(snapshot_id, namespace=namespace)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Exact snapshot not found for namespace")
+        raise HTTPException(status_code=409, detail="Exact snapshot integrity or schema validation failed")
 
-    validated = load_latest_plot_snapshot(namespace)
-    if not validated or str(validated.get("snapshot_id") or "") != snapshot_id:
-        raise HTTPException(status_code=409, detail="Exact snapshot was superseded; no substitution is allowed")
-
-    # Cross-artifact node verification
-    if existing.get("node_hash") != validated.get("node_hash"):
-        raise HTTPException(status_code=409, detail="Exact snapshot immutable node hash contradicts validated head")
-
-    existing_num_hash = (
-        (existing.get("scientific_result") or {}).get("asmae_numerical_digest")
-        or (existing.get("frontend_payload") or {}).get("asmae_posterior_numerical_record", {}).get("numerical_vector_hash")
-        or (existing.get("asmae") or {}).get("asmae_numerical_digest")
-    )
-    validated_num_hash = (
-        (validated.get("frontend_payload") or {}).get("asmae_posterior_numerical_record", {}).get("numerical_vector_hash")
-    )
-    if existing_num_hash and validated_num_hash and existing_num_hash != validated_num_hash:
-        raise HTTPException(status_code=409, detail="Exact snapshot numerical record contradicts immutable node")
+    admission = evaluate_snapshot_admission(validated, namespace)
+    if not admission.get("is_valid"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Exact snapshot integrity or schema validation failed: {admission.get('reason') or 'quarantined'}"
+        )
 
     validation = validated.get("validation") or {}
     required_flags = (
@@ -599,7 +591,6 @@ def api_v2_exact_snapshot(
         or str(snapshot_id).startswith("ASMAE-SNAPSHOT-")
         or (validated.get("contract_validation") or {}).get("numerical_authority_verified") is True
         or (validated.get("frontend_payload") or {}).get("claims_numerical_authority") is True
-        or existing_num_hash
     )
     if claims_num and validation.get("numericalBindingValid") is not True:
         raise HTTPException(
