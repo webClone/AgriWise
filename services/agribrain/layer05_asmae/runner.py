@@ -175,12 +175,17 @@ class ASMAERunner:
             from services.agribrain.world_model.canonical_worldline import (
                 CanonicalWorldlineService,
                 CorruptedWorldlineError,
+                SecurityViolation,
             )
 
             root_dir = context.get("worldline_root")
+            if root_dir is not None:
+                clean_root = str(root_dir).strip()
+                if ".." in clean_root:
+                    raise SecurityViolation(f"Path traversal detected in worldline_root: {clean_root}")
             CanonicalWorldlineService(root=root_dir).hydrate_context(plot_id, context)
-        except CorruptedWorldlineError as exc:
-            logger.exception("ASMAE worldline journal corrupted or sequence gap detected: %s", exc)
+        except (CorruptedWorldlineError, SecurityViolation) as exc:
+            logger.exception("ASMAE worldline journal corrupted or security violation: %s", exc)
             context["worldline_hydration_error"] = str(exc)
             if context.get("knowledge_cutoff_time") or context.get("knowledge_cutoff_K") or permissions.get("production_authority_allowed"):
                 raise

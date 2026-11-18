@@ -144,11 +144,14 @@ class ASMAEIR03BitemporalReplayContractTests(unittest.TestCase):
         valid_day: int,
         commit_day: int,
         payload_data: Dict[str, Any],
+        parent_ids: Optional[List[str]] = None,
+        parent_event_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Commit an immutable event with explicit valid time T and commitment time K."""
         valid_dt = self.base_time + timedelta(days=valid_day)
         commit_dt = self.base_time + timedelta(days=commit_day)
 
+        parents = tuple(parent_ids or parent_event_ids or ())
         prop = WorldlineEventProposal(
             event_type=event_type,
             geometry_version=self.geometry_hash,
@@ -158,6 +161,7 @@ class ASMAEIR03BitemporalReplayContractTests(unittest.TestCase):
             authority_contract_version="canonical_test_v1",
             authority_ref="test_authority",
             payload=payload_data,
+            parent_event_ids=parents,
         )
         rec = self.worldline.commit_proposal(
             plot_id=self.plot_id,
@@ -170,8 +174,12 @@ class ASMAEIR03BitemporalReplayContractTests(unittest.TestCase):
         event_path = self.worldline._event_path(self.plot_id, rec["event_id"], self.tenant_id, "default")
         event_data = json.loads(event_path.read_text(encoding="utf-8"))
         event_data["committed_at"] = commit_dt.isoformat()
+        if parents:
+            event_data["parent_event_ids"] = list(parents)
         event_path.write_text(json.dumps(event_data), encoding="utf-8")
         rec["committed_at"] = commit_dt.isoformat()
+        if parents:
+            rec["parent_event_ids"] = list(parents)
         return rec
 
     # =========================================================================
@@ -626,6 +634,250 @@ class ASMAEIR03BitemporalReplayContractTests(unittest.TestCase):
         self.assertTrue(receipt.get("evidence_set_digest", "").startswith("sha256:"))
         self.assertEqual(len(receipt.get("selected_evidence_set", [])), 1)
         self.assertEqual(receipt["selected_evidence_set"][0]["event_type"], "ARCHIVE_POSTERIOR_VALIDATED")
+
+    # =========================================================================
+    # IR03-T12: Head Watermark Detects Tail Journal Truncation
+    # =========================================================================
+    def test_ir03_t12_head_watermark_detects_tail_journal_truncation(self):
+        """Head watermark detects deletion of tail events even when internal sequences are contiguous."""
+        # Commit 3 events: sequences 1, 2, 3
+        e1 = self._commit_worldline_event("ARCHIVE_POSTERIOR_VALIDATED", 1, 2, {"archive_posterior": {"geometry_hash": self.geometry_hash, "val": 1}})
+        e2 = self._commit_worldline_event("ARCHIVE_POSTERIOR_VALIDATED", 2, 3, {"archive_posterior": {"geometry_hash": self.geometry_hash, "val": 2}})
+        e3 = self._commit_worldline_event("ARCHIVE_POSTERIOR_VALIDATED", 3, 4, {"archive_posterior": {"geometry_hash": self.geometry_hash, "val": 3}})
+
+        # Head sequence is 3
+        head = self.worldline.load_head(self.plot_id, self.tenant_id)
+        self.assertEqual(int(head["sequence"]), 3)
+
+        # Contiguous check passes initially
+        events = self.worldline.load_all_events(self.plot_id, self.tenant_id, fail_on_corrupt=True)
+        self.assertEqual(len(events), 3)
+
+        # Adversarially delete tail event (e3) from disk, leaving e1 and e2 (contiguous 1, 2)
+        e3_path = self.worldline._event_path(self.plot_id, e3["event_id"], self.tenant_id)
+        self.assertTrue(e3_path.exists())
+        e3_path.unlink()
+
+        # load_all_events with fail_on_corrupt must raise CorruptedWorldlineError
+        with self.assertRaises(CorruptedWorldlineError) as ctx_err:
+            self.worldline.load_all_events(self.plot_id, self.tenant_id, fail_on_corrupt=True)
+        self.assertIn("truncation", str(ctx_err.exception).lower())
+
+    # =========================================================================
+    # IR03-T13: Recursive Ancestor Lineage Rejects Post-K Grandparent
+    # =========================================================================
+    def test_ir03_t13_recursive_ancestor_lineage_rejects_post_k_grandparent(self):
+        """Recursive DAG traversal detects when an ancestor grandparent was committed after cutoff K."""
+        # Grandparent A: committed on Day 30
+        grandparent_a = self._commit_worldline_event(
+            event_type="OBSERVATION_RAW",
+            valid_day=1,
+            commit_day=30,
+            payload_data={"raw_val": 42},
+        )
+
+        # Parent B: committed on Day 10, references Grandparent A
+        parent_b = self._commit_worldline_event(
+            event_type="INTERMEDIATE_FEATURE",
+            valid_day=2,
+            commit_day=10,
+            payload_data={"parent_val": 42},
+            parent_ids=[grandparent_a["event_id"]],
+        )
+
+        # Child C: committed on Day 15, references Parent B
+        child_c = self._commit_worldline_event(
+            event_type="CROP_POSTERIOR",
+            valid_day=3,
+            commit_day=15,
+            payload_data={"crop_posterior": {"stage": "deep_lineage_test"}},
+            parent_ids=[parent_b["event_id"]],
+        )
+
+        t_eval = self.base_time + timedelta(days=5)
+        # Query at K=Day 20: Child C (Day 15) <= Day 20, Parent B (Day 10) <= Day 20.
+        # BUT Grandparent A was committed at Day 30 > Day 20!
+        k_day20 = self.base_time + timedelta(days=20)
+        res_k20 = self.worldline.latest_eligible_payload(
+            plot_id=self.plot_id,
+            event_type="CROP_POSTERIOR",
+            valid_time_T=t_eval,
+            knowledge_cutoff_K=k_day20,
+            tenant_id=self.tenant_id,
+            fail_on_corrupt=True,
+        )
+        self.assertIsNone(res_k20, "Child C must be rejected because its transitive ancestor A post-dates K")
+
+        # Query at K=Day 35: All ancestors A (30), B (10), C (15) <= Day 35.
+        k_day35 = self.base_time + timedelta(days=35)
+        res_k35 = self.worldline.latest_eligible_payload(
+            plot_id=self.plot_id,
+            event_type="CROP_POSTERIOR",
+            valid_time_T=t_eval,
+            knowledge_cutoff_K=k_day35,
+            tenant_id=self.tenant_id,
+            fail_on_corrupt=True,
+        )
+        self.assertIsNotNone(res_k35)
+        self.assertEqual(res_k35["crop_posterior"]["stage"], "deep_lineage_test")
+
+    # =========================================================================
+    # IR03-T14: Evidence Classification Rejects Forecast/Scenario Masquerade
+    # =========================================================================
+    def test_ir03_t14_evidence_classification_rejects_forecast_masquerading_as_observation(self):
+        """Forecast, synthetic, and scenario packets must never masquerade as historical observations."""
+        # Commit legitimate observation on Day 3, committed Day 4
+        self._commit_worldline_event(
+            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            valid_day=3,
+            commit_day=4,
+            payload_data={"archive_posterior": {"geometry_hash": self.geometry_hash, "kind": "real_observation"}},
+        )
+
+        # Commit forecast event valid on Day 5, committed Day 6
+        self._commit_worldline_event(
+            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            valid_day=5,
+            commit_day=6,
+            payload_data={"archive_posterior": {"geometry_hash": self.geometry_hash, "kind": "projected_forecast"}, "is_forecast": True},
+        )
+
+        # Commit scenario event valid on Day 6, committed Day 7
+        self._commit_worldline_event(
+            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            valid_day=6,
+            commit_day=7,
+            payload_data={"archive_posterior": {"geometry_hash": self.geometry_hash, "kind": "counterfactual_scenario"}, "scenario": True},
+        )
+
+        t_eval = self.base_time + timedelta(days=10)
+        k_eval = self.base_time + timedelta(days=10)
+
+        # Query latest eligible payload
+        latest = self.worldline.latest_eligible_payload(
+            plot_id=self.plot_id,
+            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            valid_time_T=t_eval,
+            knowledge_cutoff_K=k_eval,
+            tenant_id=self.tenant_id,
+            fail_on_corrupt=True,
+        )
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest["archive_posterior"]["kind"], "real_observation")
+
+    # =========================================================================
+    # IR03-T15: Security & Filesystem Containment Blocks Path Traversal
+    # =========================================================================
+    def test_ir03_t15_security_filesystem_containment_blocks_path_traversal(self):
+        """Path traversal characters in worldline_root, tenant_id, namespace, or event_id raise SecurityViolation."""
+        from services.agribrain.world_model.canonical_worldline import SecurityViolation
+
+        # 1. Traversal in worldline_root init
+        with self.assertRaises(SecurityViolation):
+            CanonicalWorldlineService(root="../traversal_root")
+
+        # 2. Traversal in event_path
+        with self.assertRaises(SecurityViolation):
+            self.worldline._event_path(self.plot_id, "../evil_event", self.tenant_id)
+
+        # 3. Traversal in runner context worldline_root
+        runner = ASMAERunner()
+        bad_context = {
+            "plot_id": self.plot_id,
+            "tenant_id": self.tenant_id,
+            "farm_id": self.farm_id,
+            "worldline_root": "../escaped_dir",
+            "knowledge_cutoff_time": (self.base_time + timedelta(days=5)).isoformat(),
+            "execution_permissions": {"production_authority_allowed": True},
+        }
+        with self.assertRaises(SecurityViolation):
+            runner.execute(self.plot_id, "run-bad-traversal", bad_context, mode="quick_visual")
+
+    # =========================================================================
+    # IR03-T16: Snapshot Store Binds Bitemporal Replay Receipt and Digest
+    # =========================================================================
+    def test_ir03_t16_snapshot_store_binds_bitemporal_replay_receipt_and_digest(self):
+        """Published canonical plot snapshot envelopes (node, publication, receipt, head) bind replay receipt."""
+        from services.agribrain.layer05_asmae.plot_snapshot_store import (
+            publish_canonical_plot_snapshot,
+            load_plot_snapshot_by_id,
+            _plot_dir,
+            _coerce_namespace,
+        )
+
+        mock_replay_receipt = {
+            "contract_version": "canonical_bitemporal_replay_receipt_v1",
+            "replay_mode": "bitemporal_deterministic_v1",
+            "evidence_set_digest": "sha256:d17e3f890b5ca7b649a21e428cf157bb674e2bda63914a1c5d98fa6a8b7c93e1",
+            "observation_valid_time": "2026-09-08T12:00:00+00:00",
+            "knowledge_cutoff_time": "2026-09-08T12:00:00+00:00",
+        }
+
+        snapshot_id = "ASMAE-SNAPSHOT-replayreceiptbind001"
+        asmae_result = {
+            "snapshot_id": snapshot_id,
+            "content_hash": "sha256:mock_asmae_hash_123",
+            "bitemporal_replay_receipt": mock_replay_receipt,
+            "crop_posterior_lineage": "lineage-001",
+            "crop_worldline_event_id": "evt-crop-001",
+            "phenology_worldline_event_id": "evt-pheno-001",
+            "canRenderPixels": False,
+        }
+        frontend_payload = {
+            "intelligence_snapshot_id": snapshot_id,
+            "surface_inventory_hash": "mock_inventory_hash_123",
+            "evidence_cutoff_at": "2026-09-08T12:00:00+00:00",
+            "scientific_evidence_lineage": {
+                "crop_posterior_lineage": "lineage-001",
+                "crop_worldline_event_id": "evt-crop-001",
+                "phenology_worldline_event_id": "evt-pheno-001",
+            },
+        }
+
+        head = publish_canonical_plot_snapshot(
+            tenant_id=self.tenant_id,
+            farm_id=self.farm_id,
+            plot_id=self.plot_id,
+            geometry_hash=self.geometry_hash,
+            snapshot_id=snapshot_id,
+            asmae_result=asmae_result,
+            frontend_payload=frontend_payload,
+            job_id="job-ir03-receipt-test",
+            manifest_hash="manifest-ir03-test",
+            snapshot_kind="asmae",
+        )
+
+        # 1. Head contains replay receipt and evidence_set_digest
+        self.assertIn("bitemporal_replay_receipt", head)
+        self.assertEqual(head["evidence_set_digest"], mock_replay_receipt["evidence_set_digest"])
+
+        # 2. Loaded snapshot node contains replay receipt and digest
+        loaded = load_plot_snapshot_by_id(
+            snapshot_id=snapshot_id,
+            tenant_id=self.tenant_id,
+            farm_id=self.farm_id,
+            plot_id=self.plot_id,
+        )
+        self.assertIsNotNone(loaded)
+        self.assertIn("bitemporal_replay_receipt", loaded)
+        self.assertEqual(loaded["evidence_set_digest"], mock_replay_receipt["evidence_set_digest"])
+
+        # 3. Publication file on disk contains replay receipt and digest
+        ns = _coerce_namespace(self.plot_id, tenant_id=self.tenant_id, farm_id=self.farm_id)
+        pub_path = Path(head["frontend_publication_ref"])
+        self.assertTrue(pub_path.exists())
+        with open(pub_path, "r", encoding="utf-8") as f:
+            pub_data = json.load(f)
+        self.assertIn("bitemporal_replay_receipt", pub_data)
+        self.assertEqual(pub_data["evidence_set_digest"], mock_replay_receipt["evidence_set_digest"])
+
+        # 4. Receipt file on disk contains replay receipt and digest
+        rec_path = Path(head["publication_receipt_ref"])
+        self.assertTrue(rec_path.exists())
+        with open(rec_path, "r", encoding="utf-8") as f:
+            rec_data = json.load(f)
+        self.assertIn("bitemporal_replay_receipt", rec_data)
+        self.assertEqual(rec_data["evidence_set_digest"], mock_replay_receipt["evidence_set_digest"])
 
 
 if __name__ == "__main__":

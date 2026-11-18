@@ -146,8 +146,16 @@ class CanonicalWorldlineService:
     ASMAE and other layers interact through proposals, not direct writes.
     """
 
-    def __init__(self, root: Optional[Path] = None) -> None:
-        self.root = Path(root or CANONICAL_WORLDLINE_ROOT)
+    def __init__(self, root: Optional[Union[Path, str]] = None) -> None:
+        if root is not None:
+            clean_str = str(root).strip()
+            if not clean_str:
+                raise ValueError("worldline root cannot be empty string")
+            if ".." in clean_str.split("/") or ".." in clean_str.split("\\"):
+                raise SecurityViolation(f"Path traversal in worldline root: {clean_str}")
+            self.root = Path(clean_str).resolve()
+        else:
+            self.root = Path(CANONICAL_WORLDLINE_ROOT).resolve()
 
     @staticmethod
     def _plot_key(plot_id: str) -> str:
@@ -177,7 +185,14 @@ class CanonicalWorldlineService:
         return self._plot_dir(plot_id, tenant_id, namespace) / "head.json"
 
     def _event_path(self, plot_id: str, event_id: str, tenant_id: str = "default_tenant", namespace: str = "default") -> Path:
-        return self._plot_dir(plot_id, tenant_id, namespace) / "events" / f"{event_id}.json"
+        clean_eid = str(event_id).strip()
+        if not clean_eid or ".." in clean_eid or "/" in clean_eid or "\\" in clean_eid:
+            raise SecurityViolation(f"Invalid event_id {event_id}: path traversal characters not permitted")
+        plot_events = (self._plot_dir(plot_id, tenant_id, namespace) / "events").resolve()
+        target = (plot_events / f"{clean_eid}.json").resolve()
+        if not target.is_relative_to(plot_events):
+            raise SecurityViolation(f"Event ID {event_id} escapes plot events directory")
+        return target
 
     @staticmethod
     def _read(path: Path) -> Dict[str, Any]:
@@ -555,6 +570,13 @@ class CanonicalWorldlineService:
         """Load all persisted events for a tenant plot, ordered by sequence."""
         events_dir = self._plot_dir(plot_id, tenant_id, namespace) / "events"
         if not events_dir.exists() or not events_dir.is_dir():
+            if fail_on_corrupt:
+                head = self.load_head(plot_id, tenant_id, namespace)
+                head_seq = int(head.get("sequence") or 0) if head else 0
+                if head_seq > 0:
+                    raise CorruptedWorldlineError(
+                        f"Worldline journal tail truncation detected for plot {plot_id}: head watermark sequence {head_seq} but events directory missing or empty"
+                    )
             return []
         events = []
         for file in events_dir.glob("*.json"):
@@ -569,7 +591,7 @@ class CanonicalWorldlineService:
                 if fail_on_corrupt:
                     if isinstance(exc, CorruptedWorldlineError):
                         raise
-                    raise CorruptedWorldlineError(f"Failed to read worldline event file {file}: {exc}") from exc
+                    raise CorruptedWorldlineError(f"Worldline event file corruption at {file}: {exc}") from exc
                 logger.warning("Could not read worldline event file %s: %s", file, exc)
         events.sort(
             key=lambda e: (
@@ -578,17 +600,44 @@ class CanonicalWorldlineService:
                 str(e.get("effective_at") or ""),
             )
         )
-        if fail_on_corrupt and events:
-            # Check for sequence continuity
-            for idx, event in enumerate(events):
-                seq = event.get("sequence")
-                if seq is None:
-                    raise CorruptedWorldlineError(f"Event {event.get('event_id')} missing sequence number")
-                expected_seq = idx + 1
-                if int(seq) != expected_seq:
+        if fail_on_corrupt:
+            if events:
+                # 1. Check for sequence continuity and valid committed_at timestamps (IR03-V02, IR03-V03)
+                for idx, event in enumerate(events):
+                    seq = event.get("sequence")
+                    if seq is None:
+                        raise CorruptedWorldlineError(f"Event {event.get('event_id')} missing sequence number")
+                    expected_seq = idx + 1
+                    if int(seq) != expected_seq:
+                        raise CorruptedWorldlineError(
+                            f"Worldline sequence gap detected for plot {plot_id}: expected sequence {expected_seq}, found {seq}"
+                        )
+                    comm_str = event.get("committed_at")
+                    if not comm_str:
+                        raise CorruptedWorldlineError(f"Event {event.get('event_id')} missing committed_at timestamp")
+                    try:
+                        _parse_utc_iso(comm_str)
+                    except Exception as exc:
+                        raise CorruptedWorldlineError(
+                            f"Event {event.get('event_id')} has invalid committed_at timestamp '{comm_str}': {exc}"
+                        ) from exc
+
+            # 2. Check head watermark against event count (detects tail truncation)
+            head = self.load_head(plot_id, tenant_id, namespace)
+            head_seq = int(head.get("sequence") or 0) if head else 0
+            if head_seq > 0:
+                if len(events) != head_seq:
                     raise CorruptedWorldlineError(
-                        f"Worldline sequence gap detected for plot {plot_id}: expected sequence {expected_seq}, found {seq}"
+                        f"Worldline journal tail truncation detected for plot {plot_id}: head watermark sequence {head_seq} but found {len(events)} events"
                     )
+                if events and int(events[-1].get("sequence") or 0) != head_seq:
+                    raise CorruptedWorldlineError(
+                        f"Worldline journal sequence mismatch for plot {plot_id}: head watermark sequence {head_seq} but last event sequence is {events[-1].get('sequence')}"
+                    )
+            elif events:
+                raise CorruptedWorldlineError(
+                    f"Worldline journal missing head watermark for plot {plot_id} while {len(events)} events exist"
+                )
         return events
 
     def select_eligible_events(
@@ -650,12 +699,28 @@ class CanonicalWorldlineService:
             if committed_dt > k_dt or valid_dt > t_dt:
                 continue
 
-            # Dependency Provenance Check (IR03-R03 / R05):
-            # All referenced parents must have committed_at <= K
-            parent_ids = rec.get("parent_event_ids") or []
+            # Evidence Classification Guard (IR03-V08):
+            # Forecasts, scenario projections, and synthetic data must never masquerade as historical observations
+            payload = rec.get("payload") or {}
+            if isinstance(payload, dict):
+                if payload.get("is_forecast") or payload.get("scenario") or payload.get("synthetic"):
+                    logger.warning("Event %s contains forecast/scenario/synthetic data; rejected from historical observation set", rec.get("event_id"))
+                    continue
+            if rec.get("event_kind") in {"forecast", "scenario", "synthetic"}:
+                logger.warning("Event %s is classified as %s; rejected from historical observation set", rec.get("event_id"), rec.get("event_kind"))
+                continue
+
+            # Recursive Dependency Provenance Check (IR03-V04):
+            # Traverse complete DAG of parent/ancestor references; ensure NO ancestor committed at t > K
             dependency_violation = False
-            for p_id in parent_ids:
-                p_path = self._event_path(plot_id, str(p_id), tenant_id, namespace)
+            visited_ancestors: set[str] = set()
+            ancestor_queue: list[str] = [str(pid).strip() for pid in (rec.get("parent_event_ids") or []) if str(pid).strip()]
+            while ancestor_queue:
+                ancestor_id = ancestor_queue.pop(0)
+                if ancestor_id in visited_ancestors:
+                    continue
+                visited_ancestors.add(ancestor_id)
+                p_path = self._event_path(plot_id, ancestor_id, tenant_id, namespace)
                 if p_path.exists():
                     try:
                         p_rec = self._read(p_path)
@@ -664,15 +729,20 @@ class CanonicalWorldlineService:
                             p_comm_dt = _parse_utc_iso(p_comm_str)
                             if p_comm_dt > k_dt:
                                 logger.warning(
-                                    "Derived event %s references parent %s committed after cutoff (%s > %s)",
-                                    rec.get("event_id"), p_id, p_comm_str, k_dt.isoformat()
+                                    "Derived event %s references ancestor %s committed after cutoff (%s > %s)",
+                                    rec.get("event_id"), ancestor_id, p_comm_str, k_dt.isoformat()
                                 )
                                 dependency_violation = True
                                 break
+                        # Queue transitive ancestors
+                        for gp_id in p_rec.get("parent_event_ids") or []:
+                            clean_gpid = str(gp_id).strip()
+                            if clean_gpid and clean_gpid not in visited_ancestors:
+                                ancestor_queue.append(clean_gpid)
                     except Exception as p_exc:
                         if fail_on_corrupt:
                             raise CorruptedWorldlineError(
-                                f"Failed to verify parent {p_id} for event {rec.get('event_id')}: {p_exc}"
+                                f"Failed to verify ancestor {ancestor_id} for event {rec.get('event_id')}: {p_exc}"
                             ) from p_exc
                         dependency_violation = True
                         break

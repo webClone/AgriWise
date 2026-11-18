@@ -384,6 +384,14 @@ def publish_canonical_plot_snapshot(
         envelope["scientific_content_hash"] = scientific_result.get("content_hash")
         envelope["scientific_result"] = scientific_result
 
+    replay_receipt = (
+        scientific_result.get("bitemporal_replay_receipt")
+        or (execution_identity or {}).get("bitemporal_replay_receipt")
+    )
+    if replay_receipt:
+        envelope["bitemporal_replay_receipt"] = replay_receipt
+        envelope["evidence_set_digest"] = replay_receipt.get("evidence_set_digest")
+
     hashable_envelope = {k: v for k, v in envelope.items() if not k.endswith("_ref")}
     envelope["node_hash"] = hashlib.sha256(_json_bytes(hashable_envelope)).hexdigest()
 
@@ -539,6 +547,9 @@ def publish_canonical_plot_snapshot(
         "crop_cycle_id": crop_cycle_id,
         "recorded_at": publication_timestamp,
     }
+    if envelope.get("bitemporal_replay_receipt"):
+        publication["bitemporal_replay_receipt"] = envelope["bitemporal_replay_receipt"]
+        publication["evidence_set_digest"] = envelope.get("evidence_set_digest")
 
     hashable_pub = {k: v for k, v in publication.items() if not k.endswith("_ref")}
     publication["publication_hash"] = hashlib.sha256(_json_bytes(hashable_pub)).hexdigest()
@@ -616,6 +627,10 @@ def publish_canonical_plot_snapshot(
         "equivalence_reason": "scientific_content_hash_equivalent",
         "recorded_at": datetime.now(timezone.utc).isoformat(),
     }
+    if envelope.get("bitemporal_replay_receipt"):
+        receipt["bitemporal_replay_receipt"] = envelope["bitemporal_replay_receipt"]
+        receipt["evidence_set_digest"] = envelope.get("evidence_set_digest")
+
     hashable_receipt = {
         key: value for key, value in receipt.items() if not key.endswith("_ref")
     }
@@ -679,6 +694,10 @@ def publish_canonical_plot_snapshot(
         "crop_cycle_id": crop_cycle_id,
         "updated_at": publication_timestamp,
     }
+    if envelope.get("bitemporal_replay_receipt"):
+        head["bitemporal_replay_receipt"] = envelope["bitemporal_replay_receipt"]
+        head["evidence_set_digest"] = envelope.get("evidence_set_digest")
+
     _atomic(_head_path(ns), head)
     with _SNAPSHOT_CACHE_LOCK:
         keys_to_evict = [k for k in _CANONICAL_SNAPSHOT_CACHE if k[0] == ns.stable_key()]
