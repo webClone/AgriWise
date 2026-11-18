@@ -57,7 +57,7 @@ _ASMAE_FROZEN_LINEAGE_FIELDS = (
     "crop_influence_manifest_hash",
 )
 
-_CANONICAL_SNAPSHOT_CACHE: Dict[Tuple[str, int, int, int, int, str, str], Dict[str, Any]] = {}
+_CANONICAL_SNAPSHOT_CACHE: Dict[Tuple[str, int, int, int, int, int, int, int, int, str, str], Dict[str, Any]] = {}
 _SNAPSHOT_CACHE_LOCK = threading.Lock()
 
 
@@ -646,6 +646,91 @@ def publish_canonical_plot_snapshot(
     return head
 
 
+def evaluate_snapshot_admission(
+    snapshot: Optional[Dict[str, Any]],
+    namespace: Optional[PlotNamespace] = None,
+) -> Dict[str, Any]:
+    """Authoritative shared admission predicate for scientific snapshot authority.
+
+    Evaluates both cryptographic integrity keys and lifecycle contract keys.
+    Shared identically by API admission and Layer 10 fallback decision gates.
+    """
+    if not snapshot or not isinstance(snapshot, dict):
+        return {
+            "is_valid": False,
+            "status": "missing",
+            "reason": "missing_snapshot",
+            "invalid_integrity_flags": ["snapshotMissing"],
+            "invalid_contract_flags": [],
+            "quarantined": True,
+            "refresh_required": True,
+        }
+
+    validation = snapshot.get("validation") or {}
+    integrity_keys = (
+        "nodeValid",
+        "publicationValid",
+        "receiptValid",
+        "inventoryValid",
+        "bindingValid",
+        "lineageValid",
+        "temporalBindingValid",
+    )
+    contract_keys = (
+        "schemaValid",
+        "contractValid",
+        "publicationStatusValid",
+    )
+
+    invalid_integrity = [k for k in integrity_keys if validation.get(k) is not True]
+
+    claims_num = bool(
+        snapshot.get("snapshot_kind") == "asmae"
+        or str(snapshot.get("snapshot_id") or "").startswith("ASMAE-SNAPSHOT-")
+        or (snapshot.get("contract_validation") or {}).get("numerical_authority_verified") is True
+        or (snapshot.get("frontend_payload") or {}).get("claims_numerical_authority") is True
+        or (snapshot.get("scientific_result") or {}).get("asmae_numerical_digest")
+    )
+    if claims_num:
+        if validation.get("numericalBindingValid") is not True:
+            invalid_integrity.append("numericalBindingValid")
+        if validation.get("nodeAgreementValid") is not True:
+            invalid_integrity.append("nodeAgreementValid")
+
+    if invalid_integrity:
+        return {
+            "is_valid": False,
+            "status": "quarantined",
+            "reason": "canonical_head_integrity_invalid",
+            "invalid_integrity_flags": invalid_integrity,
+            "invalid_contract_flags": [],
+            "quarantined": True,
+            "refresh_required": True,
+        }
+
+    invalid_contract = [k for k in contract_keys if validation.get(k) is not True]
+    if invalid_contract:
+        return {
+            "is_valid": False,
+            "status": "stale",
+            "reason": "canonical_head_schema_stale",
+            "invalid_integrity_flags": [],
+            "invalid_contract_flags": invalid_contract,
+            "quarantined": False,
+            "refresh_required": True,
+        }
+
+    return {
+        "is_valid": True,
+        "status": "admitted",
+        "reason": None,
+        "invalid_integrity_flags": [],
+        "invalid_contract_flags": [],
+        "quarantined": False,
+        "refresh_required": False,
+    }
+
+
 def publish_canonical_layer10_snapshot(
     *,
     namespace: PlotNamespace,
@@ -666,7 +751,7 @@ def publish_canonical_layer10_snapshot(
     payload = copy.deepcopy(frontend_payload)
     snapshot_id = str(payload.get("intelligence_snapshot_id") or "")
     if snapshot_id.startswith("ASMAE-SNAPSHOT-"):
-        existing = load_latest_plot_snapshot(ns, geometry_hash or None)
+        existing = load_latest_plot_snapshot(ns, geometry_hash or None, force_verify=True)
         incoming_cycle = crop_cycle_id or payload.get("crop_cycle_id") or payload.get("cropCycleId")
         if (
             existing
@@ -703,33 +788,10 @@ def publish_canonical_layer10_snapshot(
         same_cycle = (existing_head.get("crop_cycle_id") or None) == requested_crop_cycle_id
         if same_geometry and same_cycle:
             # Prefer a verified ASMAE head only for the very same scientific scope.
-            verified_head = load_latest_plot_snapshot(ns, geometry_hash or None)
-            validation = (verified_head.get("validation") or {}) if isinstance(verified_head, dict) else {}
-            # Check complete API admission equivalence (R01-V01):
-            # All integrity keys, temporal/numerical binding, and contract/schema keys must pass.
-            api_integrity_keys = (
-                "nodeValid",
-                "publicationValid",
-                "receiptValid",
-                "inventoryValid",
-                "bindingValid",
-                "lineageValid",
-                "temporalBindingValid",
-                "numericalBindingValid",
-                "nodeAgreementValid",
-            )
-            api_contract_keys = (
-                "schemaValid",
-                "contractValid",
-                "publicationStatusValid",
-            )
-            is_valid_asmae = (
-                bool(verified_head)
-                and verified_head.get("snapshot_id") == existing_head.get("snapshot_id")
-                and all(validation.get(k) is True for k in api_integrity_keys)
-                and all(validation.get(k) is True for k in api_contract_keys)
-            )
-            if is_valid_asmae:
+            # Uses force_verify=True to inspect actual disk bytes, bypassing in-memory advisory cache.
+            verified_head = load_latest_plot_snapshot(ns, geometry_hash or None, force_verify=True)
+            admission = evaluate_snapshot_admission(verified_head, ns)
+            if admission["is_valid"] and verified_head and verified_head.get("snapshot_id") == existing_head.get("snapshot_id"):
                 return {
                     "snapshot_id": existing_head.get("snapshot_id"),
                     "node_hash": existing_head.get("node_hash"),
@@ -898,15 +960,33 @@ def load_latest_plot_snapshot(
     geometry_hash: Optional[str] = None,
     tenant_id: str = "",
     farm_id: str = "",
+    force_verify: bool = False,
 ) -> Optional[Dict[str, Any]]:
+    """Load latest canonical plot snapshot.
+
+    Threat Model & Cache Guarantees:
+      1. Operational reads (force_verify=False):
+         Employs an in-memory advisory cache keyed on filesystem metadata:
+         head, node, publication, receipt timestamps AND file sizes.
+         Designed for high-throughput dashboard reads under a cooperative filesystem.
+      2. Scientific authority reads (force_verify=True):
+         Completely bypasses the advisory in-memory cache and recomputes all
+         cryptographic SHA-256 hashes (node, publication, receipt, inventory,
+         numerical vector digest, temporal binding) directly from raw disk bytes.
+         Guarantees tamper detection even if an attacker alters file contents
+         while restoring original nanosecond timestamps and padding file sizes.
+    """
     ns = _coerce_namespace(namespace, tenant_id=tenant_id, farm_id=farm_id)
     head_file = _head_path(ns)
     if not head_file.exists():
         return None
     try:
-        head_mtime = head_file.stat().st_mtime_ns
+        head_stat = head_file.stat()
+        head_mtime = head_stat.st_mtime_ns
+        head_size = head_stat.st_size
     except OSError:
         head_mtime = 0
+        head_size = 0
 
     head = _read(head_file)
     if head.get("contract_version") != PLOT_SNAPSHOT_CONTRACT_VERSION:
@@ -925,31 +1005,45 @@ def load_latest_plot_snapshot(
     receipt_path = directory / "receipts" / f"{safe_job_id}.json"
 
     try:
-        node_mtime = node_path.stat().st_mtime_ns if node_path.exists() else 0
+        node_stat = node_path.stat()
+        node_mtime = node_stat.st_mtime_ns
+        node_size = node_stat.st_size
     except OSError:
         node_mtime = 0
+        node_size = 0
     try:
-        pub_mtime = pub_path.stat().st_mtime_ns if pub_path.exists() else 0
+        pub_stat = pub_path.stat()
+        pub_mtime = pub_stat.st_mtime_ns
+        pub_size = pub_stat.st_size
     except OSError:
         pub_mtime = 0
+        pub_size = 0
     try:
-        receipt_mtime = receipt_path.stat().st_mtime_ns if receipt_path.exists() else 0
+        receipt_stat = receipt_path.stat()
+        receipt_mtime = receipt_stat.st_mtime_ns
+        receipt_size = receipt_stat.st_size
     except OSError:
         receipt_mtime = 0
+        receipt_size = 0
 
     cache_key = (
         ns.stable_key(),
         head_mtime,
+        head_size,
         node_mtime,
+        node_size,
         pub_mtime,
+        pub_size,
         receipt_mtime,
+        receipt_size,
         str(snapshot_id),
         str(head.get("frontend_publication_hash") or ""),
     )
-    with _SNAPSHOT_CACHE_LOCK:
-        cached = _CANONICAL_SNAPSHOT_CACHE.get(cache_key)
-        if cached is not None:
-            return copy.deepcopy(cached)
+    if not force_verify:
+        with _SNAPSHOT_CACHE_LOCK:
+            cached = _CANONICAL_SNAPSHOT_CACHE.get(cache_key)
+            if cached is not None:
+                return copy.deepcopy(cached)
 
     if not node_path.exists():
         return None

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from services.agribrain.common.plot_namespace import PlotNamespace
@@ -119,6 +120,8 @@ def main():
     parser.add_argument("--manifest-hash", required=True)
     parser.add_argument("--root-moisture", type=float, default=0.382)
     parser.add_argument("--canopy-vigor", type=float, default=0.615)
+    parser.add_argument("--barrier-dir", default=None)
+    parser.add_argument("--worker-id", default=None)
     args = parser.parse_args()
 
     plot_snapshot_store.PLOT_SNAPSHOT_ROOT = Path(args.root)
@@ -140,6 +143,16 @@ def main():
         root_moisture=args.root_moisture,
         canopy_vigor=args.canopy_vigor,
     )
+
+    if args.barrier_dir and args.worker_id:
+        b_dir = Path(args.barrier_dir)
+        b_dir.mkdir(parents=True, exist_ok=True)
+        ready_file = b_dir / f"{args.worker_id}.ready"
+        go_file = b_dir / "go.signal"
+        ready_file.touch()
+        deadline = time.time() + 10.0
+        while not go_file.exists() and time.time() < deadline:
+            time.sleep(0.005)
 
     try:
         head = publish_canonical_plot_snapshot(

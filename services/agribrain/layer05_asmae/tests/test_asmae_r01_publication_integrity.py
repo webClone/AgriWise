@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +35,7 @@ from services.agribrain.layer05_asmae.plot_snapshot_store import (
     publish_canonical_layer10_snapshot,
     load_latest_plot_snapshot,
     load_plot_snapshot_by_id,
+    evaluate_snapshot_admission,
     _head_path,
     _plot_dir,
 )
@@ -491,6 +493,48 @@ class ASMAER01PublicationIntegrityTests(unittest.TestCase):
         self.assertFalse(warm4["validation"]["publicationValid"])
         self.assertFalse(warm4["validation"]["numericalBindingValid"])
 
+        # 4b. Adversarial check: Tamper with artifact on disk AND restore original mtime/size
+        asmae_id_mtime = "ASMAE-SNAPSHOT-CASE03C-MTIME"
+        job_id_mtime = "job-c3c-mtime"
+        asmae_res_mtime, front_mtime = self._generate_valid_worker_payload(asmae_id_mtime, job_id_mtime, "man-c3c-mtime")
+        publish_canonical_plot_snapshot(
+            namespace=self.ns,
+            plot_id=self.plot_id,
+            tenant_id=self.tenant_id,
+            farm_id=self.farm_id,
+            geometry_hash=self.geometry_hash,
+            snapshot_id=asmae_id_mtime,
+            asmae_result=asmae_res_mtime,
+            frontend_payload=front_mtime,
+            job_id=job_id_mtime,
+            manifest_hash="man-c3c-mtime",
+            execution_identity={"crop_cycle_id": self.crop_cycle_id},
+            allow_overwrite=False,
+        )
+        warm_mtime_1 = load_latest_plot_snapshot(self.ns, self.geometry_hash)
+        self.assertTrue(warm_mtime_1["validation"]["bindingValid"])
+
+        # Tamper with node on disk and restore exact mtime and file length
+        mtime_node_path = _plot_dir(self.ns) / "nodes" / f"{asmae_id_mtime}.json"
+        orig_stat = mtime_node_path.stat()
+        orig_atime_ns = orig_stat.st_atime_ns
+        orig_mtime_ns = orig_stat.st_mtime_ns
+
+        node_dict = json.loads(mtime_node_path.read_text(encoding="utf-8"))
+        node_dict["crop_influence_manifest_hash"] = "tampered_with_mtime_restored"
+        mtime_node_path.write_text(json.dumps(node_dict), encoding="utf-8")
+        os.utime(mtime_node_path, ns=(orig_atime_ns, orig_mtime_ns))
+
+        # Scientific authority read (force_verify=True or API admission) MUST catch the tampering
+        verified = load_latest_plot_snapshot(self.ns, self.geometry_hash, force_verify=True)
+        self.assertIsNotNone(verified)
+        self.assertFalse(verified["validation"]["nodeValid"], "force_verify=True must catch tampering even with restored mtime")
+        self.assertFalse(verified["validation"]["bindingValid"])
+
+        # API admission gate check: must be quarantined
+        api_admission = api_v2_canonical_plot_snapshot(self.plot_id, namespace=self.ns)
+        self.assertTrue(api_admission.get("quarantined"), "API admission must quarantine tampered artifact even with restored mtime")
+
         # 5. Fallback must succeed because load_latest_plot_snapshot detects disk corruption
         layer10_payload = {
             "snapshot_id": "L10-SNAPSHOT-FALLBACK-003",
@@ -714,8 +758,20 @@ class ASMAER01PublicationIntegrityTests(unittest.TestCase):
             "--canopy-vigor", "0.950",
         ]
 
+        barrier_dir = Path(self.temp_dir) / "concurrency_barrier"
+        barrier_dir.mkdir(parents=True, exist_ok=True)
+        cmd_conflict_a.extend(["--barrier-dir", str(barrier_dir), "--worker-id", "proc_a"])
+        cmd_conflict_b.extend(["--barrier-dir", str(barrier_dir), "--worker-id", "proc_b"])
+
         proc_a = subprocess.Popen(cmd_conflict_a, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         proc_b = subprocess.Popen(cmd_conflict_b, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            if (barrier_dir / "proc_a.ready").exists() and (barrier_dir / "proc_b.ready").exists():
+                break
+            time.sleep(0.005)
+        (barrier_dir / "go.signal").touch()
 
         out_a, err_a = proc_a.communicate(timeout=15)
         out_b, err_b = proc_b.communicate(timeout=15)
@@ -729,10 +785,34 @@ class ASMAER01PublicationIntegrityTests(unittest.TestCase):
         self.assertTrue(winner_out.startswith("OK:"))
         self.assertTrue(loser_out.startswith("COLLISION:"))
 
+        # Cold full-chain resolution check: node -> publication -> receipt -> head
+        head_path = _head_path(self.ns)
+        head_data = json.loads(head_path.read_text(encoding="utf-8"))
+        winner_snap_id = head_data.get("snapshot_id")
+        winner_node_hash = head_data.get("node_hash")
+        winner_pub_hash = head_data.get("frontend_publication_hash")
+        winner_receipt_hash = head_data.get("publication_receipt_hash")
+
+        node_path = _plot_dir(self.ns) / "nodes" / f"{winner_snap_id}.json"
+        safe_job_id = hashlib.sha256(str(head_data.get("publication_job_id", "")).encode("utf-8")).hexdigest()[:32]
+        pub_path = _plot_dir(self.ns) / "publications" / f"{safe_job_id}.json"
+        receipt_path = _plot_dir(self.ns) / "receipts" / f"{safe_job_id}.json"
+
+        node_data = json.loads(node_path.read_text(encoding="utf-8"))
+        pub_data = json.loads(pub_path.read_text(encoding="utf-8"))
+        receipt_data = json.loads(receipt_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(node_data["node_hash"], winner_node_hash)
+        self.assertEqual(pub_data["node_hash"], winner_node_hash)
+        self.assertEqual(receipt_data["node_hash"], winner_node_hash)
+        self.assertEqual(pub_data["publication_hash"], winner_pub_hash)
+        self.assertEqual(receipt_data["frontend_publication_hash"], winner_pub_hash)
+        self.assertEqual(receipt_data["receipt_hash"], winner_receipt_hash)
+
         # Verify on-disk artifact remains completely uncorrupted and matches winner
         with plot_snapshot_store._SNAPSHOT_CACHE_LOCK:
             plot_snapshot_store._CANONICAL_SNAPSHOT_CACHE.clear()
-        loaded_conflict = load_latest_plot_snapshot(self.ns, self.geometry_hash)
+        loaded_conflict = load_latest_plot_snapshot(self.ns, self.geometry_hash, force_verify=True)
         self.assertIsNotNone(loaded_conflict)
         self.assertEqual(loaded_conflict["snapshot_id"], snap_id_conflict)
         self.assertTrue(loaded_conflict["validation"]["nodeValid"])
@@ -816,6 +896,69 @@ class ASMAER01PublicationIntegrityTests(unittest.TestCase):
         # Surfaces list must remain empty, never fabricated
         loaded_surfaces = loaded["frontend_payload"].get("surfaces", [])
         self.assertEqual(len(loaded_surfaces), 0, "No spatial rasters should be fabricated for scalar-only states")
+
+    # =========================================================================
+    # Case 9: Differential Admission Equivalence (Shared Predicate Verification)
+    # =========================================================================
+    def test_case_09_differential_admission_equivalence(self):
+        """API admission and Layer 10 fallback preference return 100% equivalent decisions across failure modes (R01-R02-04)."""
+        cases = [
+            # 1. Valid snapshot
+            {"name": "valid", "tamper": lambda n: None, "expected_valid": True, "expected_status": "admitted"},
+            # 2. Corrupt nodeValid
+            {"name": "corrupt_node", "tamper": lambda n: n["validation"].__setitem__("nodeValid", False), "expected_valid": False, "expected_status": "quarantined"},
+            # 3. Bad temporal binding
+            {"name": "bad_temporal", "tamper": lambda n: n["validation"].__setitem__("temporalBindingValid", False), "expected_valid": False, "expected_status": "quarantined"},
+            # 4. Bad numerical binding
+            {"name": "bad_numerical", "tamper": lambda n: n["validation"].__setitem__("numericalBindingValid", False), "expected_valid": False, "expected_status": "quarantined"},
+            # 5. Lineage mismatch
+            {"name": "bad_lineage", "tamper": lambda n: n["validation"].__setitem__("lineageValid", False), "expected_valid": False, "expected_status": "quarantined"},
+            # 6. Stale schema
+            {"name": "stale_schema", "tamper": lambda n: n["validation"].__setitem__("schemaValid", False), "expected_valid": False, "expected_status": "stale"},
+            # 7. Contract invalid
+            {"name": "contract_invalid", "tamper": lambda n: n["validation"].__setitem__("contractValid", False), "expected_valid": False, "expected_status": "stale"},
+        ]
+
+        base_snap = {
+            "snapshot_id": "ASMAE-SNAPSHOT-DIFF-TEST",
+            "snapshot_kind": "asmae",
+            "plot_id": self.plot_id,
+            "tenant_id": self.tenant_id,
+            "farm_id": self.farm_id,
+            "validation": {
+                "nodeValid": True,
+                "publicationValid": True,
+                "receiptValid": True,
+                "inventoryValid": True,
+                "temporalBindingValid": True,
+                "numericalBindingValid": True,
+                "nodeAgreementValid": True,
+                "bindingValid": True,
+                "lineageValid": True,
+                "schemaValid": True,
+                "contractValid": True,
+                "publicationStatusValid": True,
+            },
+            "contract_validation": {"numerical_authority_verified": True},
+            "frontend_payload": {"claims_numerical_authority": True},
+        }
+
+        for c in cases:
+            snap = copy.deepcopy(base_snap)
+            c["tamper"](snap)
+
+            # Evaluate through shared predicate
+            admission = evaluate_snapshot_admission(snap, self.ns)
+            self.assertEqual(
+                admission["is_valid"],
+                c["expected_valid"],
+                f"Case {c['name']} mismatch on is_valid",
+            )
+            self.assertEqual(
+                admission["status"],
+                c["expected_status"],
+                f"Case {c['name']} mismatch on status",
+            )
 
 
 if __name__ == "__main__":

@@ -635,8 +635,11 @@ def api_v2_canonical_plot_snapshot(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Header X-Plot-Id does not match URL path parameter plot_id"
         )
-    from services.agribrain.layer05_asmae.plot_snapshot_store import load_latest_plot_snapshot
-    snapshot = load_latest_plot_snapshot(namespace)
+    from services.agribrain.layer05_asmae.plot_snapshot_store import (
+        load_latest_plot_snapshot,
+        evaluate_snapshot_admission,
+    )
+    snapshot = load_latest_plot_snapshot(namespace, force_verify=True)
     if snapshot is None:
         return {
             "available": False,
@@ -645,67 +648,21 @@ def api_v2_canonical_plot_snapshot(
             "tenant_id": namespace.tenant_id,
             "farm_id": namespace.farm_id,
         }
-    validation = snapshot.get("validation") or {}
-    integrity_keys = (
-        "nodeValid",
-        "publicationValid",
-        "receiptValid",
-        "inventoryValid",
-        "bindingValid",
-        "lineageValid",
-    )
-    contract_keys = (
-        "schemaValid",
-        "contractValid",
-        "publicationStatusValid",
-    )
-    invalid_integrity_flags = [
-        key for key in integrity_keys if validation.get(key) is not True
-    ]
-    claims_num = bool(
-        snapshot.get("snapshot_kind") == "asmae"
-        or str(snapshot.get("snapshot_id") or "").startswith("ASMAE-SNAPSHOT-")
-        or (snapshot.get("contract_validation") or {}).get("numerical_authority_verified") is True
-        or (snapshot.get("frontend_payload") or {}).get("claims_numerical_authority") is True
-        or (snapshot.get("scientific_result") or {}).get("asmae_numerical_digest")
-    )
-    if claims_num and validation.get("numericalBindingValid") is not True:
-        invalid_integrity_flags.append("numericalBindingValid")
-    if invalid_integrity_flags:
-        # A corrupt or incompletely bound head remains on disk as immutable
-        # audit evidence, but it is quarantined from browser/scientific
-        # authority.  Returning HTTP 200 with ``available: false`` preserves
-        # the client's last-known-good raster while a repair/refresh is
-        # requested; importantly, no payload from the invalid head is exposed
-        # as a candidate publication.
+    admission = evaluate_snapshot_admission(snapshot, namespace)
+    if not admission["is_valid"]:
         return {
             "available": False,
-            "reason": "canonical_head_integrity_invalid",
-            "status": "quarantined",
-            "quarantined": True,
-            "refreshRequired": True,
+            "reason": admission["reason"],
+            "status": admission["status"],
+            "quarantined": admission["quarantined"],
+            "refreshRequired": admission["refresh_required"],
             "retainLastKnownGood": True,
-            "invalidIntegrityFlags": invalid_integrity_flags,
+            "invalidIntegrityFlags": admission["invalid_integrity_flags"],
             "plot_id": namespace.plot_id,
             "tenant_id": namespace.tenant_id,
             "farm_id": namespace.farm_id,
             "snapshot_id": snapshot.get("snapshot_id"),
-            "validation": validation,
-            "contract_validation": snapshot.get("contract_validation") or {},
-        }
-    if not all(validation.get(key) is True for key in contract_keys):
-        return {
-            "available": False,
-            "reason": "canonical_head_schema_stale",
-            "status": "stale",
-            "quarantined": False,
-            "refreshRequired": True,
-            "retainLastKnownGood": True,
-            "plot_id": namespace.plot_id,
-            "tenant_id": namespace.tenant_id,
-            "farm_id": namespace.farm_id,
-            "snapshot_id": snapshot.get("snapshot_id"),
-            "validation": validation,
+            "validation": snapshot.get("validation") or {},
             "contract_validation": snapshot.get("contract_validation") or {},
         }
 
