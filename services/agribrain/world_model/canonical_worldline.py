@@ -82,6 +82,27 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_utc_iso(val: Any) -> datetime:
+    """Parse timestamp into UTC timezone-aware datetime."""
+    if isinstance(val, datetime):
+        if val.tzinfo is None:
+            return val.replace(tzinfo=timezone.utc)
+        return val.astimezone(timezone.utc)
+    if hasattr(val, "isoformat") and not isinstance(val, str):
+        val = val.isoformat()
+    s = str(val or "").strip()
+    if not s:
+        raise ValueError("Timestamp cannot be blank")
+    s = s.replace("Z", "+00:00")
+    if len(s) == 10 and s.count("-") == 2:
+        dt = datetime.fromisoformat(s).replace(hour=23, minute=59, second=59, microsecond=999999, tzinfo=timezone.utc)
+    else:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _stable(value: Any) -> str:
     return compute_payload_hash(_public(value))
 
@@ -525,7 +546,11 @@ class CanonicalWorldlineService:
         return self._read(self._event_path(plot_id, event_id, tenant_id, namespace))
 
     def load_all_events(
-        self, plot_id: str, tenant_id: str = "default_tenant", namespace: str = "default"
+        self,
+        plot_id: str,
+        tenant_id: str = "default_tenant",
+        namespace: str = "default",
+        fail_on_corrupt: bool = False,
     ) -> List[Dict[str, Any]]:
         """Load all persisted events for a tenant plot, ordered by sequence."""
         events_dir = self._plot_dir(plot_id, tenant_id, namespace) / "events"
@@ -535,9 +560,16 @@ class CanonicalWorldlineService:
         for file in events_dir.glob("*.json"):
             try:
                 rec = self._read(file)
-                if rec and isinstance(rec, dict) and "event_id" in rec:
-                    events.append(rec)
+                if not rec or not isinstance(rec, dict) or "event_id" not in rec:
+                    if fail_on_corrupt:
+                        raise CorruptedWorldlineError(f"Worldline file {file} is not a valid event record")
+                    continue
+                events.append(rec)
             except Exception as exc:
+                if fail_on_corrupt:
+                    if isinstance(exc, CorruptedWorldlineError):
+                        raise
+                    raise CorruptedWorldlineError(f"Failed to read worldline event file {file}: {exc}") from exc
                 logger.warning("Could not read worldline event file %s: %s", file, exc)
         events.sort(
             key=lambda e: (
@@ -546,7 +578,147 @@ class CanonicalWorldlineService:
                 str(e.get("effective_at") or ""),
             )
         )
+        if fail_on_corrupt and events:
+            # Check for sequence continuity
+            for idx, event in enumerate(events):
+                seq = event.get("sequence")
+                if seq is None:
+                    raise CorruptedWorldlineError(f"Event {event.get('event_id')} missing sequence number")
+                expected_seq = idx + 1
+                if int(seq) != expected_seq:
+                    raise CorruptedWorldlineError(
+                        f"Worldline sequence gap detected for plot {plot_id}: expected sequence {expected_seq}, found {seq}"
+                    )
         return events
+
+    def select_eligible_events(
+        self,
+        plot_id: str,
+        event_type: str,
+        valid_time_T: Any,
+        knowledge_cutoff_K: Any,
+        tenant_id: str = "default_tenant",
+        namespace: str = "default",
+        fail_on_corrupt: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Walk immutable event journal and select events strictly satisfying:
+          1. event.tenant_id == tenant_id
+          2. event.plot_id == plot_id
+          3. event.event_type == event_type
+          4. event.committed_at <= knowledge_cutoff_K
+          5. (event.observation_or_valid_time or event.effective_at) <= valid_time_T
+          6. All ancestor parent events committed_at <= knowledge_cutoff_K (provenance integrity)
+        Ordered deterministically by (valid_time ASC, sequence ASC, committed_at ASC).
+        """
+        all_events = self.load_all_events(
+            plot_id=plot_id,
+            tenant_id=tenant_id,
+            namespace=namespace,
+            fail_on_corrupt=fail_on_corrupt,
+        )
+
+        t_dt = _parse_utc_iso(valid_time_T)
+        k_dt = _parse_utc_iso(knowledge_cutoff_K)
+
+        eligible: List[tuple[datetime, int, datetime, Dict[str, Any]]] = []
+        for rec in all_events:
+            if rec.get("event_type") != event_type:
+                continue
+            if rec.get("plot_id") != plot_id or rec.get("tenant_id") != tenant_id:
+                continue
+
+            committed_str = rec.get("committed_at")
+            valid_str = rec.get("observation_or_valid_time") or rec.get("effective_at")
+            if not committed_str or not valid_str:
+                if fail_on_corrupt:
+                    raise CorruptedWorldlineError(
+                        f"Event {rec.get('event_id')} missing committed_at or valid_time"
+                    )
+                continue
+
+            try:
+                committed_dt = _parse_utc_iso(committed_str)
+                valid_dt = _parse_utc_iso(valid_str)
+            except Exception as exc:
+                if fail_on_corrupt:
+                    raise CorruptedWorldlineError(
+                        f"Event {rec.get('event_id')} has unparseable timestamp: {exc}"
+                    ) from exc
+                continue
+
+            # Dual-clock filter: committed_at <= K and valid_time <= T
+            if committed_dt > k_dt or valid_dt > t_dt:
+                continue
+
+            # Dependency Provenance Check (IR03-R03 / R05):
+            # All referenced parents must have committed_at <= K
+            parent_ids = rec.get("parent_event_ids") or []
+            dependency_violation = False
+            for p_id in parent_ids:
+                p_path = self._event_path(plot_id, str(p_id), tenant_id, namespace)
+                if p_path.exists():
+                    try:
+                        p_rec = self._read(p_path)
+                        p_comm_str = p_rec.get("committed_at")
+                        if p_comm_str:
+                            p_comm_dt = _parse_utc_iso(p_comm_str)
+                            if p_comm_dt > k_dt:
+                                logger.warning(
+                                    "Derived event %s references parent %s committed after cutoff (%s > %s)",
+                                    rec.get("event_id"), p_id, p_comm_str, k_dt.isoformat()
+                                )
+                                dependency_violation = True
+                                break
+                    except Exception as p_exc:
+                        if fail_on_corrupt:
+                            raise CorruptedWorldlineError(
+                                f"Failed to verify parent {p_id} for event {rec.get('event_id')}: {p_exc}"
+                            ) from p_exc
+                        dependency_violation = True
+                        break
+            if dependency_violation:
+                continue
+
+            seq = int(rec.get("sequence") or 0)
+            eligible.append((valid_dt, seq, committed_dt, rec))
+
+        # Deterministic sort: valid_time ASC, sequence ASC, committed_at ASC
+        eligible.sort(key=lambda item: (item[0], item[1], item[2]))
+        return [item[3] for item in eligible]
+
+    def latest_eligible_payload(
+        self,
+        plot_id: str,
+        event_type: str,
+        valid_time_T: Any,
+        knowledge_cutoff_K: Any,
+        tenant_id: str = "default_tenant",
+        namespace: str = "default",
+        fail_on_corrupt: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        """Select latest payload satisfying (T, K) without inspecting mutable head."""
+        events = self.select_eligible_events(
+            plot_id=plot_id,
+            event_type=event_type,
+            valid_time_T=valid_time_T,
+            knowledge_cutoff_K=knowledge_cutoff_K,
+            tenant_id=tenant_id,
+            namespace=namespace,
+            fail_on_corrupt=fail_on_corrupt,
+        )
+        if not events:
+            return None
+        latest_event = events[-1]
+        payload = dict(latest_event.get("payload") or {})
+        payload["_worldline_event_id"] = latest_event.get("event_id")
+        payload["_worldline_committed_at"] = latest_event.get("committed_at")
+        payload["_worldline_valid_time"] = (
+            latest_event.get("observation_or_valid_time")
+            or latest_event.get("effective_at")
+        )
+        payload["_worldline_sequence"] = latest_event.get("sequence")
+        payload["_worldline_payload_hash"] = latest_event.get("payload_hash")
+        return payload
 
     def validate_proposal(
         self, proposal: "WorldlineEventProposal", plot_id: str, tenant_id: str = "default_tenant", namespace: str = "default"
@@ -821,8 +993,122 @@ class CanonicalWorldlineService:
         self,
         plot_id: str,
         context: Dict[str, Any],
+        valid_time_T: Optional[Any] = None,
+        knowledge_cutoff_K: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        """Hydrate missing live inputs from one geometry-compatible worldline."""
+        """Hydrate missing live inputs or execute bitemporal historical hydration."""
+        geometry_hash = str(context.get("geometry_hash", "") or "")
+        tenant_id = str(context.get("tenant_id") or "default_tenant")
+        namespace = str(context.get("worldline_namespace") or "default")
+
+        t_param = valid_time_T or context.get("observation_valid_time") or context.get("as_of")
+        k_param = (
+            knowledge_cutoff_K
+            or context.get("knowledge_cutoff_time")
+            or context.get("knowledge_cutoff_K")
+            or context.get("knowledge_cutoff")
+        )
+
+        if t_param is not None and k_param is not None:
+            # Dual-clock bitemporal replay mode
+            t_dt = _parse_utc_iso(t_param)
+            k_dt = _parse_utc_iso(k_param)
+
+            selected_evidence_set: List[Dict[str, Any]] = []
+
+            archive_payload = self.latest_eligible_payload(
+                plot_id,
+                "ARCHIVE_POSTERIOR_VALIDATED",
+                t_dt,
+                k_dt,
+                tenant_id,
+                namespace,
+                fail_on_corrupt=True,
+            )
+            if archive_payload and not context.get("archive_posterior"):
+                archive = archive_payload.get("archive_posterior")
+                if isinstance(archive, dict) and archive.get("geometry_hash") == geometry_hash:
+                    context["archive_posterior"] = archive
+                    context["archive_metrics"] = archive_payload.get(
+                        "historical_metrics", {}
+                    )
+                    context["archive_baselines"] = archive_payload.get("baseline", {})
+                    context["archive_bma"] = archive_payload.get("archive_bma", {})
+                    context["retrovalidation_residuals"] = archive_payload.get(
+                        "retrovalidation", {}
+                    )
+                    context["archive_metrics_hash"] = (
+                        archive_payload.get("archive_metrics_hash")
+                        or _stable(archive_payload)
+                    )
+                    context["archive_metrics_status"] = "available"
+                    context["worldline_archive_event_id"] = archive_payload.get(
+                        "_worldline_event_id"
+                    )
+                    selected_evidence_set.append({
+                        "event_id": archive_payload.get("_worldline_event_id"),
+                        "event_type": "ARCHIVE_POSTERIOR_VALIDATED",
+                        "committed_at": archive_payload.get("_worldline_committed_at"),
+                        "observation_or_valid_time": archive_payload.get("_worldline_valid_time"),
+                        "payload_hash": archive_payload.get("_worldline_payload_hash") or _stable(archive_payload),
+                    })
+
+            crop_payload = self.latest_eligible_payload(
+                plot_id,
+                "CROP_POSTERIOR",
+                t_dt,
+                k_dt,
+                tenant_id,
+                namespace,
+                fail_on_corrupt=True,
+            )
+            if crop_payload and not context.get("crop_posterior"):
+                crop_posterior = crop_payload.get("crop_posterior", {})
+                context["crop_posterior"] = crop_posterior
+                context["crop_posterior_lineage"] = (
+                    crop_payload.get("content_hash")
+                    or crop_posterior.get("content_hash")
+                    or _stable(crop_payload)
+                )
+                context["crop_lineage_id"] = crop_posterior.get("lineage_id")
+                context["worldline_crop_event_id"] = crop_payload.get(
+                    "_worldline_event_id"
+                )
+                selected_evidence_set.append({
+                    "event_id": crop_payload.get("_worldline_event_id"),
+                    "event_type": "CROP_POSTERIOR",
+                    "committed_at": crop_payload.get("_worldline_committed_at"),
+                    "observation_or_valid_time": crop_payload.get("_worldline_valid_time"),
+                    "payload_hash": crop_payload.get("_worldline_payload_hash") or _stable(crop_payload),
+                })
+
+            selected_evidence_set.sort(
+                key=lambda item: (str(item.get("event_type")), str(item.get("event_id")))
+            )
+            evidence_digest = hashlib.sha256(
+                json.dumps(selected_evidence_set, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+
+            replay_receipt = {
+                "contract_version": "canonical_bitemporal_replay_receipt_v1",
+                "replay_mode": "bitemporal_deterministic_v1",
+                "tenant_id": tenant_id,
+                "plot_id": plot_id,
+                "geometry_hash": geometry_hash,
+                "query_parameters": {
+                    "observation_valid_time": t_dt.isoformat(),
+                    "knowledge_cutoff_time": k_dt.isoformat(),
+                },
+                "selected_evidence_set": selected_evidence_set,
+                "evidence_set_digest": f"sha256:{evidence_digest}",
+                "status": "replayed",
+            }
+            context["bitemporal_replay_receipt"] = replay_receipt
+            # Immutable historical replay never binds mutable live head
+            context["plot_worldline_head"] = None
+            return context
+
+        # Live forward assimilation mode
         geometry_hash = str(context.get("geometry_hash", "") or "")
         tenant_id = str(context.get("tenant_id") or "default_tenant")
         namespace = str(context.get("worldline_namespace") or "default")

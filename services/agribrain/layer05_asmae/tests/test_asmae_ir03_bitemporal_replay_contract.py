@@ -29,9 +29,11 @@ from services.agribrain.common.plot_namespace import PlotNamespace
 from services.agribrain.world_model.canonical_worldline import (
     CanonicalWorldlineService,
     WorldlineEventProposal,
+    CorruptedWorldlineError,
     WORLDLINE_IDENTITY_V2,
     WORLDLINE_CONTRACT_VERSION,
 )
+from services.agribrain.layer05_asmae.runner import ASMAERunner
 from services.agribrain.layer05_asmae import plot_snapshot_store
 from services.agribrain.layer05_asmae.plot_snapshot_store import (
     publish_canonical_plot_snapshot,
@@ -46,7 +48,7 @@ from services.agribrain.layer10_sire.surface_contract import (
 
 
 class BitemporalWorldlineHarness:
-    """Helper to query immutable worldline events under dual clocks (T, K)."""
+    """Helper delegating to production CanonicalWorldlineService dual-clock methods."""
 
     def __init__(self, worldline: CanonicalWorldlineService):
         self.worldline = worldline
@@ -60,42 +62,15 @@ class BitemporalWorldlineHarness:
         tenant_id: str = "default_tenant",
         namespace: str = "default",
     ) -> List[Dict[str, Any]]:
-        """Walk immutable event journal and select events strictly satisfying committed_at <= K and valid_time <= T."""
-        plot_dir = self.worldline._plot_dir(plot_id, tenant_id, namespace)
-        events_dir = plot_dir / "events"
-        if not events_dir.exists():
-            return []
-
-        eligible = []
-        for event_file in events_dir.glob("*.json"):
-            try:
-                rec = json.loads(event_file.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-
-            if rec.get("event_type") != event_type:
-                continue
-            if rec.get("plot_id") != plot_id or rec.get("tenant_id") != tenant_id:
-                continue
-
-            committed_str = rec.get("committed_at")
-            valid_str = rec.get("observation_or_valid_time") or rec.get("effective_at")
-            if not committed_str or not valid_str:
-                continue
-
-            try:
-                committed_dt = datetime.fromisoformat(committed_str.replace("Z", "+00:00"))
-                valid_dt = datetime.fromisoformat(valid_str.replace("Z", "+00:00"))
-            except Exception:
-                continue
-
-            # Dual-clock filter: committed_at <= K and valid_time <= T
-            if committed_dt <= knowledge_cutoff_K and valid_dt <= valid_time_T:
-                eligible.append((valid_dt, int(rec.get("sequence", 0) or 0), rec))
-
-        # Deterministic sort: valid_time ASC, sequence ASC
-        eligible.sort(key=lambda item: (item[0], item[1]))
-        return [item[2] for item in eligible]
+        return self.worldline.select_eligible_events(
+            plot_id=plot_id,
+            event_type=event_type,
+            valid_time_T=valid_time_T,
+            knowledge_cutoff_K=knowledge_cutoff_K,
+            tenant_id=tenant_id,
+            namespace=namespace,
+            fail_on_corrupt=True,
+        )
 
     def latest_eligible_payload(
         self,
@@ -106,23 +81,15 @@ class BitemporalWorldlineHarness:
         tenant_id: str = "default_tenant",
         namespace: str = "default",
     ) -> Optional[Dict[str, Any]]:
-        """Select latest payload satisfying (T, K) without inspecting mutable head."""
-        events = self.query_eligible_events(
+        return self.worldline.latest_eligible_payload(
             plot_id=plot_id,
             event_type=event_type,
             valid_time_T=valid_time_T,
             knowledge_cutoff_K=knowledge_cutoff_K,
             tenant_id=tenant_id,
             namespace=namespace,
+            fail_on_corrupt=True,
         )
-        if not events:
-            return None
-        latest_event = events[-1]
-        payload = dict(latest_event.get("payload") or {})
-        payload["_worldline_event_id"] = latest_event.get("event_id")
-        payload["_worldline_committed_at"] = latest_event.get("committed_at")
-        payload["_worldline_valid_time"] = latest_event.get("observation_or_valid_time")
-        return payload
 
     def hydrate_bitemporal_context(
         self,
@@ -133,51 +100,22 @@ class BitemporalWorldlineHarness:
         tenant_id: str = "default_tenant",
         namespace: str = "default",
     ) -> Dict[str, Any]:
-        """Hydrate assimilation context strictly from eligible pre-K and pre-T events."""
-        archive_payload = self.latest_eligible_payload(
-            plot_id=plot_id,
-            event_type="ARCHIVE_POSTERIOR_VALIDATED",
-            valid_time_T=valid_time_T,
-            knowledge_cutoff_K=knowledge_cutoff_K,
-            tenant_id=tenant_id,
-            namespace=namespace,
-        )
-        crop_payload = self.latest_eligible_payload(
-            plot_id=plot_id,
-            event_type="CROP_POSTERIOR",
-            valid_time_T=valid_time_T,
-            knowledge_cutoff_K=knowledge_cutoff_K,
-            tenant_id=tenant_id,
-            namespace=namespace,
-        )
-
         context: Dict[str, Any] = {
             "plot_id": plot_id,
             "tenant_id": tenant_id,
             "geometry_hash": geometry_hash,
-            "observation_valid_time": valid_time_T.isoformat(),
-            "knowledge_cutoff_time": knowledge_cutoff_K.isoformat(),
+            "worldline_namespace": namespace,
         }
-
-        selected_event_ids = []
-        if archive_payload:
-            archive = archive_payload.get("archive_posterior") or {}
-            if archive.get("geometry_hash") == geometry_hash:
-                context["archive_posterior"] = archive
-                context["archive_metrics"] = archive_payload.get("historical_metrics", {})
-                context["worldline_archive_event_id"] = archive_payload.get("_worldline_event_id")
-                selected_event_ids.append(archive_payload.get("_worldline_event_id"))
-        if crop_payload:
-            context["crop_posterior"] = crop_payload.get("crop_posterior", {})
-            context["crop_posterior_lineage"] = crop_payload.get("content_hash") or "crop-lineage-id"
-            context["worldline_crop_event_id"] = crop_payload.get("_worldline_event_id")
-            selected_event_ids.append(crop_payload.get("_worldline_event_id"))
-
-        context["selected_event_ids"] = selected_event_ids
-        context["evidence_set_digest"] = hashlib.sha256(
-            json.dumps(sorted(selected_event_ids)).encode("utf-8")
-        ).hexdigest()
-        return context
+        res = self.worldline.hydrate_context(
+            plot_id=plot_id,
+            context=context,
+            valid_time_T=valid_time_T,
+            knowledge_cutoff_K=knowledge_cutoff_K,
+        )
+        receipt = res.get("bitemporal_replay_receipt") or {}
+        res["selected_event_ids"] = [e["event_id"] for e in receipt.get("selected_evidence_set", [])]
+        res["evidence_set_digest"] = receipt.get("evidence_set_digest")
+        return res
 
 
 class ASMAEIR03BitemporalReplayContractTests(unittest.TestCase):
@@ -503,6 +441,191 @@ class ASMAEIR03BitemporalReplayContractTests(unittest.TestCase):
         # Subsequent query with key (T=5, K=5) MUST STILL return val=10, not 20
         res2 = self.harness.latest_eligible_payload(self.plot_id, "ARCHIVE_POSTERIOR_VALIDATED", t5, k5, self.tenant_id)
         self.assertEqual(res2["archive_posterior"]["val"], 10, "Cache key (T, K) must not leak newer event")
+
+    # =========================================================================
+    # IR03-T09: Corrupt Worldline Journal & Sequence Gaps Fail Closed (IR03-R02)
+    # =========================================================================
+    def test_ir03_t09_corrupt_worldline_and_sequence_gaps_fail_closed(self):
+        """Unreadable event journal files or sequence gaps fail closed under fail_on_corrupt=True."""
+        # Commit event 1 (sequence 1)
+        ev1 = self._commit_worldline_event(
+            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            valid_day=1,
+            commit_day=1,
+            payload_data={"step": 1},
+        )
+        # Commit event 2 (sequence 2)
+        ev2 = self._commit_worldline_event(
+            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            valid_day=2,
+            commit_day=2,
+            payload_data={"step": 2},
+        )
+
+        t = self.base_time + timedelta(days=5)
+        k = self.base_time + timedelta(days=5)
+
+        # Baseline: normal query succeeds
+        events = self.worldline.select_eligible_events(
+            self.plot_id, "ARCHIVE_POSTERIOR_VALIDATED", t, k, self.tenant_id, fail_on_corrupt=True
+        )
+        self.assertEqual(len(events), 2)
+
+        # 1. Simulate sequence gap: delete event 1 from disk (only seq 2 remains)
+        p1 = self.worldline._event_path(self.plot_id, ev1["event_id"], self.tenant_id, "default")
+        backup_bytes = p1.read_bytes()
+        p1.unlink()
+
+        with self.assertRaises(CorruptedWorldlineError) as cm_gap:
+            self.worldline.load_all_events(self.plot_id, self.tenant_id, fail_on_corrupt=True)
+        self.assertIn("sequence gap detected", str(cm_gap.exception).lower())
+
+        with self.assertRaises(CorruptedWorldlineError):
+            self.worldline.select_eligible_events(
+                self.plot_id, "ARCHIVE_POSTERIOR_VALIDATED", t, k, self.tenant_id, fail_on_corrupt=True
+            )
+
+        # 2. Restore event 1 and corrupt event 2 with invalid JSON
+        p1.write_bytes(backup_bytes)
+        p2 = self.worldline._event_path(self.plot_id, ev2["event_id"], self.tenant_id, "default")
+        p2.write_text("{ malformed json corrupted bytes", encoding="utf-8")
+
+        with self.assertRaises(CorruptedWorldlineError) as cm_corrupt:
+            self.worldline.load_all_events(self.plot_id, self.tenant_id, fail_on_corrupt=True)
+        self.assertIn("corruption", str(cm_corrupt.exception).lower())
+
+        # Hydrate context in bitemporal mode must fail closed on corruption
+        with self.assertRaises(CorruptedWorldlineError):
+            self.worldline.hydrate_context(
+                plot_id=self.plot_id,
+                context={
+                    "plot_id": self.plot_id,
+                    "tenant_id": self.tenant_id,
+                    "geometry_hash": self.geometry_hash,
+                },
+                valid_time_T=t,
+                knowledge_cutoff_K=k,
+            )
+
+    # =========================================================================
+    # IR03-T10: Derived Posterior Post-K Parent Dependency Rejected (IR03-R03/R05)
+    # =========================================================================
+    def test_ir03_t10_derived_posterior_post_k_parent_dependency_rejected(self):
+        """Derived posterior whose parent dependencies post-date knowledge cutoff K is rejected."""
+        # 1. Create parent archive event valid on Day 2, but committed late on Day 25
+        parent_ev = self._commit_worldline_event(
+            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            valid_day=2,
+            commit_day=25,
+            payload_data={"archive_posterior": {"geometry_hash": self.geometry_hash, "val": "parent_archive"}},
+        )
+        parent_id = parent_ev["event_id"]
+
+        # 2. Create child crop posterior valid on Day 5, committed on Day 20, referencing parent_id
+        prop = WorldlineEventProposal(
+            event_type="CROP_POSTERIOR",
+            geometry_version=self.geometry_hash,
+            observation_or_valid_time=(self.base_time + timedelta(days=5)).isoformat(),
+            model_version="asmae_v83_test",
+            evidence_set_hash="hash-evidence-child",
+            authority_contract_version="canonical_test_v1",
+            authority_ref="test_authority",
+            parent_event_ids=(parent_id,),
+            payload={"crop_posterior": {"stage": "derived_stage"}, "content_hash": "child-crop-hash"},
+        )
+        child_rec = self.worldline.commit_proposal(
+            plot_id=self.plot_id,
+            proposal=prop,
+            tenant_id=self.tenant_id,
+            namespace="default",
+            effective_at=(self.base_time + timedelta(days=5)).isoformat(),
+        )
+        child_path = self.worldline._event_path(self.plot_id, child_rec["event_id"], self.tenant_id, "default")
+        child_data = json.loads(child_path.read_text(encoding="utf-8"))
+        child_data["committed_at"] = (self.base_time + timedelta(days=20)).isoformat()
+        child_path.write_text(json.dumps(child_data), encoding="utf-8")
+
+        t_day10 = self.base_time + timedelta(days=10)
+
+        # Query at K=Day 22:
+        # Child was committed on Day 20 <= Day 22.
+        # BUT parent was committed on Day 25 > Day 22!
+        # Provenance enforcement MUST reject child as look-ahead contaminated.
+        k_day22 = self.base_time + timedelta(days=22)
+        res_k22 = self.worldline.latest_eligible_payload(
+            plot_id=self.plot_id,
+            event_type="CROP_POSTERIOR",
+            valid_time_T=t_day10,
+            knowledge_cutoff_K=k_day22,
+            tenant_id=self.tenant_id,
+            fail_on_corrupt=True,
+        )
+        self.assertIsNone(res_k22, "Child posterior with post-K parent dependency must be rejected")
+
+        # Query at K=Day 26:
+        # Both child (Day 20) and parent (Day 25) are <= Day 26.
+        # Provenance check passes!
+        k_day26 = self.base_time + timedelta(days=26)
+        res_k26 = self.worldline.latest_eligible_payload(
+            plot_id=self.plot_id,
+            event_type="CROP_POSTERIOR",
+            valid_time_T=t_day10,
+            knowledge_cutoff_K=k_day26,
+            tenant_id=self.tenant_id,
+            fail_on_corrupt=True,
+        )
+        self.assertIsNotNone(res_k26)
+        self.assertEqual(res_k26["crop_posterior"]["stage"], "derived_stage")
+
+    # =========================================================================
+    # IR03-T11: ASMAERunner Execution Binds Bitemporal Replay Receipt
+    # =========================================================================
+    def test_ir03_t11_runner_execute_binds_bitemporal_replay_receipt(self):
+        """ASMAERunner.execute() transparently binds bitemporal_replay_receipt on dual-clock queries."""
+        # Commit archive event valid on Day 3, committed on Day 4
+        self._commit_worldline_event(
+            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            valid_day=3,
+            commit_day=4,
+            payload_data={"archive_posterior": {"geometry_hash": self.geometry_hash, "version": "r_arch_v1"}},
+        )
+
+        runner = ASMAERunner()
+        t_req = self.base_time + timedelta(days=7)
+        k_req = self.base_time + timedelta(days=7)
+
+        context: Dict[str, Any] = {
+            "plot_id": self.plot_id,
+            "tenant_id": self.tenant_id,
+            "farm_id": self.farm_id,
+            "geometry_hash": self.geometry_hash,
+            "worldline_root": self.worldline_root,
+            "observation_valid_time": t_req.isoformat(),
+            "knowledge_cutoff_time": k_req.isoformat(),
+            "mode": "quick_visual",
+            "execution_permissions": {
+                "compute_allowed": True,
+                "visual_authority_allowed": True,
+                "diagnostic_allowed": True,
+            },
+        }
+
+        result = runner.execute(
+            self.plot_id,
+            "run-test-ir03-11",
+            context,
+            mode="quick_visual",
+        )
+        self.assertIsNotNone(result)
+        receipt = result.get("bitemporal_replay_receipt")
+        self.assertIsNotNone(receipt, "Result must contain bitemporal_replay_receipt")
+        self.assertEqual(receipt.get("replay_mode"), "bitemporal_deterministic_v1")
+        self.assertEqual(receipt.get("contract_version"), "canonical_bitemporal_replay_receipt_v1")
+        self.assertEqual(receipt.get("query_parameters", {}).get("observation_valid_time"), t_req.isoformat())
+        self.assertEqual(receipt.get("query_parameters", {}).get("knowledge_cutoff_time"), k_req.isoformat())
+        self.assertTrue(receipt.get("evidence_set_digest", "").startswith("sha256:"))
+        self.assertEqual(len(receipt.get("selected_evidence_set", [])), 1)
+        self.assertEqual(receipt["selected_evidence_set"][0]["event_type"], "ARCHIVE_POSTERIOR_VALIDATED")
 
 
 if __name__ == "__main__":

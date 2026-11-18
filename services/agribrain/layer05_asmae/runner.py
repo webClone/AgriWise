@@ -172,9 +172,18 @@ class ASMAERunner:
             return self._disabled_response(plot_id, run_id)
 
         try:
-            from services.agribrain.world_model.canonical_worldline import CanonicalWorldlineService
+            from services.agribrain.world_model.canonical_worldline import (
+                CanonicalWorldlineService,
+                CorruptedWorldlineError,
+            )
 
-            CanonicalWorldlineService().hydrate_context(plot_id, context)
+            root_dir = context.get("worldline_root")
+            CanonicalWorldlineService(root=root_dir).hydrate_context(plot_id, context)
+        except CorruptedWorldlineError as exc:
+            logger.exception("ASMAE worldline journal corrupted or sequence gap detected: %s", exc)
+            context["worldline_hydration_error"] = str(exc)
+            if context.get("knowledge_cutoff_time") or context.get("knowledge_cutoff_K") or permissions.get("production_authority_allowed"):
+                raise
         except Exception as exc:
             # Worldline read failure cannot erase current evidence, but is
             # retained as an explicit diagnostic.
@@ -228,6 +237,8 @@ class ASMAERunner:
                 result["orchestrator_parent_run_id"] = context.get(
                     "orchestrator_parent_run_id"
                 )
+                if "bitemporal_replay_receipt" in context:
+                    result["bitemporal_replay_receipt"] = context["bitemporal_replay_receipt"]
                 return result
             except Exception as exc:
                 logger.exception("ASMAE quick visual state hydration failed")
@@ -495,6 +506,8 @@ class ASMAERunner:
                     record_asmae_run(ledger_rec)
                 except Exception as ex:
                     logger.error("Failed to write to validation ledger on cache hit: %s", ex)
+                if "bitemporal_replay_receipt" in context:
+                    cached_result["bitemporal_replay_receipt"] = context["bitemporal_replay_receipt"]
                 return cached_result
 
         # ── Contract validation ──────────────────────────────────────────────
@@ -589,6 +602,8 @@ class ASMAERunner:
             serialized["orchestrator_parent_run_id"] = context.get(
                 "orchestrator_parent_run_id"
             )
+            if "bitemporal_replay_receipt" in context:
+                serialized["bitemporal_replay_receipt"] = context["bitemporal_replay_receipt"]
             
             # Identity tracking on cache miss / bypass
             serialized["cache_status"] = cache_status
@@ -1761,6 +1776,8 @@ class ASMAERunner:
                     snapshot_stale=stale,
                 ),
             )
+            if "bitemporal_replay_receipt" in context:
+                result["bitemporal_replay_receipt"] = context["bitemporal_replay_receipt"]
             return self._apply_execution_authority(result, permissions)
 
         # No completed snapshot exists. Compute only the inexpensive resilient
@@ -1810,6 +1827,8 @@ class ASMAERunner:
                 snapshot_accepted=False,
             ),
         )
+        if "bitemporal_replay_receipt" in context:
+            result["bitemporal_replay_receipt"] = context["bitemporal_replay_receipt"]
         return self._apply_execution_authority(result, permissions)
 
 

@@ -461,11 +461,52 @@ def publish_canonical_plot_snapshot(
                 handle.flush()
                 os.fsync(handle.fileno())
         except FileExistsError:
-            existing = _read(node_path)
+            # Wait for winning publisher to finish flushing node file
+            existing = {}
+            for _ in range(200):
+                existing = _read(node_path)
+                if existing and existing.get("node_hash"):
+                    break
+                time.sleep(0.002)
+
+            existing_num_hash = (
+                (existing.get("scientific_result") or {}).get("asmae_numerical_digest")
+                or ((existing.get("frontend_payload") or {}).get("asmae_posterior_numerical_record") or {}).get("numerical_vector_hash")
+                or (existing.get("asmae") or {}).get("asmae_numerical_digest")
+            )
+            incoming_num_hash = (
+                (envelope.get("scientific_result") or {}).get("asmae_numerical_digest")
+                or ((envelope.get("frontend_payload") or {}).get("asmae_posterior_numerical_record") or {}).get("numerical_vector_hash")
+                or (envelope.get("asmae") or {}).get("asmae_numerical_digest")
+                or ((immutable_frontend_payload.get("asmae_posterior_numerical_record") or {})).get("numerical_vector_hash")
+            )
+            if existing_num_hash and incoming_num_hash and existing_num_hash != incoming_num_hash:
+                raise ValueError(
+                    f"immutable plot snapshot collision: numerical record mismatch (existing={existing_num_hash}, incoming={incoming_num_hash})"
+                )
+            if existing_num_hash and not incoming_num_hash:
+                raise ValueError("immutable plot snapshot collision: numerical record presence mismatch")
+            if not existing_num_hash and incoming_num_hash:
+                raise ValueError("immutable plot snapshot collision: numerical record presence mismatch")
+
+            if any(
+                (
+                    (existing.get(key) or "asmae") != envelope.get(key)
+                    if key == "snapshot_kind" and normalized_kind == "asmae"
+                    else existing.get(key) != envelope.get(key)
+                )
+                for key in comparable_keys
+            ):
+                raise ValueError("immutable plot snapshot collision")
+
             existing_sci = existing.get("asmae") or existing.get("scientific_result")
             incoming_sci = envelope.get("asmae") or envelope.get("scientific_result")
             if existing_sci and incoming_sci and existing_sci != incoming_sci:
                 raise ValueError("immutable plot snapshot collision: scientific result mismatch")
+
+            if existing.get("node_hash") != envelope.get("node_hash"):
+                raise ValueError("immutable plot snapshot collision: node content hash mismatch")
+
             envelope = existing
 
     publication_dir = directory / "publications"
