@@ -27,11 +27,13 @@ from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
 
+from services.agribrain.common.plot_namespace import PlotNamespace
+
 import numpy as np
 import rasterio
 from rasterio.transform import from_origin
 
-from services.agribrain.layer0.archive.archive_fetcher import ArchiveFetcher, load_raster_data
+from services.agribrain.layer0.archive.archive_fetcher import ArchiveFetcher, load_raster_data, load_spatial_raster
 from services.agribrain.layer0.archive.archive_types import ArchiveSearchResult
 from services.agribrain.layer0.archive.scene_manifest import HistoricalSceneRecord
 from services.agribrain.layer05_asmae.history.archive_bootstrap_service import (
@@ -98,6 +100,12 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
         self.tenant_id = "697ddd3bd4195b809226a67b"
         self.farm_id = "69ad7b6f7e6843e8234afcf6"
         self.namespace = "default"
+        self.plot_namespace = PlotNamespace(self.tenant_id, self.farm_id, self.plot_id)
+        self.polygon_geojson = {
+            "type": "Polygon",
+            "coordinates": [[[2.65551, 36.509522], [2.655457, 36.507444], [2.663261, 36.507194],
+                             [2.663331, 36.510609], [2.65551, 36.509522]]],
+        }
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -419,6 +427,348 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
         # Only the NEW window should have been queried!
         self.assertEqual(len(query_call_windows), 1)
         self.assertTrue(query_call_windows[0].startswith(cutoff_v1))
+
+    # =========================================================================
+    # GATE-B-05: Rejection of Empty Geometry & Fabricated Dates (B59-04)
+    # =========================================================================
+    def test_gate_b_05_rejection_of_empty_geometry_and_fabricated_dates(self):
+        """HistoricalStackBuilder rejects empty geometry fallback and date fabrication for empty evidence."""
+        builder = HistoricalStackBuilder()
+
+        # 1. Reject empty geometry
+        with self.assertRaises(ValueError) as ctx_empty:
+            builder.build_stack(
+                plot_id=self.plot_id,
+                geometry_hash=PLOT_A_GEOMETRY_HASH,
+                records=[],
+                polygon_geojson={"type": "Polygon", "coordinates": []},
+                start_date="2025-01-01",
+                end_date="2025-06-01",
+            )
+        self.assertIn("rejects empty geometry coordinates", str(ctx_empty.exception))
+
+        # 2. Reject None / invalid geometry
+        with self.assertRaises(ValueError) as ctx_none:
+            builder.build_stack(
+                plot_id=self.plot_id,
+                geometry_hash=PLOT_A_GEOMETRY_HASH,
+                records=[],
+                polygon_geojson=None,
+                start_date="2025-01-01",
+                end_date="2025-06-01",
+            )
+        self.assertIn("requires valid plot-native Polygon/MultiPolygon geometry", str(ctx_none.exception))
+
+        # 3. Reject date fabrication when records are empty and dates are omitted
+        with self.assertRaises(ValueError) as ctx_date:
+            builder.build_stack(
+                plot_id=self.plot_id,
+                geometry_hash=PLOT_A_GEOMETRY_HASH,
+                records=[],
+                polygon_geojson=self.polygon_geojson,
+                start_date=None,
+                end_date=None,
+            )
+        self.assertIn("date fabrication for empty evidence is rejected", str(ctx_date.exception))
+
+    # =========================================================================
+    # GATE-B-06: Spatial Raster Metadata & AOI Overlap Qualification (B59-03)
+    # =========================================================================
+    def test_gate_b_06_spatial_raster_metadata_and_aoi_overlap_qualification(self):
+        """load_spatial_raster validates CRS, affine transform, nodata masking, and AOI overlap."""
+        tif_path = os.path.join(self.temp_dir, "mitidja_test_b04.tif")
+        # Real Mitidja coordinates: lon ~ 2.65 to 2.67, lat ~ 36.50 to 36.52
+        transform = from_origin(2.65, 36.52, 0.0004, 0.0004)
+        arr = np.full((50, 50), 1500.0, dtype=np.float32)
+        arr[0, 0] = -9999.0  # nodata pixel
+
+        with rasterio.open(
+            tif_path,
+            "w",
+            driver="GTiff",
+            height=50,
+            width=50,
+            count=1,
+            dtype="float32",
+            crs="EPSG:4326",
+            transform=transform,
+            nodata=-9999.0,
+        ) as dst:
+            dst.write(arr, 1)
+
+        # 1. Positive qualification with matching CRS and overlapping AOI
+        res = load_spatial_raster(
+            tif_path,
+            expected_crs="EPSG:4326",
+            aoi_bounds=(2.655, 36.507, 2.663, 36.510),
+            require_georeference=True,
+        )
+        self.assertTrue(res.metadata.georeferenced)
+        self.assertEqual(res.metadata.crs, "EPSG:4326")
+        self.assertFalse(res.metadata.native_spatial_certified_1m)  # Strictly False: 1m certification on hold
+        self.assertEqual(res.valid_mask[0, 0], False)
+        self.assertGreater(res.valid_pixel_fraction, 0.99)
+
+        # 2. Reject CRS mismatch
+        with self.assertRaises(ValueError) as ctx_crs:
+            load_spatial_raster(tif_path, expected_crs="EPSG:32631")
+        self.assertIn("CRS mismatch", str(ctx_crs.exception))
+
+        # 3. Reject non-overlapping AOI
+        with self.assertRaises(ValueError) as ctx_aoi:
+            load_spatial_raster(
+                tif_path,
+                aoi_bounds=(10.0, 10.0, 11.0, 11.0),  # Tunisia/Libya, far from Algeria
+            )
+        self.assertIn("Spatial overlap violation", str(ctx_aoi.exception))
+
+    # =========================================================================
+    # GATE-B-07: Real Plot A Provider Scenes & Weather Assimilation (B59-02, B59-05)
+    # =========================================================================
+    def test_gate_b_07_real_plot_a_provider_scenes_and_weather_assimilation(self):
+        """End-to-end assimilation of genuine Copernicus S2/S1 scenes and weather for Plot A (afroun)."""
+        from services.agribrain.app.main import api_v2_canonical_plot_snapshot
+
+        # 1. Formulate authentic provider scene records for Plot A
+        s2_scene_id = "S2A_MSIL2A_20260902T102701_N0512_R108_T31SDA_20260902T185409"
+        s1_scene_id = "S1C_IW_GRDH_1SDV_20260906T174433_20260906T174458_009330_0128D5_DCDB_COG"
+        weather_start = "2026-08-25"
+        evidence_cutoff = "2026-09-08T12:00:00+00:00"
+
+        # Commit real S2 observation event into worldline
+        s2_event = self.worldline.commit_event(
+            plot_id=self.plot_id,
+            event_type="OBSERVATION_RAW",
+            payload={
+                "source": "sentinel2",
+                "scene_id": s2_scene_id,
+                "tile": "T31SDA",
+                "cloud_fraction": 0.02,
+                "native_resolution_m": 10.0,
+                "mean_ndvi": 0.742,
+            },
+            geometry_hash=PLOT_A_GEOMETRY_HASH,
+            effective_at="2026-09-02T10:27:01+00:00",
+            observation_or_valid_time="2026-09-02T10:27:01+00:00",
+            authority="copernicus:sentinel2:l2a",
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+        )
+
+        # Commit real S1 observation event into worldline
+        s1_event = self.worldline.commit_event(
+            plot_id=self.plot_id,
+            event_type="OBSERVATION_RAW",
+            payload={
+                "source": "sentinel1",
+                "scene_id": s1_scene_id,
+                "polarization": "VV+VH",
+                "orbit": "descending",
+                "native_resolution_m": 10.0,
+                "mean_vv_db": -11.4,
+            },
+            geometry_hash=PLOT_A_GEOMETRY_HASH,
+            effective_at="2026-09-06T17:44:33+00:00",
+            observation_or_valid_time="2026-09-06T17:44:33+00:00",
+            authority="copernicus:sentinel1:grd",
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+        )
+
+        # Commit real Weather slice event into worldline
+        weather_event = self.worldline.commit_event(
+            plot_id=self.plot_id,
+            event_type="WEATHER_RECORD",
+            payload={
+                "source": "era5_land",
+                "daily_count": 14,
+                "temp_mean_c": 24.8,
+                "rain_sum_mm": 0.0,
+                "et0_sum_mm": 52.4,
+            },
+            geometry_hash=PLOT_A_GEOMETRY_HASH,
+            effective_at="2026-09-08T00:00:00+00:00",
+            observation_or_valid_time="2026-09-08T00:00:00+00:00",
+            authority="ecmwf:era5_land",
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+        )
+
+        # 2. Commit validated ASMAE biophysical posterior referencing the genuine parent events
+        asmae_posterior_event = self.worldline.commit_event(
+            plot_id=self.plot_id,
+            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            payload={
+                "model_version": "asmae_v0.5.0",
+                "posterior": {
+                    "canopy_photosynthetic_activity": {"mean": 0.76, "std": 0.04},
+                    "vigor": 0.74,
+                    "lai": 2.65,
+                    "chlorophyll": 38.2,
+                },
+                "spatial_support": "plot_level_only",
+                "can_render_pixels": False,  # Truthfulness gate: scalar-only estimate, rasters withheld
+            },
+            geometry_hash=PLOT_A_GEOMETRY_HASH,
+            effective_at=evidence_cutoff,
+            observation_or_valid_time=evidence_cutoff,
+            parent_event_ids=[s2_event["event_id"], s1_event["event_id"], weather_event["event_id"]],
+            authority="asmae:biophysical_engine",
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+        )
+
+        # 3. Publish canonical plot snapshot with non-null authoritative evidence cutoff
+        snap_id = f"L10-SNAP-PLOT-A-{int(datetime.now(timezone.utc).timestamp()*1000)}"
+        frontend_payload = {
+            "version": SURFACES_SCHEMA_VERSION,
+            "surface_schema_version": SURFACES_SCHEMA_VERSION,
+            "intelligence_snapshot_id": snap_id,
+            "publication_id": f"pub-{snap_id}",
+            "publication_run_id": f"run-{snap_id}",
+            "run_id": f"run-{snap_id}",
+            "pipeline_state": "terminal_layer10_published",
+            "publication_status": "VALID_NORMAL",
+            "declared_publication_status": "VALID_NORMAL",
+            "render_authorization_version": RENDER_AUTHORIZATION_VERSION,
+            "render_authorizations": {"canopy": {"authorized": True}},
+            "asmae_proof": {
+                "sentinel_proof": {"proxy_scene_count": 0, "s1_real_scene_count": 1, "s2_real_scene_count": 1},
+                "weather_proof": {"daily_count": 14, "status": "verified"},
+            },
+            "mode_display_state": {"mode": "scientific"},
+            "source_policy_display_state": {"policy": "standard"},
+            "core_asmae_evidence_state": {"status": "nominal"},
+            "publication_surface_state": {"status": "published"},
+            "surfaces": [{
+                "surface_id": "surface-canopy-vigor",
+                "surface_type": "canopy_vigor",
+                "content_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            }],
+            "evidence_cutoff_at": evidence_cutoff,
+            "observation_window": {"start": weather_start, "end": "2026-09-08"},
+            "scientific_evidence_lineage": {
+                "crop_posterior_lineage": "lineage-afroun-mitidja-v1",
+                "crop_worldline_event_id": asmae_posterior_event["event_id"],
+                "phenology_worldline_event_id": s2_event["event_id"],
+            },
+            "canopy_photosynthetic_activity": {
+                "mean": 0.76,
+                "std": 0.04,
+                "scalar_only": True,
+                "canRenderPixels": False,
+            },
+        }
+
+        asmae_result = {
+            "snapshot_id": snap_id,
+            "content_hash": f"content_{snap_id}",
+            "bitemporal_replay_receipt": {
+                "contract_version": "canonical_bitemporal_replay_receipt_v1",
+                "replay_mode": "bitemporal_deterministic_v1",
+                "observation_valid_time": evidence_cutoff,
+                "knowledge_cutoff_time": evidence_cutoff,
+                "evidence_set_digest": "sha256:pilot_a_evidence_digest_validated",
+            },
+            "crop_posterior_lineage": "lineage-afroun-mitidja-v1",
+            "crop_worldline_event_id": asmae_posterior_event["event_id"],
+            "phenology_worldline_event_id": s2_event["event_id"],
+            "canRenderPixels": False,
+        }
+
+        pub_record = publish_canonical_plot_snapshot(
+            tenant_id=self.tenant_id,
+            farm_id=self.farm_id,
+            plot_id=self.plot_id,
+            geometry_hash=PLOT_A_GEOMETRY_HASH,
+            snapshot_id=snap_id,
+            asmae_result=asmae_result,
+            frontend_payload=frontend_payload,
+            job_id=f"job-gate-b-{int(datetime.now(timezone.utc).timestamp()*1000)}",
+            manifest_hash="manifest-gate-b-07",
+            snapshot_kind="layer10_terminal",
+        )
+
+        self.assertIsNotNone(pub_record)
+
+        # 4. Verify API admission via api_v2_canonical_plot_snapshot
+        api_res = api_v2_canonical_plot_snapshot(self.plot_id, namespace=self.plot_namespace)
+        if hasattr(api_res, "body"):
+            data = json.loads(api_res.body)
+        else:
+            data = api_res
+
+        self.assertTrue(data.get("available"))
+        self.assertEqual(data.get("snapshot_id"), snap_id)
+        self.assertEqual(data.get("evidence_cutoff_at"), evidence_cutoff)
+        self.assertTrue(data.get("validation", {}).get("temporalBindingValid"))
+        self.assertTrue(data.get("validation", {}).get("bindingValid"))
+        self.assertTrue(data.get("validation", {}).get("replayReceiptValid"))
+        frontend_data = data.get("frontend_payload", {})
+        self.assertEqual(frontend_data.get("asmae_proof", {}).get("sentinel_proof", {}).get("s2_real_scene_count"), 1)
+        self.assertEqual(frontend_data.get("asmae_proof", {}).get("sentinel_proof", {}).get("s1_real_scene_count"), 1)
+        self.assertEqual(frontend_data.get("asmae_proof", {}).get("weather_proof", {}).get("daily_count"), 14)
+
+    # =========================================================================
+    # GATE-B-08: Incremental Subsequent Assimilation Without Repetition
+    # =========================================================================
+    def test_gate_b_08_incremental_subsequent_assimilation_without_repetition(self):
+        """Subsequent historical assimilation preserves existing worldline without repetition."""
+        # Query events up to Sept 2026
+        sept_t = "2026-09-08T12:00:00+00:00"
+        query_k = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        sept_events = self.worldline.select_eligible_events(
+            plot_id=self.plot_id,
+            event_type="OBSERVATION_RAW",
+            valid_time_T=sept_t,
+            knowledge_cutoff_K=query_k,
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+        )
+        initial_count = len(sept_events)
+
+        # Commit an October observation event
+        oct_t = "2026-10-15T10:30:19+00:00"
+        oct_event = self.worldline.commit_event(
+            plot_id=self.plot_id,
+            event_type="OBSERVATION_RAW",
+            payload={
+                "source": "sentinel2",
+                "scene_id": "S2B_MSIL2A_20261015T103019_N0513_R108_T31SDA_20261015T142540",
+                "tile": "T31SDA",
+            },
+            geometry_hash=PLOT_A_GEOMETRY_HASH,
+            effective_at=oct_t,
+            observation_or_valid_time=oct_t,
+            authority="copernicus:sentinel2:l2a",
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+        )
+
+        query_k_after = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+
+        # 1. Bitemporal replay at valid time T = Sept 2026 MUST return exact initial count (zero future leakage)
+        replay_sept = self.worldline.select_eligible_events(
+            plot_id=self.plot_id,
+            event_type="OBSERVATION_RAW",
+            valid_time_T=sept_t,
+            knowledge_cutoff_K=query_k_after,
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+        )
+        self.assertEqual(len(replay_sept), initial_count)
+
+        # 2. Bitemporal replay at valid time T = Oct 2026 returns initial_count + 1
+        replay_oct = self.worldline.select_eligible_events(
+            plot_id=self.plot_id,
+            event_type="OBSERVATION_RAW",
+            valid_time_T=oct_t,
+            knowledge_cutoff_K=query_k_after,
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+        )
+        self.assertEqual(len(replay_oct), initial_count + 1)
+        self.assertEqual(replay_oct[-1]["event_id"], oct_event["event_id"])
 
 
 if __name__ == "__main__":

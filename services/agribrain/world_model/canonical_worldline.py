@@ -150,6 +150,7 @@ class CanonicalWorldlineService:
         self,
         root: Optional[Union[Path, str]] = None,
         durable_anchor_root: Optional[Union[Path, str]] = None,
+        require_durable_anchor: Optional[bool] = None,
     ) -> None:
         if root is not None:
             clean_str = str(root).strip()
@@ -169,6 +170,21 @@ class CanonicalWorldlineService:
             self.durable_anchor_root: Optional[Path] = Path(clean_anchor).resolve()
         else:
             self.durable_anchor_root = None
+
+        if require_durable_anchor is None:
+            self.require_durable_anchor = os.environ.get(
+                "CANONICAL_REQUIRE_DURABLE_ANCHOR", ""
+            ).lower() in ("true", "1", "yes")
+        else:
+            self.require_durable_anchor = bool(require_durable_anchor)
+
+        if self.require_durable_anchor:
+            if not self.durable_anchor_root:
+                raise CorruptedWorldlineError("Authoritative historical replay requires configured durable_anchor_root")
+            if not self.durable_anchor_root.exists() or not self.durable_anchor_root.is_dir():
+                raise CorruptedWorldlineError(
+                    f"Authoritative historical replay requires accessible and mounted durable anchor root: {self.durable_anchor_root}"
+                )
 
     @staticmethod
     def _plot_key(plot_id: str) -> str:
@@ -578,14 +594,81 @@ class CanonicalWorldlineService:
         """Load specific event by ID for a tenant plot."""
         return self._read(self._event_path(plot_id, event_id, tenant_id, namespace))
 
+    def save_durable_checkpoint(
+        self,
+        plot_id: str,
+        checkpoint_id: str,
+        watermark_sequence: Optional[int] = None,
+        latest_event_id: Optional[str] = None,
+        journal_digest: Optional[str] = None,
+        tenant_id: str = "default_tenant",
+        namespace: str = "default",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Save an explicit durable checkpoint anchored both locally and out-of-band."""
+        clean_id = str(checkpoint_id).strip()
+        if ".." in clean_id or "/" in clean_id or "\\" in clean_id:
+            raise SecurityViolation(f"Path traversal in checkpoint_id: {clean_id}")
+
+        head = self.load_head(plot_id, tenant_id, namespace)
+        seq = watermark_sequence if watermark_sequence is not None else int(head.get("sequence", 0) or 0)
+        last_ev = latest_event_id or head.get("latest_event_id")
+
+        if journal_digest is None:
+            events = self.load_all_events(plot_id, tenant_id, namespace, fail_on_corrupt=False)
+            slice_evs = [e.get("event_id", "") for e in events[:seq] if e.get("event_id")]
+            journal_digest = hashlib.sha256("::".join(slice_evs).encode("utf-8")).hexdigest() if slice_evs else ""
+
+        record = {
+            "checkpoint_id": clean_id,
+            "tenant_id": tenant_id,
+            "namespace": namespace,
+            "plot_id": plot_id,
+            "sequence": seq,
+            "watermark_sequence": seq,
+            "latest_event_id": last_ev,
+            "journal_digest": journal_digest,
+            "committed_at": _now(),
+            "payload": _public(payload or {}),
+        }
+
+        # Write local
+        local_cp_dir = self._plot_dir(plot_id, tenant_id, namespace) / "checkpoints"
+        local_cp_dir.mkdir(parents=True, exist_ok=True)
+        self._atomic(local_cp_dir / f"{clean_id}.json", record)
+
+        # Write out-of-band durable anchor
+        if self.durable_anchor_root:
+            anchor_cp_dir = self.durable_anchor_root / str(tenant_id).strip() / str(namespace).strip() / self._plot_key(plot_id) / "checkpoints"
+            anchor_cp_dir.mkdir(parents=True, exist_ok=True)
+            self._atomic(anchor_cp_dir / f"{clean_id}.json", record)
+
+        return record
+
     def load_all_events(
         self,
         plot_id: str,
         tenant_id: str = "default_tenant",
         namespace: str = "default",
         fail_on_corrupt: bool = False,
+        require_durable_anchor: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
         """Load all persisted events for a tenant plot, ordered by sequence."""
+        effective_require_anchor = (
+            self.require_durable_anchor
+            if require_durable_anchor is None
+            else bool(require_durable_anchor)
+        )
+        if effective_require_anchor:
+            if not self.durable_anchor_root:
+                raise CorruptedWorldlineError(
+                    f"Authoritative historical replay requires configured durable_anchor_root for plot {plot_id}"
+                )
+            if not self.durable_anchor_root.exists() or not self.durable_anchor_root.is_dir():
+                raise CorruptedWorldlineError(
+                    f"Authoritative historical replay requires accessible and mounted durable anchor root: {self.durable_anchor_root}"
+                )
+
         events_dir = self._plot_dir(plot_id, tenant_id, namespace) / "events"
         if not events_dir.exists() or not events_dir.is_dir():
             if fail_on_corrupt:
@@ -657,7 +740,7 @@ class CanonicalWorldlineService:
                     f"Worldline journal missing head watermark for plot {plot_id} while {len(events)} events exist"
                 )
 
-            # 3. Check against durable checkpoints to detect joint head+journal rollback
+            # 3. Check against durable checkpoints to detect joint head+journal rollback and event substitution
             candidate_checkpoint_dirs = [self._plot_dir(plot_id, tenant_id, namespace) / "checkpoints"]
             if self.durable_anchor_root:
                 anchor_cp_dir = self.durable_anchor_root / str(tenant_id).strip() / str(namespace).strip() / self._plot_key(plot_id) / "checkpoints"
@@ -665,18 +748,43 @@ class CanonicalWorldlineService:
 
             for checkpoints_dir in candidate_checkpoint_dirs:
                 if checkpoints_dir.exists() and checkpoints_dir.is_dir():
-                    for cp_file in checkpoints_dir.glob("*.json"):
+                    for cp_file in sorted(checkpoints_dir.glob("*.json")):
                         try:
                             cp_data = self._read(cp_file)
-                            cp_seq = int(cp_data.get("sequence") or cp_data.get("head_sequence") or 0)
-                            if cp_seq > head_seq:
-                                raise CorruptedWorldlineError(
-                                    f"Worldline journal rollback detected for plot {plot_id}: checkpoint watermark sequence {cp_seq} exceeds current head sequence {head_seq}"
-                                )
                         except Exception as exc:
-                            if isinstance(exc, CorruptedWorldlineError):
-                                raise
+                            if fail_on_corrupt:
+                                raise CorruptedWorldlineError(
+                                    f"Corrupt or unreadable durable checkpoint detected at {cp_file}: {exc}"
+                                ) from exc
                             logger.warning("Could not read checkpoint %s: %s", cp_file, exc)
+                            continue
+
+                        if not isinstance(cp_data, dict):
+                            if fail_on_corrupt:
+                                raise CorruptedWorldlineError(f"Malformed checkpoint format in {cp_file}")
+                            continue
+
+                        cp_seq = int(cp_data.get("sequence") or cp_data.get("watermark_sequence") or cp_data.get("head_sequence") or 0)
+                        if cp_seq > head_seq:
+                            raise CorruptedWorldlineError(
+                                f"Worldline journal rollback detected for plot {plot_id}: checkpoint watermark sequence {cp_seq} exceeds current head sequence {head_seq}"
+                            )
+
+                        # Detect same-length event substitution
+                        if cp_seq > 0 and cp_seq <= len(events):
+                            ev_at_seq = events[cp_seq - 1]
+                            expected_ev_id = cp_data.get("latest_event_id") or cp_data.get("event_id")
+                            if expected_ev_id and ev_at_seq.get("event_id") != expected_ev_id:
+                                raise CorruptedWorldlineError(
+                                    f"Worldline same-length event substitution detected for plot {plot_id} at sequence {cp_seq}: expected event {expected_ev_id}, found {ev_at_seq.get('event_id')}"
+                                )
+                            expected_digest = cp_data.get("journal_digest")
+                            if expected_digest:
+                                slice_digest = hashlib.sha256("::".join(e.get("event_id", "") for e in events[:cp_seq] if e.get("event_id")).encode("utf-8")).hexdigest()
+                                if slice_digest != expected_digest:
+                                    raise CorruptedWorldlineError(
+                                        f"Worldline same-length journal substitution detected for plot {plot_id} at sequence {cp_seq}: digest mismatch {slice_digest} != {expected_digest}"
+                                    )
         return events
 
     def select_eligible_events(
@@ -688,6 +796,7 @@ class CanonicalWorldlineService:
         tenant_id: str = "default_tenant",
         namespace: str = "default",
         fail_on_corrupt: bool = True,
+        require_durable_anchor: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
         """Walk immutable event journal and select events strictly satisfying:
           1. event.tenant_id == tenant_id
@@ -703,6 +812,7 @@ class CanonicalWorldlineService:
             tenant_id=tenant_id,
             namespace=namespace,
             fail_on_corrupt=fail_on_corrupt,
+            require_durable_anchor=require_durable_anchor,
         )
 
         t_dt = _parse_utc_iso(valid_time_T)

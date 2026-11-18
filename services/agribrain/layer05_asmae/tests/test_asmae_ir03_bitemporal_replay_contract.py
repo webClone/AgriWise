@@ -1214,6 +1214,122 @@ class ASMAEIR03BitemporalReplayContractTests(unittest.TestCase):
         receipt_k1_repeat = res_k1_repeat.get("bitemporal_replay_receipt")
         self.assertEqual(receipt_k1_repeat["evidence_set_digest"], digest_k1)
 
+    # =========================================================================
+    # IR03-T22: Authoritative Replay Mandatory Anchor Unmounted Fails Closed (B59-01)
+    # =========================================================================
+    def test_ir03_t22_authoritative_replay_mandatory_durable_anchor_unmounted_fails_closed(self):
+        """Authoritative historical replay strictly requires configured, reachable durable anchor root."""
+        # Case A: require_durable_anchor=True but durable_anchor_root is None
+        wl_no_anchor = CanonicalWorldlineService(root=self.worldline_root, durable_anchor_root=None)
+        with self.assertRaises(CorruptedWorldlineError) as ctx:
+            wl_no_anchor.load_all_events(self.plot_id, self.tenant_id, fail_on_corrupt=True, require_durable_anchor=True)
+        self.assertIn("requires configured durable_anchor_root", str(ctx.exception))
+
+        # Case B: durable_anchor_root points to non-existent / unmounted volume
+        unmounted_path = Path(self.temp_dir) / "non_existent_unmounted_volume"
+        with self.assertRaises(CorruptedWorldlineError) as ctx_unmounted:
+            CanonicalWorldlineService(
+                root=self.worldline_root,
+                durable_anchor_root=unmounted_path,
+                require_durable_anchor=True,
+            )
+        self.assertIn("requires accessible and mounted durable anchor root", str(ctx_unmounted.exception))
+
+    # =========================================================================
+    # IR03-T23: Same-Length Event Substitution Detected by Checkpoint Digest (B59-01)
+    # =========================================================================
+    def test_ir03_t23_same_length_event_substitution_detected_by_checkpoint_digest(self):
+        """A same-length malicious event substitution is detected via checkpoint event ID and journal digest."""
+        # Commit 3 authentic events
+        ev1 = self._commit_worldline_event("OBSERVATION_RAW", 1, 1, {"metric": 10})
+        ev2 = self._commit_worldline_event("OBSERVATION_RAW", 2, 2, {"metric": 20})
+        ev3 = self._commit_worldline_event("OBSERVATION_RAW", 3, 3, {"metric": 30})
+
+        # Save an authoritative durable checkpoint at sequence 3
+        durable_anchor_dir = Path(self.temp_dir) / "durable_anchor_mount"
+        wl = CanonicalWorldlineService(root=self.worldline_root, durable_anchor_root=durable_anchor_dir)
+        cp_rec = wl.save_durable_checkpoint(
+            plot_id=self.plot_id,
+            checkpoint_id="cp_seq3_authoritative",
+            tenant_id=self.tenant_id,
+            watermark_sequence=3,
+            latest_event_id=ev3["event_id"],
+        )
+        self.assertIsNotNone(cp_rec.get("journal_digest"))
+
+        # Verify load_all_events succeeds when untouched
+        events = wl.load_all_events(self.plot_id, self.tenant_id, fail_on_corrupt=True)
+        self.assertEqual(len(events), 3)
+
+        # Attack: Adversary substitutes event 2 with a fraudulent event of sequence 2
+        # (Preserving sequence continuity 1, 2, 3 and head sequence = 3)
+        ev2_path = self.worldline_root / self.tenant_id / "default" / wl._plot_key(self.plot_id) / "events" / f"{ev2['event_id']}.json"
+        forged_event = dict(ev2)
+        forged_event["event_id"] = "forged_event_id_substitution_00002"
+        forged_event["payload"] = {"metric": 999999}
+        # Replace file
+        ev2_path.unlink()
+        forged_path = ev2_path.parent / f"{forged_event['event_id']}.json"
+        forged_path.write_text(json.dumps(forged_event), encoding="utf-8")
+
+        # load_all_events MUST fail closed detecting the same-length journal substitution
+        with self.assertRaises(CorruptedWorldlineError) as ctx_sub:
+            wl.load_all_events(self.plot_id, self.tenant_id, fail_on_corrupt=True)
+        self.assertIn("substitution detected", str(ctx_sub.exception).lower())
+
+    # =========================================================================
+    # IR03-T24: Corrupt Checkpoint File Fails Closed with No Silent Pass (B59-01)
+    # =========================================================================
+    def test_ir03_t24_corrupt_checkpoint_file_fails_closed_no_silent_pass(self):
+        """Corrupt or unreadable checkpoint files strictly fail closed and do not silently pass."""
+        self._commit_worldline_event("OBSERVATION_RAW", 1, 1, {"metric": 10})
+        durable_anchor_dir = Path(self.temp_dir) / "durable_anchor_corrupt_test"
+        wl = CanonicalWorldlineService(root=self.worldline_root, durable_anchor_root=durable_anchor_dir)
+        wl.save_durable_checkpoint(self.plot_id, "valid_cp", tenant_id=self.tenant_id)
+
+        # Intentionally corrupt a checkpoint file in the durable anchor directory
+        anchor_cp_dir = durable_anchor_dir / self.tenant_id / "default" / wl._plot_key(self.plot_id) / "checkpoints"
+        corrupt_cp = anchor_cp_dir / "corrupted_checkpoint.json"
+        corrupt_cp.write_bytes(b"\x00\xff\xfeINVALID_MALFORMED_JSON{{{")
+
+        # Must fail closed with CorruptedWorldlineError
+        with self.assertRaises(CorruptedWorldlineError) as ctx:
+            wl.load_all_events(self.plot_id, self.tenant_id, fail_on_corrupt=True)
+        self.assertIn("corrupt or unreadable durable checkpoint", str(ctx.exception).lower())
+
+    # =========================================================================
+    # IR03-T25: Concurrent Checkpoint Write Atomic Consistency (B59-01)
+    # =========================================================================
+    def test_ir03_t25_concurrent_checkpoint_write_atomic_consistency(self):
+        """Concurrent durable checkpoint writers complete atomically without torn or malformed files."""
+        import concurrent.futures
+        self._commit_worldline_event("OBSERVATION_RAW", 1, 1, {"metric": 10})
+        durable_anchor_dir = Path(self.temp_dir) / "durable_anchor_concurrent"
+        wl = CanonicalWorldlineService(root=self.worldline_root, durable_anchor_root=durable_anchor_dir)
+
+        def write_cp(idx: int):
+            return wl.save_durable_checkpoint(
+                plot_id=self.plot_id,
+                checkpoint_id=f"concurrent_cp_{idx}",
+                watermark_sequence=1,
+                tenant_id=self.tenant_id,
+                payload={"worker_idx": idx},
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(write_cp, i) for i in range(10)]
+            results = [f.result() for f in concurrent.futures.as_completed(futures)]
+        self.assertEqual(len(results), 10)
+
+        # All 10 checkpoints in durable anchor must be valid JSON
+        anchor_cp_dir = durable_anchor_dir / self.tenant_id / "default" / wl._plot_key(self.plot_id) / "checkpoints"
+        cp_files = list(anchor_cp_dir.glob("concurrent_cp_*.json"))
+        self.assertEqual(len(cp_files), 10)
+        for cf in cp_files:
+            data = json.loads(cf.read_text(encoding="utf-8"))
+            self.assertEqual(data["sequence"], 1)
+            self.assertIn("payload", data)
+
 
 if __name__ == "__main__":
     unittest.main()

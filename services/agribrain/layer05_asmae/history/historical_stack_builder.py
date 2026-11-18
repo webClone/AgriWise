@@ -34,6 +34,11 @@ class HistoricalStackBuilder:
         s1_records = [r for r in records if r.source.lower() in ("sentinel1", "s1")]
 
         # Determine dynamic start date
+        if not records and (start_date is None or end_date is None):
+            raise ValueError(
+                "HistoricalStackBuilder requires explicit start/end dates when no scene records are provided; date fabrication for empty evidence is rejected"
+            )
+
         resolved_start = start_date
         if resolved_start is None:
             if records:
@@ -79,8 +84,35 @@ class HistoricalStackBuilder:
         elif isinstance(resolved_end, datetime):
             resolved_end = resolved_end.date()
 
-        # Ensure valid polygon_geojson structure
-        resolved_polygon = polygon_geojson or {"type": "Polygon", "coordinates": []}
+        # Validate polygon_geojson: must be a valid, non-empty GeoJSON Polygon or MultiPolygon (B59-04)
+        if not polygon_geojson or not isinstance(polygon_geojson, dict):
+            raise ValueError(
+                f"HistoricalStackBuilder requires valid plot-native Polygon/MultiPolygon geometry, got {polygon_geojson}"
+            )
+        poly_type = str(polygon_geojson.get("type", "")).strip()
+        if poly_type not in ("Polygon", "MultiPolygon"):
+            raise ValueError(
+                f"HistoricalStackBuilder requires GeoJSON type Polygon or MultiPolygon, got '{poly_type}'"
+            )
+        coords = polygon_geojson.get("coordinates")
+        if not coords or not isinstance(coords, (list, tuple)) or len(coords) == 0:
+            raise ValueError(
+                f"HistoricalStackBuilder rejects empty geometry coordinates: {polygon_geojson}"
+            )
+        if poly_type == "Polygon":
+            ring = coords[0]
+            if not isinstance(ring, (list, tuple)) or len(ring) < 4:
+                raise ValueError(
+                    f"HistoricalStackBuilder Polygon must have at least 4 coordinates in outer ring, got {ring}"
+                )
+        elif poly_type == "MultiPolygon":
+            poly0 = coords[0]
+            if not isinstance(poly0, (list, tuple)) or len(poly0) == 0 or len(poly0[0]) < 4:
+                raise ValueError(
+                    f"HistoricalStackBuilder MultiPolygon must contain valid polygons with at least 4 coordinates, got {poly0}"
+                )
+
+        resolved_polygon = polygon_geojson
 
         # Construct ASMAEInput payload
         inp = ASMAEInput(

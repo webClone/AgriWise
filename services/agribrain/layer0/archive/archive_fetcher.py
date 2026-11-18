@@ -8,8 +8,9 @@ import os
 import hashlib
 import json
 import math
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple, Union
 import numpy as np
 
 from .archive_policy import ARCHIVE_POLICY_VERSION
@@ -23,49 +24,178 @@ from .archive_download_plan import ArchiveDownloadPlanner
 from .stac_client import STACClient
 
 
-def load_raster_data(file_path: str) -> np.ndarray:
-    """Safely decode satellite band data from GeoTIFF (.tif/.tiff), .npz, or .npy containers.
+@dataclass
+class SpatialRasterMetadata:
+    crs: str
+    transform: tuple
+    bounds: tuple  # (left, bottom, right, top)
+    nodata: Optional[float]
+    resolution_m: Tuple[float, float]
+    width: int
+    height: int
+    data_type: str
+    georeferenced: bool
+    native_spatial_certified_1m: bool = False  # Explicitly False: satellite pixel resolution cannot certify 1m
 
-    Supports rasterio, tifffile, PIL, and native NumPy arrays.
+
+@dataclass
+class SpatialRasterResult:
+    data: np.ndarray
+    metadata: SpatialRasterMetadata
+    valid_mask: np.ndarray
+    valid_pixel_fraction: float
+    content_hash: str
+
+
+def load_spatial_raster(
+    file_path: str,
+    expected_crs: Optional[str] = None,
+    aoi_bounds: Optional[Tuple[float, float, float, float]] = None,
+    require_georeference: bool = False,
+) -> SpatialRasterResult:
+    """
+    Decodes satellite raster band data and validates complete geospatial authority metadata:
+    CRS, affine transform, geographic bounds, nodata mask, resolution, and AOI overlap.
+    Fails closed on missing georeferencing, mismatched CRS, non-overlapping AOI, or corrupted bands.
     """
     if not file_path or not os.path.exists(file_path):
         raise FileNotFoundError(f"Raster file not found: {file_path}")
 
     ext = os.path.splitext(file_path)[1].lower()
+    data: Optional[np.ndarray] = None
+    crs_str: str = ""
+    transform_tuple: tuple = ()
+    bounds_tuple: tuple = ()
+    nodata_val: Optional[float] = None
+    res: Tuple[float, float] = (10.0, 10.0)
+    georeferenced: bool = False
+
     if ext in {".tif", ".tiff"}:
         try:
             import rasterio
             with rasterio.open(file_path) as src:
                 arr = src.read(1)
-                return np.asarray(arr, dtype=np.float32)
+                data = np.asarray(arr, dtype=np.float32)
+                if src.crs:
+                    crs_str = str(src.crs.to_string())
+                if src.transform:
+                    transform_tuple = tuple(src.transform)
+                if src.bounds:
+                    bounds_tuple = (src.bounds.left, src.bounds.bottom, src.bounds.right, src.bounds.top)
+                nodata_val = src.nodata
+                if hasattr(src, "res") and src.res:
+                    res = (float(src.res[0]), float(src.res[1]))
+                georeferenced = bool(crs_str and transform_tuple)
         except Exception:
             try:
                 import tifffile
-                arr = tifffile.imread(file_path)
-                if arr.ndim > 2:
-                    arr = arr[0]
-                return np.asarray(arr, dtype=np.float32)
+                with tifffile.TiffFile(file_path) as tif:
+                    arr = tif.asarray()
+                    if arr.ndim > 2:
+                        arr = arr[0]
+                    data = np.asarray(arr, dtype=np.float32)
+                    georeferenced = False
             except Exception:
                 from PIL import Image
                 with Image.open(file_path) as img:
                     arr = np.array(img)
                     if arr.ndim > 2:
                         arr = arr[:, :, 0]
-                    return np.asarray(arr, dtype=np.float32)
+                    data = np.asarray(arr, dtype=np.float32)
+                    georeferenced = False
     elif ext in {".npz"}:
         with np.load(file_path, allow_pickle=False) as loader:
-            return np.asarray(loader["data"], dtype=np.float32)
+            data = np.asarray(loader["data"], dtype=np.float32)
+            if "crs" in loader:
+                crs_str = str(loader["crs"])
+            if "transform" in loader:
+                transform_tuple = tuple(loader["transform"])
+            if "bounds" in loader:
+                bounds_tuple = tuple(loader["bounds"])
+            if "nodata" in loader:
+                nodata_val = float(loader["nodata"])
+            georeferenced = bool(crs_str and transform_tuple)
     elif ext in {".npy"}:
-        return np.asarray(np.load(file_path, allow_pickle=False), dtype=np.float32)
+        data = np.asarray(np.load(file_path, allow_pickle=False), dtype=np.float32)
+        georeferenced = False
     else:
-        # Fallback probe: try rasterio then npz
+        # Fallback probe
         try:
             import rasterio
             with rasterio.open(file_path) as src:
-                return np.asarray(src.read(1), dtype=np.float32)
+                data = np.asarray(src.read(1), dtype=np.float32)
+                crs_str = str(src.crs.to_string()) if src.crs else ""
+                transform_tuple = tuple(src.transform) if src.transform else ()
+                bounds_tuple = (src.bounds.left, src.bounds.bottom, src.bounds.right, src.bounds.top) if src.bounds else ()
+                nodata_val = src.nodata
+                georeferenced = bool(crs_str and transform_tuple)
         except Exception:
             with np.load(file_path, allow_pickle=False) as loader:
-                return np.asarray(loader["data"], dtype=np.float32)
+                data = np.asarray(loader["data"], dtype=np.float32)
+                georeferenced = False
+
+    if data is None:
+        raise ValueError(f"Could not decode raster array from {file_path}")
+
+    if require_georeference and not georeferenced:
+        raise ValueError(
+            f"Authoritative spatial qualification failed: file {file_path} lacks valid CRS and affine transform"
+        )
+
+    # Validate CRS matching
+    if expected_crs and crs_str:
+        norm_expected = expected_crs.strip().upper()
+        norm_actual = crs_str.strip().upper()
+        if norm_expected != norm_actual and norm_expected not in norm_actual and norm_actual not in norm_expected:
+            raise ValueError(f"CRS mismatch: expected {expected_crs}, found {crs_str}")
+
+    # Validate AOI bounds overlap
+    if aoi_bounds and bounds_tuple and len(bounds_tuple) == 4 and len(aoi_bounds) == 4:
+        minx, miny, maxx, maxy = aoi_bounds
+        r_left, r_bottom, r_right, r_top = bounds_tuple
+        overlap = not (maxx < r_left or minx > r_right or maxy < r_bottom or miny > r_top)
+        if not overlap:
+            raise ValueError(
+                f"Spatial overlap violation: AOI bounds {aoi_bounds} do not intersect raster bounds {bounds_tuple}"
+            )
+
+    # Compute valid mask & pixel fraction
+    if nodata_val is not None:
+        valid_mask = (data != nodata_val) & np.isfinite(data)
+    else:
+        valid_mask = np.isfinite(data)
+
+    valid_pixel_frac = float(np.count_nonzero(valid_mask) / data.size) if data.size > 0 else 0.0
+    content_hash = hashlib.sha256(data.tobytes()).hexdigest()
+
+    meta = SpatialRasterMetadata(
+        crs=crs_str,
+        transform=transform_tuple,
+        bounds=bounds_tuple,
+        nodata=nodata_val,
+        resolution_m=res,
+        width=data.shape[1] if data.ndim > 1 else data.shape[0],
+        height=data.shape[0] if data.ndim > 1 else 1,
+        data_type=str(data.dtype),
+        georeferenced=georeferenced,
+        native_spatial_certified_1m=False,  # Explicitly False: 1m spatial certification remains on hold
+    )
+
+    return SpatialRasterResult(
+        data=data,
+        metadata=meta,
+        valid_mask=valid_mask,
+        valid_pixel_fraction=valid_pixel_frac,
+        content_hash=content_hash,
+    )
+
+
+def load_raster_data(file_path: str) -> np.ndarray:
+    """Safely decode satellite band data from GeoTIFF (.tif/.tiff), .npz, or .npy containers.
+
+    Supports rasterio, tifffile, PIL, and native NumPy arrays.
+    """
+    return load_spatial_raster(file_path).data
 
 
 class ArchiveFetcher:
