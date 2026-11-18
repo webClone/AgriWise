@@ -1,0 +1,296 @@
+"""Unit and Integration Tests for ASMAE IR-05 Resumable Archive Bootstrap.
+
+Verifies:
+  1. Multi-window partitioned execution from mission start (2015).
+  2. Durable checkpoint persistence and cursor resumption after interruption.
+  3. Strict chronological DAG lineage chaining (parent_event_ids).
+  4. Idempotency on completed runs without duplicate worldline events.
+  5. Dual-clock bitemporal replay queries against bootstrapped historical evidence.
+  6. Graceful failure recording and state preservation.
+"""
+
+import json
+import shutil
+import tempfile
+import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, List
+
+from services.agribrain.layer05_asmae.history.archive_bootstrap_service import (
+    ArchiveBootstrapService,
+    BootstrapCheckpoint,
+    MISSION_START_DATE,
+)
+from services.agribrain.world_model.canonical_worldline import (
+    CanonicalWorldlineService,
+    _parse_utc_iso,
+)
+
+
+class ASMAEIR05ArchiveBootstrapTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.worldline_root = Path(self.temp_dir) / "worldline"
+        self.bootstrap_root = Path(self.temp_dir) / "bootstrap_checkpoints"
+
+        self.worldline = CanonicalWorldlineService(root=self.worldline_root)
+        self.plot_id = "test_plot_mitidja_01"
+        self.tenant_id = "tenant_test"
+        self.namespace = "default"
+        self.geometry_hash = "6818982c1a742fa63aa6742cd5f42422"
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _mock_fetcher(self, win_start: str, win_end: str) -> List[Dict[str, Any]]:
+        """Synthesize 2 realistic historical scenes per window."""
+        dt_start = _parse_utc_iso(win_start)
+        scenes = []
+        for i in [30, 90]:
+            acq_dt = dt_start + timedelta(days=i)
+            acq_iso = acq_dt.isoformat()
+            scenes.append({
+                "scene_id": f"S2A_MSIL2A_{acq_dt.strftime('%Y%m%d')}_T31SUD",
+                "acquisition_time": acq_iso,
+                "source": "sentinel2",
+                "product_level": "L2A",
+                "cloud_score": 12.5,
+                "quality_score": 0.92,
+                "source_content_hash": f"hash_{acq_iso}",
+                "valid_pixel_fraction": 0.98,
+                "resolution_m": 10.0,
+                "metrics": {"ndvi_mean": 0.54, "ndre_mean": 0.38},
+            })
+        return scenes
+
+    def test_ir05_t01_full_multi_window_bootstrap_chronological_chain(self):
+        """Full bootstrap across 2 years builds an unbroken parent DAG chain."""
+        service = ArchiveBootstrapService(
+            worldline=self.worldline,
+            bootstrap_root=self.bootstrap_root,
+            fetcher_factory=self._mock_fetcher,
+        )
+
+        end_date = "2017-06-23T00:00:00+00:00"  # 2 years
+        res = service.run_bootstrap(
+            plot_id=self.plot_id,
+            geometry_hash=self.geometry_hash,
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+            start_date=MISSION_START_DATE,
+            target_end_date=end_date,
+            window_days=180,
+        )
+
+        self.assertEqual(res["status"], "COMPLETED")
+        win_count = res["completed_windows_count"]
+        self.assertEqual(win_count, 5)
+        # 5 windows * 2 scenes = 10 events
+        self.assertEqual(res["total_events_committed"], 10)
+        self.assertEqual(res["total_scenes_discovered"], 10)
+
+        # Inspect canonical worldline events
+        events = self.worldline.load_all_events(
+            self.plot_id, self.tenant_id, self.namespace
+        )
+        self.assertEqual(len(events), 10)
+
+        # Verify strict sequence numbering and unbroken parent chaining
+        for i, ev in enumerate(events):
+            self.assertEqual(ev["sequence"], i + 1)
+            self.assertEqual(ev["event_type"], "ARCHIVE_POSTERIOR_VALIDATED")
+            if i == 0:
+                self.assertEqual(ev.get("parent_event_ids"), [])
+            else:
+                prev_id = events[i - 1]["event_id"]
+                self.assertEqual(ev.get("parent_event_ids"), [prev_id])
+
+            # Verify observation times are strictly increasing
+            if i > 0:
+                t_prev = _parse_utc_iso(events[i - 1]["observation_or_valid_time"])
+                t_curr = _parse_utc_iso(ev["observation_or_valid_time"])
+                self.assertGreater(t_curr, t_prev)
+
+    def test_ir05_t02_resumption_from_interrupted_cursor(self):
+        """Service resumes from cursor checkpoint after simulated interruption."""
+        service = ArchiveBootstrapService(
+            worldline=self.worldline,
+            bootstrap_root=self.bootstrap_root,
+            fetcher_factory=self._mock_fetcher,
+        )
+
+        end_date = "2017-06-23T00:00:00+00:00"
+
+        # 1. First run halts after 2 windows (interruption)
+        res1 = service.run_bootstrap(
+            plot_id=self.plot_id,
+            geometry_hash=self.geometry_hash,
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+            start_date=MISSION_START_DATE,
+            target_end_date=end_date,
+            window_days=180,
+            max_windows=2,
+        )
+
+        self.assertEqual(res1["status"], "IN_PROGRESS")
+        self.assertEqual(res1["completed_windows_count"], 2)
+        self.assertEqual(res1["total_events_committed"], 4)
+
+        # Checkpoint is written to disk
+        cp = service.load_checkpoint(self.plot_id, self.tenant_id, self.namespace)
+        self.assertIsNotNone(cp)
+        self.assertEqual(cp.status, "IN_PROGRESS")
+        self.assertEqual(len(cp.completed_windows), 2)
+
+        # 2. Second run resumes and finishes the remaining windows
+        res2 = service.run_bootstrap(
+            plot_id=self.plot_id,
+            geometry_hash=self.geometry_hash,
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+            start_date=MISSION_START_DATE,
+            target_end_date=end_date,
+            window_days=180,
+        )
+
+        self.assertEqual(res2["status"], "COMPLETED")
+        self.assertTrue(res2["resumed"])
+        self.assertEqual(res2["completed_windows_count"], 5)
+        self.assertEqual(res2["total_events_committed"], 10)
+
+        events = self.worldline.load_all_events(
+            self.plot_id, self.tenant_id, self.namespace
+        )
+        self.assertEqual(len(events), 10)
+
+    def test_ir05_t03_idempotent_reexecution_when_completed(self):
+        """Re-running an already completed bootstrap produces zero duplicate events."""
+        service = ArchiveBootstrapService(
+            worldline=self.worldline,
+            bootstrap_root=self.bootstrap_root,
+            fetcher_factory=self._mock_fetcher,
+        )
+
+        end_date = "2016-06-23T00:00:00+00:00"
+        res1 = service.run_bootstrap(
+            plot_id=self.plot_id,
+            geometry_hash=self.geometry_hash,
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+            start_date=MISSION_START_DATE,
+            target_end_date=end_date,
+            window_days=180,
+        )
+        self.assertEqual(res1["status"], "COMPLETED")
+        total_committed = res1["total_events_committed"]
+        self.assertEqual(total_committed, 6)
+
+        # Re-run immediately
+        res2 = service.run_bootstrap(
+            plot_id=self.plot_id,
+            geometry_hash=self.geometry_hash,
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+            start_date=MISSION_START_DATE,
+            target_end_date=end_date,
+            window_days=180,
+        )
+        self.assertEqual(res2["status"], "COMPLETED")
+        self.assertTrue(res2.get("already_completed"))
+
+        events = self.worldline.load_all_events(
+            self.plot_id, self.tenant_id, self.namespace
+        )
+        self.assertEqual(len(events), total_committed, "Worldline must have exactly 6 events without duplicates")
+
+    def test_ir05_t04_bitemporal_replay_query_against_bootstrapped_history(self):
+        """Bitemporal selector correctly filters historical observations by T and K."""
+        service = ArchiveBootstrapService(
+            worldline=self.worldline,
+            bootstrap_root=self.bootstrap_root,
+            fetcher_factory=self._mock_fetcher,
+        )
+
+        end_date = "2017-06-23T00:00:00+00:00"
+        service.run_bootstrap(
+            plot_id=self.plot_id,
+            geometry_hash=self.geometry_hash,
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+            start_date=MISSION_START_DATE,
+            target_end_date=end_date,
+            window_days=180,
+        )
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        # Replay at T = 2016-01-01 (should only see events from window 1)
+        t_early = "2016-01-01T00:00:00+00:00"
+        eligible_early = self.worldline.select_eligible_events(
+            plot_id=self.plot_id,
+            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            valid_time_T=t_early,
+            knowledge_cutoff_K=now_iso,
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+        )
+        self.assertGreater(len(eligible_early), 0)
+        self.assertLess(len(eligible_early), 10)
+        for ev in eligible_early:
+            obs_dt = _parse_utc_iso(ev["observation_or_valid_time"])
+            self.assertLessEqual(obs_dt, _parse_utc_iso(t_early))
+
+        # Replay before mission start should yield 0 events
+        t_pre = "2014-01-01T00:00:00+00:00"
+        eligible_pre = self.worldline.select_eligible_events(
+            plot_id=self.plot_id,
+            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            valid_time_T=t_pre,
+            knowledge_cutoff_K=now_iso,
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+        )
+        self.assertEqual(len(eligible_pre), 0)
+
+    def test_ir05_t05_failure_and_checkpoint_preservation(self):
+        """Simulated network failure updates checkpoint to FAILED and preserves progress."""
+        fail_window_idx = 1
+        call_count = [0]
+
+        def flaky_fetcher(win_start: str, win_end: str):
+            call_count[0] += 1
+            if call_count[0] > fail_window_idx:
+                raise ConnectionError("CDSE STAC endpoint timeout")
+            return self._mock_fetcher(win_start, win_end)
+
+        service = ArchiveBootstrapService(
+            worldline=self.worldline,
+            bootstrap_root=self.bootstrap_root,
+            fetcher_factory=flaky_fetcher,
+        )
+
+        end_date = "2017-06-23T00:00:00+00:00"
+        with self.assertRaises(ConnectionError):
+            service.run_bootstrap(
+                plot_id=self.plot_id,
+                geometry_hash=self.geometry_hash,
+                tenant_id=self.tenant_id,
+                namespace=self.namespace,
+                start_date=MISSION_START_DATE,
+                target_end_date=end_date,
+                window_days=180,
+                fail_fast=True,
+            )
+
+        # Checkpoint is marked FAILED and preserves window 0
+        cp = service.load_checkpoint(self.plot_id, self.tenant_id, self.namespace)
+        self.assertEqual(cp.status, "FAILED")
+        self.assertIn("timeout", cp.error_message)
+        self.assertEqual(len(cp.completed_windows), 1)
+        self.assertEqual(cp.total_events_committed, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
