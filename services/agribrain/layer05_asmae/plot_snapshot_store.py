@@ -727,7 +727,7 @@ def evaluate_snapshot_admission(
         }
 
     validation = snapshot.get("validation") or {}
-    integrity_keys = (
+    integrity_keys = [
         "nodeValid",
         "publicationValid",
         "receiptValid",
@@ -735,7 +735,9 @@ def evaluate_snapshot_admission(
         "bindingValid",
         "lineageValid",
         "temporalBindingValid",
-    )
+    ]
+    if snapshot.get("bitemporal_replay_receipt"):
+        integrity_keys.append("replayReceiptValid")
     contract_keys = (
         "schemaValid",
         "contractValid",
@@ -1266,6 +1268,22 @@ def load_latest_plot_snapshot(
         numerical_binding_valid = False
         node_agreement_valid = False
 
+    replay_receipt_valid = True
+    if node.get("bitemporal_replay_receipt"):
+        n_rr = node.get("bitemporal_replay_receipt") or {}
+        p_rr = publication.get("bitemporal_replay_receipt") or {}
+        r_rr = receipt.get("bitemporal_replay_receipt") or {}
+        h_rr = head.get("bitemporal_replay_receipt") or {}
+        expected_digest = node.get("evidence_set_digest")
+        if not expected_digest or n_rr.get("evidence_set_digest") != expected_digest:
+            replay_receipt_valid = False
+        if p_rr and p_rr.get("evidence_set_digest") != expected_digest:
+            replay_receipt_valid = False
+        if r_rr and r_rr.get("evidence_set_digest") != expected_digest:
+            replay_receipt_valid = False
+        if h_rr and h_rr.get("evidence_set_digest") != expected_digest:
+            replay_receipt_valid = False
+
     validation_flags = {
         "nodeValid": bool(node.get("node_hash") and node.get("node_hash") == head.get("node_hash") and node.get("node_hash") == computed_node_hash),
         "publicationValid": bool(publication.get("publication_hash") and publication.get("publication_hash") == head.get("frontend_publication_hash") and publication.get("publication_hash") == computed_pub_hash),
@@ -1274,6 +1292,7 @@ def load_latest_plot_snapshot(
         "temporalBindingValid": temporal_binding_valid,
         "numericalBindingValid": numerical_binding_valid,
         "nodeAgreementValid": bool(node_agreement_valid),
+        "replayReceiptValid": replay_receipt_valid,
         "bindingValid": bool(
             head.get("snapshot_id") == snapshot_id
             and head.get("plot_id") == ns.plot_id
@@ -1288,6 +1307,7 @@ def load_latest_plot_snapshot(
             and temporal_binding_valid
             and (numerical_binding_valid is not False)
             and node_agreement_valid
+            and replay_receipt_valid
             and (node.get("node_hash") == computed_node_hash)
         ),
         "lineageValid": bool(
@@ -1430,6 +1450,10 @@ def load_plot_snapshot_by_id(
         and node.get("farm_id") == ns.farm_id
         and node.get("plot_id") == ns.plot_id
     ):
+        if node.get("bitemporal_replay_receipt"):
+            rr = node.get("bitemporal_replay_receipt") or {}
+            if node.get("evidence_set_digest") != rr.get("evidence_set_digest"):
+                return None
         return node
 
     return None

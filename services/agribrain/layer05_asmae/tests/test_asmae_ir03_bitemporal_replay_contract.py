@@ -879,6 +879,323 @@ class ASMAEIR03BitemporalReplayContractTests(unittest.TestCase):
         self.assertIn("bitemporal_replay_receipt", rec_data)
         self.assertEqual(rec_data["evidence_set_digest"], mock_replay_receipt["evidence_set_digest"])
 
+    # =========================================================================
+    # IR03-T17: Missing Intermediate Ancestor Fails Closed (IR03-V04)
+    # =========================================================================
+    def test_ir03_t17_missing_intermediate_ancestor_fails_closed(self):
+        """Deleting an intermediate ancestor file from disk must fail closed; never silently accept."""
+        # 1. Grandparent A (Day 1)
+        gp_a = self._commit_worldline_event("OBSERVATION_RAW", 1, 2, {"val": "gp_a"})
+        # 2. Parent B (Day 2, references gp_a)
+        parent_b = self._commit_worldline_event(
+            "INTERMEDIATE_FEATURE", 2, 3, {"val": "p_b"}, parent_ids=[gp_a["event_id"]]
+        )
+        # 3. Child C (Day 3, references parent_b)
+        child_c = self._commit_worldline_event(
+            "CROP_POSTERIOR", 3, 4, {"crop_posterior": {"stage": "t17_test"}}, parent_ids=[parent_b["event_id"]]
+        )
+
+        t = self.base_time + timedelta(days=10)
+        k = self.base_time + timedelta(days=10)
+
+        # Baseline: query succeeds
+        res_ok = self.worldline.latest_eligible_payload(
+            self.plot_id, "CROP_POSTERIOR", t, k, self.tenant_id, fail_on_corrupt=True
+        )
+        self.assertIsNotNone(res_ok)
+
+        # Adversarially delete intermediate parent_b from disk
+        p_b_path = self.worldline._event_path(self.plot_id, parent_b["event_id"], self.tenant_id)
+        self.assertTrue(p_b_path.exists())
+        p_b_path.unlink()
+
+        # Under fail_on_corrupt=False, child_c must be rejected, returning None (never silently accepted)
+        res_soft = self.worldline.latest_eligible_payload(
+            self.plot_id, "CROP_POSTERIOR", t, k, self.tenant_id, fail_on_corrupt=False
+        )
+        self.assertIsNone(res_soft, "Derived event with missing ancestor must never be accepted")
+
+        # Now test fail_on_corrupt=True when child references an ancestor that was deleted but sequences intact:
+        # Re-commit parent_b to restore sequence continuity
+        p_b_data = json.loads(p_b_path.with_suffix(".json.bak").read_text(encoding="utf-8")) if p_b_path.with_suffix(".json.bak").exists() else {"event_id": parent_b["event_id"], "sequence": parent_b["sequence"], "event_type": "INTERMEDIATE_FEATURE", "committed_at": parent_b["committed_at"], "observation_or_valid_time": parent_b["observation_or_valid_time"], "payload": {"val": "restored"}}
+        p_b_path.write_text(json.dumps(p_b_data), encoding="utf-8")
+
+        # Tamper child_c's parent_event_ids to reference a missing ancestor ID
+        child_c_path = self.worldline._event_path(self.plot_id, child_c["event_id"], self.tenant_id)
+        child_data = json.loads(child_c_path.read_text(encoding="utf-8"))
+        child_data["parent_event_ids"] = ["evt_missing_ancestor_phantom"]
+        child_c_path.write_text(json.dumps(child_data), encoding="utf-8")
+
+        with self.assertRaises(CorruptedWorldlineError) as ctx_err:
+            self.worldline.select_eligible_events(
+                self.plot_id, "CROP_POSTERIOR", t, k, self.tenant_id, fail_on_corrupt=True
+            )
+        self.assertIn("missing ancestor", str(ctx_err.exception).lower())
+
+    # =========================================================================
+    # IR03-T18: Joint Head and Journal Rollback Detected (IR03-V02)
+    # =========================================================================
+    def test_ir03_t18_joint_head_and_journal_rollback_detected(self):
+        """Rollback of both mutable head and event files is detected via durable checkpoints."""
+        # 1. Commit 3 events
+        e1 = self._commit_worldline_event("ARCHIVE_POSTERIOR_VALIDATED", 1, 2, {"archive_posterior": {"geometry_hash": self.geometry_hash, "v": 1}})
+        e2 = self._commit_worldline_event("ARCHIVE_POSTERIOR_VALIDATED", 2, 3, {"archive_posterior": {"geometry_hash": self.geometry_hash, "v": 2}})
+        e3 = self._commit_worldline_event("ARCHIVE_POSTERIOR_VALIDATED", 3, 4, {"archive_posterior": {"geometry_hash": self.geometry_hash, "v": 3}})
+
+        # 2. Record a durable checkpoint at sequence 3
+        checkpoints_dir = self.worldline._plot_dir(self.plot_id, self.tenant_id) / "checkpoints"
+        checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        cp_file = checkpoints_dir / "checkpoint_seq3.json"
+        now_str = datetime.now(timezone.utc).isoformat()
+        cp_file.write_text(json.dumps({"checkpoint_id": "cp3", "sequence": 3, "timestamp": now_str}), encoding="utf-8")
+
+        # 3. Adversarially roll back head.json to sequence 2 and delete event 3
+        head_path = self.worldline._head_path(self.plot_id, self.tenant_id)
+        head_data = json.loads(head_path.read_text(encoding="utf-8"))
+        head_data["sequence"] = 2
+        head_data["latest_event_id"] = e2["event_id"]
+        head_path.write_text(json.dumps(head_data), encoding="utf-8")
+
+        e3_path = self.worldline._event_path(self.plot_id, e3["event_id"], self.tenant_id)
+        e3_path.unlink()
+
+        # Both head sequence (2) and events count (2) agree, but checkpoint recorded sequence 3!
+        # load_all_events MUST detect rollback and raise CorruptedWorldlineError
+        with self.assertRaises(CorruptedWorldlineError) as ctx_err:
+            self.worldline.load_all_events(self.plot_id, self.tenant_id, fail_on_corrupt=True)
+        self.assertIn("rollback detected", str(ctx_err.exception).lower())
+
+        # Test missing head while events exist fails closed
+        head_path.unlink()
+        with self.assertRaises(CorruptedWorldlineError) as ctx_missing:
+            self.worldline.load_all_events(self.plot_id, self.tenant_id, fail_on_corrupt=True)
+        self.assertIn("missing head watermark", str(ctx_missing.exception).lower())
+
+    # =========================================================================
+    # IR03-T19: Ancestor Observed Post-T or Derived Post-K BMA Rejected (IR03-V04)
+    # =========================================================================
+    def test_ir03_t19_ancestor_observed_post_T_or_derived_post_K_bma_rejected(self):
+        """Ancestor observed after valid time T or with nested BMA derived after cutoff K is rejected."""
+        # Scenario A: Ancestor observed at T+2 days (future observation leakage)
+        # Parent observed at Day 12, committed Day 3
+        parent_future = self._commit_worldline_event("OBSERVATION_RAW", 12, 3, {"raw": 99})
+        # Child observed at Day 5, committed Day 4, referencing parent_future
+        child_future = self._commit_worldline_event(
+            "CROP_POSTERIOR", 5, 4, {"crop_posterior": {"stage": "leak_test"}}, parent_ids=[parent_future["event_id"]]
+        )
+
+        t_day10 = self.base_time + timedelta(days=10)
+        k_day10 = self.base_time + timedelta(days=10)
+
+        # Query at T=Day 10: Parent was observed at Day 12 > Day 10. Child MUST BE REJECTED.
+        res_a = self.worldline.latest_eligible_payload(
+            self.plot_id, "CROP_POSTERIOR", t_day10, k_day10, self.tenant_id, fail_on_corrupt=False
+        )
+        self.assertIsNone(res_a, "Derived child whose ancestor was observed after T must be rejected")
+
+        # Scenario B: Ancestor observed Day 2, committed Day 3, but nested BMA was derived at Day 25 > K
+        parent_bma = self._commit_worldline_event(
+            "ARCHIVE_POSTERIOR_VALIDATED",
+            2,
+            3,
+            {
+                "archive_posterior": {"geometry_hash": self.geometry_hash},
+                "bma_weights": {
+                    "derived_at": (self.base_time + timedelta(days=25)).isoformat(),
+                    "weights": [0.6, 0.4],
+                },
+            },
+        )
+        child_bma = self._commit_worldline_event(
+            "CROP_POSTERIOR", 4, 5, {"crop_posterior": {"stage": "bma_dep_test"}}, parent_ids=[parent_bma["event_id"]]
+        )
+
+        # Query at K=Day 20: Parent BMA was derived at Day 25 > Day 20. Child MUST BE REJECTED.
+        k_day20 = self.base_time + timedelta(days=20)
+        res_b = self.worldline.latest_eligible_payload(
+            self.plot_id, "CROP_POSTERIOR", t_day10, k_day20, self.tenant_id, fail_on_corrupt=False
+        )
+        self.assertIsNone(res_b, "Derived child whose ancestor carries BMA derived after K must be rejected")
+
+        # Query at K=Day 30: All pre-conditions met (Parent BMA Day 25 <= Day 30). Child ADMITTED.
+        k_day30 = self.base_time + timedelta(days=30)
+        res_b_ok = self.worldline.latest_eligible_payload(
+            self.plot_id, "CROP_POSTERIOR", t_day10, k_day30, self.tenant_id, fail_on_corrupt=False
+        )
+        self.assertIsNotNone(res_b_ok)
+
+    # =========================================================================
+    # IR03-T20: Replay Receipt Cold Read Recompute & Tamper Rejection (IR03-V06)
+    # =========================================================================
+    def test_ir03_t20_replay_receipt_cold_read_recompute_and_tamper_rejection(self):
+        """Cold read recomputes receipt binding; deliberate tamper triggers quarantine."""
+        from services.agribrain.layer05_asmae.plot_snapshot_store import (
+            publish_canonical_plot_snapshot,
+            load_latest_plot_snapshot,
+            evaluate_snapshot_admission,
+            SURFACES_SCHEMA_VERSION,
+        )
+        from services.agribrain.layer10_sire.surface_contract import RENDER_AUTHORIZATION_VERSION
+
+        mock_replay_receipt = {
+            "contract_version": "canonical_bitemporal_replay_receipt_v1",
+            "replay_mode": "bitemporal_deterministic_v1",
+            "evidence_set_digest": "sha256:d17e3f890b5ca7b649a21e428cf157bb674e2bda63914a1c5d98fa6a8b7c93e1",
+            "observation_valid_time": "2026-09-08T12:00:00+00:00",
+            "knowledge_cutoff_time": "2026-09-08T12:00:00+00:00",
+        }
+
+        snapshot_id = f"L10-coldtamper-{int(datetime.now(timezone.utc).timestamp()*1000)}"
+        asmae_result = {
+            "snapshot_id": snapshot_id,
+            "content_hash": "sha256:cold_hash_123",
+            "bitemporal_replay_receipt": mock_replay_receipt,
+            "crop_posterior_lineage": "lineage-t20",
+            "crop_worldline_event_id": "evt-crop-t20",
+            "phenology_worldline_event_id": "evt-pheno-t20",
+            "canRenderPixels": False,
+        }
+        frontend_payload = {
+            "version": SURFACES_SCHEMA_VERSION,
+            "surface_schema_version": SURFACES_SCHEMA_VERSION,
+            "intelligence_snapshot_id": snapshot_id,
+            "publication_id": f"pub-{snapshot_id}",
+            "publication_run_id": f"run-{snapshot_id}",
+            "run_id": f"run-{snapshot_id}",
+            "pipeline_state": "terminal_layer10_published",
+            "publication_status": "VALID_NORMAL",
+            "declared_publication_status": "VALID_NORMAL",
+            "render_authorization_version": RENDER_AUTHORIZATION_VERSION,
+            "render_authorizations": {"canopy": {"authorized": True}},
+            "asmae_proof": {"proof_id": f"proof-{snapshot_id}", "status": "valid"},
+            "mode_display_state": {"mode": "scientific"},
+            "source_policy_display_state": {"policy": "standard"},
+            "core_asmae_evidence_state": {"status": "nominal"},
+            "publication_surface_state": {"status": "published"},
+            "surfaces": [{
+                "surface_id": "surface-canopy-vigor",
+                "surface_type": "canopy_vigor",
+                "content_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            }],
+            "evidence_cutoff_at": "2026-09-08T12:00:00+00:00",
+            "scientific_evidence_lineage": {
+                "crop_posterior_lineage": "lineage-t20",
+                "crop_worldline_event_id": "evt-crop-t20",
+                "phenology_worldline_event_id": "evt-pheno-t20",
+            },
+        }
+
+        job_id = f"job-t20-{int(datetime.now(timezone.utc).timestamp()*1000)}"
+        head = publish_canonical_plot_snapshot(
+            tenant_id=self.tenant_id,
+            farm_id=self.farm_id,
+            plot_id=self.plot_id,
+            geometry_hash=self.geometry_hash,
+            snapshot_id=snapshot_id,
+            asmae_result=asmae_result,
+            frontend_payload=frontend_payload,
+            job_id=job_id,
+            manifest_hash="manifest-t20",
+            snapshot_kind="layer10_terminal",
+        )
+
+        # 1. Cold read with force_verify=True succeeds
+        cold_snap = load_latest_plot_snapshot(
+            self.plot_id,
+            tenant_id=self.tenant_id,
+            farm_id=self.farm_id,
+            geometry_hash=self.geometry_hash,
+            force_verify=True,
+        )
+        self.assertIsNotNone(cold_snap)
+        self.assertTrue(cold_snap["validation"]["replayReceiptValid"])
+        self.assertTrue(cold_snap["validation"]["bindingValid"])
+
+        admission = evaluate_snapshot_admission(cold_snap)
+        self.assertTrue(admission["is_valid"])
+
+        # 2. Adversarially tamper with evidence_set_digest in node on disk
+        node_file = Path(head["node_ref"])
+        node_content = json.loads(node_file.read_text(encoding="utf-8"))
+        node_content["bitemporal_replay_receipt"]["evidence_set_digest"] = "sha256:tampered_digest_deadbeef"
+        node_file.write_text(json.dumps(node_content), encoding="utf-8")
+
+        # Cold read with force_verify=True detects tamper
+        tampered_snap = load_latest_plot_snapshot(
+            self.plot_id,
+            tenant_id=self.tenant_id,
+            farm_id=self.farm_id,
+            geometry_hash=self.geometry_hash,
+            force_verify=True,
+        )
+        self.assertIsNotNone(tampered_snap)
+        self.assertFalse(tampered_snap["validation"]["replayReceiptValid"])
+        self.assertFalse(tampered_snap["validation"]["bindingValid"])
+
+        # Admission predicate quarantines tampered snapshot
+        tampered_admission = evaluate_snapshot_admission(tampered_snap)
+        self.assertFalse(tampered_admission["is_valid"])
+        self.assertEqual(tampered_admission["status"], "quarantined")
+        self.assertIn("replayReceiptValid", tampered_admission["invalid_integrity_flags"])
+
+    # =========================================================================
+    # IR03-T21: Real Execution with Two K Cutoffs & Warm Cache Isolation (IR03-V05)
+    # =========================================================================
+    def test_ir03_t21_real_execution_two_k_cutoffs_warm_cache_isolation(self):
+        """Real ASMAE runner executions with two different K cutoffs maintain strict cache isolation."""
+        # Commit archive event valid Day 2, committed Day 3
+        self._commit_worldline_event(
+            "ARCHIVE_POSTERIOR_VALIDATED",
+            2,
+            3,
+            {"archive_posterior": {"geometry_hash": self.geometry_hash, "val": 100}},
+        )
+
+        runner = ASMAERunner()
+        t_req = (self.base_time + timedelta(days=10)).isoformat()
+        k1_req = (self.base_time + timedelta(days=5)).isoformat()
+
+        ctx_k1 = {
+            "plot_id": self.plot_id,
+            "tenant_id": self.tenant_id,
+            "farm_id": self.farm_id,
+            "geometry_hash": self.geometry_hash,
+            "worldline_root": self.worldline_root,
+            "observation_valid_time": t_req,
+            "knowledge_cutoff_time": k1_req,
+            "mode": "quick_visual",
+            "execution_permissions": {"compute_allowed": True, "visual_authority_allowed": True, "diagnostic_allowed": True},
+        }
+
+        # Execution 1 at K1 (Day 5)
+        res_k1 = runner.execute(self.plot_id, "run-t21-k1", ctx_k1, mode="quick_visual")
+        receipt_k1 = res_k1.get("bitemporal_replay_receipt")
+        digest_k1 = receipt_k1["evidence_set_digest"]
+
+        # Commit backfill event valid Day 4, committed Day 15
+        self._commit_worldline_event(
+            "ARCHIVE_POSTERIOR_VALIDATED",
+            4,
+            15,
+            {"archive_posterior": {"geometry_hash": self.geometry_hash, "val": 200}},
+        )
+
+        # Execution 2 at K2 (Day 20)
+        k2_req = (self.base_time + timedelta(days=20)).isoformat()
+        ctx_k2 = dict(ctx_k1)
+        ctx_k2["knowledge_cutoff_time"] = k2_req
+        res_k2 = runner.execute(self.plot_id, "run-t21-k2", ctx_k2, mode="quick_visual")
+        receipt_k2 = res_k2.get("bitemporal_replay_receipt")
+        digest_k2 = receipt_k2["evidence_set_digest"]
+
+        # K1 and K2 digests MUST be different because K2 includes backfilled event
+        self.assertNotEqual(digest_k1, digest_k2)
+
+        # Re-execution at K1 (warm cache scenario) MUST return original digest_k1
+        res_k1_repeat = runner.execute(self.plot_id, "run-t21-k1-repeat", ctx_k1, mode="quick_visual")
+        receipt_k1_repeat = res_k1_repeat.get("bitemporal_replay_receipt")
+        self.assertEqual(receipt_k1_repeat["evidence_set_digest"], digest_k1)
+
 
 if __name__ == "__main__":
     unittest.main()

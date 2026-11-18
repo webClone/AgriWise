@@ -638,6 +638,22 @@ class CanonicalWorldlineService:
                 raise CorruptedWorldlineError(
                     f"Worldline journal missing head watermark for plot {plot_id} while {len(events)} events exist"
                 )
+
+            # 3. Check against durable checkpoints to detect joint head+journal rollback
+            checkpoints_dir = self._plot_dir(plot_id, tenant_id, namespace) / "checkpoints"
+            if checkpoints_dir.exists() and checkpoints_dir.is_dir():
+                for cp_file in checkpoints_dir.glob("*.json"):
+                    try:
+                        cp_data = self._read(cp_file)
+                        cp_seq = int(cp_data.get("sequence") or cp_data.get("head_sequence") or 0)
+                        if cp_seq > head_seq:
+                            raise CorruptedWorldlineError(
+                                f"Worldline journal rollback detected for plot {plot_id}: checkpoint watermark sequence {cp_seq} exceeds current head sequence {head_seq}"
+                            )
+                    except Exception as exc:
+                        if isinstance(exc, CorruptedWorldlineError):
+                            raise
+                        logger.warning("Could not read checkpoint %s: %s", cp_file, exc)
         return events
 
     def select_eligible_events(
@@ -720,32 +736,88 @@ class CanonicalWorldlineService:
                 if ancestor_id in visited_ancestors:
                     continue
                 visited_ancestors.add(ancestor_id)
+
+                if ancestor_id == rec.get("event_id"):
+                    if fail_on_corrupt:
+                        raise CorruptedWorldlineError(f"Causal cycle detected: event {rec.get('event_id')} references itself as parent")
+                    dependency_violation = True
+                    break
+
                 p_path = self._event_path(plot_id, ancestor_id, tenant_id, namespace)
-                if p_path.exists():
-                    try:
-                        p_rec = self._read(p_path)
-                        p_comm_str = p_rec.get("committed_at")
-                        if p_comm_str:
-                            p_comm_dt = _parse_utc_iso(p_comm_str)
-                            if p_comm_dt > k_dt:
-                                logger.warning(
-                                    "Derived event %s references ancestor %s committed after cutoff (%s > %s)",
-                                    rec.get("event_id"), ancestor_id, p_comm_str, k_dt.isoformat()
-                                )
-                                dependency_violation = True
-                                break
-                        # Queue transitive ancestors
-                        for gp_id in p_rec.get("parent_event_ids") or []:
-                            clean_gpid = str(gp_id).strip()
-                            if clean_gpid and clean_gpid not in visited_ancestors:
-                                ancestor_queue.append(clean_gpid)
-                    except Exception as p_exc:
+                if not p_path.exists():
+                    logger.warning(
+                        "Derived event %s references missing ancestor %s; fail closed",
+                        rec.get("event_id"), ancestor_id
+                    )
+                    if fail_on_corrupt:
+                        raise CorruptedWorldlineError(
+                            f"Derived event {rec.get('event_id')} references missing ancestor event {ancestor_id}"
+                        )
+                    dependency_violation = True
+                    break
+
+                try:
+                    p_rec = self._read(p_path)
+                    if not p_rec:
                         if fail_on_corrupt:
                             raise CorruptedWorldlineError(
-                                f"Failed to verify ancestor {ancestor_id} for event {rec.get('event_id')}: {p_exc}"
-                            ) from p_exc
+                                f"Derived event {rec.get('event_id')} references empty/unreadable ancestor {ancestor_id}"
+                            )
                         dependency_violation = True
                         break
+
+                    p_comm_str = p_rec.get("committed_at")
+                    p_val_str = p_rec.get("observation_or_valid_time") or p_rec.get("effective_at")
+                    if p_comm_str:
+                        p_comm_dt = _parse_utc_iso(p_comm_str)
+                        if p_comm_dt > k_dt:
+                            logger.warning(
+                                "Derived event %s references ancestor %s committed after cutoff (%s > %s)",
+                                rec.get("event_id"), ancestor_id, p_comm_str, k_dt.isoformat()
+                            )
+                            dependency_violation = True
+                            break
+
+                    if p_val_str:
+                        p_val_dt = _parse_utc_iso(p_val_str)
+                        if p_val_dt > t_dt:
+                            logger.warning(
+                                "Derived event %s references ancestor %s observed after valid time T (%s > %s)",
+                                rec.get("event_id"), ancestor_id, p_val_str, t_dt.isoformat()
+                            )
+                            dependency_violation = True
+                            break
+
+                    # Check nested provider/BMA calibration/cutoff inside ancestor payload
+                    anc_payload = p_rec.get("payload") or {}
+                    if isinstance(anc_payload, dict):
+                        bma_meta = anc_payload.get("bma_weights") or anc_payload.get("calibration") or {}
+                        if isinstance(bma_meta, dict):
+                            cal_at = bma_meta.get("calibrated_at") or bma_meta.get("derived_at") or bma_meta.get("cutoff_at")
+                            if cal_at:
+                                cal_dt = _parse_utc_iso(cal_at)
+                                if cal_dt > k_dt:
+                                    logger.warning(
+                                        "Derived event %s ancestor %s has nested BMA/calibration derived after cutoff (%s > %s)",
+                                        rec.get("event_id"), ancestor_id, cal_at, k_dt.isoformat()
+                                    )
+                                    dependency_violation = True
+                                    break
+
+                    # Queue transitive ancestors
+                    for gp_id in p_rec.get("parent_event_ids") or []:
+                        clean_gpid = str(gp_id).strip()
+                        if clean_gpid and clean_gpid not in visited_ancestors:
+                            ancestor_queue.append(clean_gpid)
+                except Exception as p_exc:
+                    if fail_on_corrupt:
+                        if isinstance(p_exc, CorruptedWorldlineError):
+                            raise
+                        raise CorruptedWorldlineError(
+                            f"Failed to verify ancestor {ancestor_id} for event {rec.get('event_id')}: {p_exc}"
+                        ) from p_exc
+                    dependency_violation = True
+                    break
             if dependency_violation:
                 continue
 
@@ -1095,7 +1167,7 @@ class CanonicalWorldlineService:
                 namespace,
                 fail_on_corrupt=True,
             )
-            if archive_payload and not context.get("archive_posterior"):
+            if archive_payload:
                 archive = archive_payload.get("archive_posterior")
                 if isinstance(archive, dict) and archive.get("geometry_hash") == geometry_hash:
                     context["archive_posterior"] = archive
@@ -1132,7 +1204,7 @@ class CanonicalWorldlineService:
                 namespace,
                 fail_on_corrupt=True,
             )
-            if crop_payload and not context.get("crop_posterior"):
+            if crop_payload:
                 crop_posterior = crop_payload.get("crop_posterior", {})
                 context["crop_posterior"] = crop_posterior
                 context["crop_posterior_lineage"] = (
