@@ -1,0 +1,64 @@
+"""Bounded engine bridge qualification; this is not full ASMAE integration QA."""
+from datetime import datetime, timezone
+from hashlib import sha256
+
+from services.agribrain.layer05_asmae.resolution.statewise_engine_bridge import build_statewise_engine_support
+from services.agribrain.layer05_asmae.resolution.state_cell_support import EvidenceFootprint, STATE_NAMES
+
+S = 'a' * 64
+BASE = dict(grid_spec={'crs': 'EPSG:32631', 'transform': (0., 10., 0., 20., 0., -10.),
+                       'width': 2, 'height': 2},
+            tenant_id='tenant', farm_id='farm', plot_id='plot', geometry_sha256=S,
+            valid_time='2026-11-18T00:00:00+00:00', knowledge_cutoff='2026-11-19T00:00:00+00:00')
+
+
+def test_b01_no_evidence_gives_no_fine_claims():
+    r = build_statewise_engine_support(**BASE, raster_maps={'vigor': [[.1,.2],[.3,.4]]}, uncertainty_maps={})
+    assert r['certified_1m'] is False
+    assert set(r['effective_resolution_m_by_state']) == set(STATE_NAMES)
+    assert r['effective_resolution_m_by_state']['vigor'] == [[None, None], [None, None]]
+    assert r['spatial_support_class_by_state']['root_zone_water'][0][0] == 'none'
+
+
+def test_b02_grid_mismatch_is_not_reinterpreted_as_science():
+    r = build_statewise_engine_support(**BASE, raster_maps={'vigor': [[.1]*8]*8}, uncertainty_maps={})
+    assert r['status'] == 'unavailable'
+    assert r['reason'] == 'display_resampling_or_grid_shape_mismatch'
+
+
+def test_b03_missing_knowledge_cutoff_blocks_support():
+    kwargs = dict(BASE); kwargs['knowledge_cutoff'] = ''
+    r = build_statewise_engine_support(**kwargs, raster_maps={}, uncertainty_maps={})
+    assert r['status'] == 'unavailable'
+
+
+def test_b04_local_support_separates_states_and_cells():
+    e = EvidenceFootprint(observation_id='qualified-input', source_sha256='b'*64,
+          operator_sha256='c'*64, tenant_id='tenant', farm_id='farm', plot_id='plot',
+          geometry_sha256=S, observation_valid_time='2026-11-18T00:00:00+00:00',
+          committed_at='2026-11-18T10:00:00+00:00', supported_states=('vigor',),
+          bbox=(0.,10.,10.,20.), crs='EPSG:32631', native_resolution_m=5.,
+          psf_fwhm_m=4., observability=.95, calibrated_operator_sha256='d'*64)
+    r = build_statewise_engine_support(**BASE, raster_maps={'vigor': [[.1,.2],[.3,.4]],
+           'root_zone_water': [[.2,.2],[.2,.2]]}, uncertainty_maps={}, qualified_footprints=[e])
+    assert r['effective_resolution_m_by_state']['vigor'][0][0] == 10.
+    assert r['effective_resolution_m_by_state']['vigor'][0][1] is None
+    assert r['effective_resolution_m_by_state']['root_zone_water'][0][0] is None
+    assert not r['certified_1m']
+
+
+def test_b05_unqualified_future_source_is_ignored():
+    e = EvidenceFootprint(observation_id='future', source_sha256='b'*64,
+          operator_sha256='c'*64, tenant_id='tenant', farm_id='farm', plot_id='plot',
+          geometry_sha256=S, observation_valid_time='2026-11-20T00:00:00+00:00',
+          committed_at='2026-11-20T10:00:00+00:00', supported_states=('vigor',),
+          bbox=(0.,10.,10.,20.), crs='EPSG:32631', native_resolution_m=1.,
+          psf_fwhm_m=1., observability=.99, calibrated_operator_sha256='d'*64)
+    r = build_statewise_engine_support(**BASE, raster_maps={'vigor': [[.1,.2],[.3,.4]]},
+           uncertainty_maps={}, qualified_footprints=[e])
+    assert r['effective_resolution_m_by_state']['vigor'][0][0] is None
+
+
+def test_b06_deterministic_support_digest():
+    kwargs = dict(BASE, raster_maps={'vigor': [[.1,.2],[.3,.4]]}, uncertainty_maps={})
+    assert build_statewise_engine_support(**kwargs)['support_records_sha256'] == build_statewise_engine_support(**kwargs)['support_records_sha256']
