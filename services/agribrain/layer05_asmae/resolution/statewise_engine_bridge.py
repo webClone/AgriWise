@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
+from datetime import datetime, timedelta
 from typing import Any, Mapping, Sequence
 
 from .state_cell_support import (
@@ -42,6 +44,19 @@ def build_statewise_engine_support(
                 'authority_status': 'exploratory_only', 'effective_resolution_m_by_state': {}}
     if not all((tenant_id, farm_id, plot_id, geometry_sha256, valid_time, knowledge_cutoff)):
         return {'status': 'unavailable', 'reason': 'unbound_namespace_or_bitemporal_receipt',
+                'authority_status': 'exploratory_only', 'effective_resolution_m_by_state': {}}
+    # A support annotation must never abort the main scientific assessment
+    # because a historical run omitted a qualified SHA/UTC boundary.
+    if re.fullmatch(r'[0-9a-f]{64}', geometry_sha256) is None:
+        return {'status': 'unavailable', 'reason': 'unqualified_geometry_digest',
+                'authority_status': 'exploratory_only', 'effective_resolution_m_by_state': {}}
+    try:
+        for stamp in (valid_time, knowledge_cutoff):
+            value = datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+            if value.tzinfo is None or value.utcoffset() != timedelta(0):
+                raise ValueError('timestamp not UTC')
+    except (ValueError, TypeError, AttributeError):
+        return {'status': 'unavailable', 'reason': 'invalid_bitemporal_boundary',
                 'authority_status': 'exploratory_only', 'effective_resolution_m_by_state': {}}
     transform = grid_spec.get('transform') or ()
     try:
