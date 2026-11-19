@@ -171,7 +171,9 @@ def verify_admission_grant(
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
         from cryptography.exceptions import InvalidSignature
         Ed25519PublicKey.from_public_bytes(policy["public_key"]).verify(signature, data)
-    except (ValueError, TypeError, binascii.Error, ImportError, InvalidSignature):
+    except Exception:
+        # Verification failure, missing cryptography dependency, or bad encoding:
+        # all reject the receipt; none can create authority.
         return False, "invalid_admission_signature"
 
     expected = {
