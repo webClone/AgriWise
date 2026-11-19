@@ -4,7 +4,7 @@ ASMAE Resolution Policy.
 Hard gates and soft rules that constrain the resolution selector.
 
 Policies encode scientific invariants:
-  1. 1m requires explicit certification (retro > 0.75)
+  1. Legacy scoring never certifies 1m without per-state, per-cell evidence
   2. Resolution cannot exceed the sensor's Nyquist limit
   3. If operator quality drops below threshold, demote
   4. Visual and state-update resolutions may differ
