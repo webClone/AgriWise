@@ -233,6 +233,21 @@ class ArchiveBootstrapService:
         elif checkpoint.status == "COMPLETED":
             # Check if target_end has advanced beyond previous target_end
             if _parse_utc_iso(target_end) <= _parse_utc_iso(checkpoint.target_end_date):
+                # Completed checkpoint is not itself proof that journal data survived.
+                # Verify a cold journal read before returning early.
+                all_events = self.worldline.load_all_events(
+                    plot_id, tenant_id, namespace, fail_on_corrupt=True
+                )
+                inventory = [
+                    event for event in all_events
+                    if event.get("event_type") == "ARCHIVE_SCENE_INGESTED"
+                ]
+                if (len(inventory) != checkpoint.total_events_committed
+                        or any(
+                            (event.get("payload") or {}).get("archive_scene", {}).get("geometry_hash")
+                            != geometry_hash for event in inventory
+                        )):
+                    raise RuntimeError("archive_completed_checkpoint_journal_mismatch")
                 return {
                     "status": "COMPLETED",
                     "resumed": False,
