@@ -283,8 +283,8 @@ def test_weak_label_learning_export_biophysical_enrichment():
     assert first["nutrient_response_index"] == 0.80
 
 
-def test_resolution_ladder_promotion_with_archive_retrovalidation():
-    """Verify archive depth and retrovalidation residual R2 >= 0.75 promote resolution beyond 10m."""
+def test_resolution_ladder_retrovalidation_does_not_certify_1m():
+    """Historical skill may rank fine candidates, but it cannot certify local 1m evidence."""
     from services.agribrain.layer05_asmae.schema import ASMAEInput, ASMAESceneRuntime
     from services.agribrain.layer05_asmae.resolution.candidates import generate_candidates
     from services.agribrain.layer05_asmae.resolution.policy import apply_policies
@@ -342,6 +342,9 @@ def test_resolution_ladder_promotion_with_archive_retrovalidation():
         scenes=scenes,
         retro_scores={1: 0.85, 2: 0.88, 5: 0.92, 10: 1.0},
     )
-    assert policy_res.safe_for_1m_claim is True
-    assert policy_res.effective_resolution_m < 10
+    assert policy_res.safe_for_1m_claim is False
+    assert policy_res.effective_resolution_m != 1
+    assert policy_res.research_resolution_m == 1  # research sampling is not certification
+    assert any(d.get("reason") == "missing_qualified_state_cell_1m_evidence"
+               for d in policy_res.demoted_candidates)
 

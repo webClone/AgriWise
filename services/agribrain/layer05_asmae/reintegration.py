@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 from typing import Any, Dict, Mapping, Optional
@@ -23,6 +24,31 @@ def _mapping(value: Any) -> Dict[str, Any]:
             if not str(key).startswith("_")
         }
     return {}
+
+
+def _complete_uncertainty_for_states(states: Any, sigmas: Any) -> bool:
+    """Numerical authority requires complete uncertainty from the same posterior.
+
+    Missing sigma, partial keys, non-finite values, or a covariance object
+    mislabeled as standard deviations cannot be promoted into a numerical
+    record. Zero is allowed only when explicitly supplied, never invented.
+    """
+    if not isinstance(states, dict) or not states or not isinstance(sigmas, dict):
+        return False
+    if set(states) != set(sigmas):
+        return False
+    for key, mean in states.items():
+        sigma = sigmas[key]
+        if not isinstance(key, str) or not key:
+            return False
+        for value in (mean, sigma):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return False
+            if not math.isfinite(float(value)):
+                return False
+        if float(sigma) < 0.0:
+            return False
+    return True
 
 
 def _canonical_worldline_namespace(
@@ -610,55 +636,61 @@ def rebuild_canonical_plot_snapshot(
     if frontend.get("intelligence_snapshot_id") != snapshot_id:
         raise ValueError("frontend snapshot identity was not propagated")
 
-    # Bind deterministic ASMAE numerical record and digest (Gate IR-01)
-    num_rec = (
+    # Gate IR-01 / IR-04: only a complete posterior with its actual
+    # uncertainty may produce numerical authority. Never synthesize sigma=0
+    # or borrow uncertainty from an unrelated representation/source.
+    supplied = (
         result.get("asmae_posterior_numerical_record")
         or (embedded_asmae.get("asmae_posterior_numerical_record") if isinstance(embedded_asmae, dict) else None)
         or (context.get("asmae_posterior_numerical_record") if isinstance(context, dict) else None)
     )
-    vec_hash = (
+    supplied_digest = (
         result.get("asmae_numerical_digest")
-        or (num_rec.get("numerical_vector_hash") if isinstance(num_rec, dict) else None)
         or (embedded_asmae.get("asmae_numerical_digest") if isinstance(embedded_asmae, dict) else None)
     )
-    if num_rec is None:
-        state_means = (
-            result.get("state_means")
-            or result.get("states")
-            or (embedded_asmae.get("state_means") if isinstance(embedded_asmae, dict) else None)
-            or (embedded_asmae.get("states") if isinstance(embedded_asmae, dict) else None)
-        )
-        sigmas = (
-            result.get("sigmas")
-            or result.get("state_covariances")
-            or result.get("uncertainties")
-            or (embedded_asmae.get("sigmas") if isinstance(embedded_asmae, dict) else None)
-            or (embedded_asmae.get("state_covariances") if isinstance(embedded_asmae, dict) else None)
-        )
-        if isinstance(state_means, dict) and state_means:
+    num_rec = None
+    vec_hash = None
+    pairs = []
+    if isinstance(supplied, dict):
+        pairs.append((supplied.get("states"), supplied.get("sigmas"), supplied.get("numerical_vector_hash")))
+    elif supplied is None:
+        pairs.extend((
+            (result.get("state_means") or result.get("states"),
+             result.get("sigmas"), None),
+            ((embedded_asmae.get("state_means") or embedded_asmae.get("states"))
+             if isinstance(embedded_asmae, dict) else None,
+             embedded_asmae.get("sigmas")
+             if isinstance(embedded_asmae, dict) else None, None),
+        ))
+    for state_means, sigmas, asserted_hash in pairs:
+        if not _complete_uncertainty_for_states(state_means, sigmas):
+            continue
+        try:
             try:
-                try:
-                    from services.agribrain.layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
-                except ImportError:
-                    from layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
-                if not isinstance(sigmas, dict):
-                    sigmas = {k: 0.0 for k in state_means}
-                vec_hash = compute_asmae_vector_numerical_hash(state_means, sigmas)
-                num_rec = {
-                    "states": state_means,
-                    "sigmas": sigmas,
-                    "numerical_vector_hash": vec_hash,
-                }
-            except Exception:
-                pass
+                from services.agribrain.layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
+            except ImportError:
+                from layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
+            computed_hash = compute_asmae_vector_numerical_hash(state_means, sigmas)
+        except (ValueError, TypeError, OverflowError):
+            continue
+        # A supplied hash disagreement is evidence of corruption, not a reason
+        # to silently compute a replacement authoritative record.
+        if (asserted_hash and asserted_hash != computed_hash) or (
+            supplied_digest and supplied_digest != computed_hash
+        ):
+            break
+        vec_hash = computed_hash
+        num_rec = {
+            "states": state_means,
+            "sigmas": sigmas,
+            "numerical_vector_hash": computed_hash,
+        }
+        break
 
-    if num_rec is not None and isinstance(num_rec, dict):
-        if not vec_hash:
-            vec_hash = num_rec.get("numerical_vector_hash")
+    if num_rec is not None:
         result["asmae_posterior_numerical_record"] = num_rec
         result["asmae_numerical_digest"] = vec_hash
         result["claims_numerical_authority"] = True
-
         frontend["asmae_posterior_numerical_record"] = num_rec
         frontend["claims_numerical_authority"] = True
         if not isinstance(frontend.get("asmae_proof"), dict):
@@ -666,6 +698,17 @@ def rebuild_canonical_plot_snapshot(
         frontend["asmae_proof"]["numerical_vector_hash"] = vec_hash
         frontend["asmae_proof"].setdefault("proof_id", f"proof-{snapshot_id}")
         frontend["asmae_proof"].setdefault("status", "valid")
+    else:
+        # Preserve diagnostic means if present, but do not claim numerical
+        # authority or serialize a fake exact posterior uncertainty vector.
+        result.pop("asmae_posterior_numerical_record", None)
+        result.pop("asmae_numerical_digest", None)
+        result["claims_numerical_authority"] = False
+        frontend.pop("asmae_posterior_numerical_record", None)
+        frontend["claims_numerical_authority"] = False
+        proof = frontend.get("asmae_proof")
+        if isinstance(proof, dict):
+            proof.pop("numerical_vector_hash", None)
 
     frontend["worker_reintegration"] = {
         "contract_version": REINTEGRATION_CONTRACT_VERSION,

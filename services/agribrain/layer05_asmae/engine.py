@@ -2247,6 +2247,13 @@ class ASMAEEngine:
 
 
 
+        # IR-04: preserve native scientific rasters before quick_visual may
+        # rebind the public maps to display-only, bilinearly resampled grids.
+        # These are references to the original graph-grid dictionaries;
+        # display resampling constructs new dictionaries below.
+        statewise_scientific_raster_maps = raster_maps
+        statewise_scientific_uncertainty_maps = uncertainty_maps
+
         # P0-3: quick_visual bilinear grid resampling to match display-grid
         if is_quick_visual and not is_degraded and inp.source_policy != "hybrid":
             target_h, target_w = None, None
@@ -2279,35 +2286,39 @@ class ASMAEEngine:
                 for name, grid in raster_maps.items():
                     orig_maps[name] = grid
                 
-                # Resample raster_maps
-                resampled_raster_maps = {}
-                for name, grid in raster_maps.items():
-                    resampled_raster_maps[name] = self._bilinear_resample(grid, target_h, target_w)
-                raster_maps = resampled_raster_maps
-
-                # Resample uncertainty_maps
-                resampled_unc = {}
-                for name, grid in uncertainty_maps.items():
-                    resampled_unc[name] = self._bilinear_resample(grid, target_h, target_w)
-                uncertainty_maps = resampled_unc
-
-                # Resample confidence_maps
-                resampled_conf = {}
-                for name, grid in confidence_maps.items():
-                    resampled_conf[name] = self._bilinear_resample(grid, target_h, target_w)
-                confidence_maps = resampled_conf
-
-                # Resample retrovalidation_maps
-                resampled_retro = {}
-                for name, grid in retrovalidation_maps.items():
-                    resampled_retro[name] = self._bilinear_resample(grid, target_h, target_w)
-                retrovalidation_maps = resampled_retro
-
-                # Resample bma_maps
-                resampled_bma = {}
-                for name, grid in bma_maps.items():
-                    resampled_bma[name] = self._bilinear_resample(grid, target_h, target_w)
-                bma_maps = resampled_bma
+                # Quick-visual interpolation is display-only. Do not replace
+                # the canonical graph-grid rasters, uncertainty, confidence,
+                # retrovalidation, or BMA maps with interpolated pixels: those
+                # products are exported alongside the native graph grid_spec.
+                display_only_rasters = {
+                    name: self._bilinear_resample(grid, target_h, target_w)
+                    for name, grid in raster_maps.items()
+                }
+                display_only_uncertainty = {
+                    name: self._bilinear_resample(grid, target_h, target_w)
+                    for name, grid in uncertainty_maps.items()
+                }
+                display_only_confidence = {
+                    name: self._bilinear_resample(grid, target_h, target_w)
+                    for name, grid in confidence_maps.items()
+                }
+                display_only_retro = {
+                    name: self._bilinear_resample(grid, target_h, target_w)
+                    for name, grid in retrovalidation_maps.items()
+                }
+                display_only_bma = {
+                    name: self._bilinear_resample(grid, target_h, target_w)
+                    for name, grid in bma_maps.items()
+                }
+                diagnostics["display_only_overlays"] = {
+                    "role": "scouting_display_only_not_scientific_grid",
+                    "resampled_from_microzone": True,
+                    "raster_maps": display_only_rasters,
+                    "uncertainty_maps": display_only_uncertainty,
+                    "confidence_maps": display_only_confidence,
+                    "retrovalidation_maps": display_only_retro,
+                    "bma_maps": display_only_bma,
+                }
 
                 orig_h = len(next(iter(orig_maps.values()))) if orig_maps else 3
                 orig_w = len(next(iter(orig_maps.values()))[0]) if orig_maps else 3
@@ -2437,10 +2448,11 @@ class ASMAEEngine:
                 approval_reason_summary = {}
 
                 # Resolve resolution evidence details locally
-                has_local_evidence = (
-                    (getattr(self, "_resolution_evidence", None) is not None and self._resolution_evidence.evidence_status == "available")
-                    or getattr(scene_stack_status, "current_1m_approval_allowed", False)
-                )
+                # Neither a plot-wide evidence status nor a scene-wide flag
+                # proves *state-and-cell-specific* subpixel resolution. Until
+                # the calibrated per-cell footprint adapter is admitted,
+                # disable scientific fine-resolution certification.
+                has_local_evidence = False
 
                 def is_valid_float(v):
                     if v is None:
@@ -2508,15 +2520,21 @@ class ASMAEEngine:
                         if physics_geometry_passed_1m and archive_passed and real_evidence_passed:
                             one_meter_advisory_mask[r][c] = True
                             advisory_approved_cells += 1
-                            effective_resolution_map[r][c] = 1.0
-                            if has_local_evidence:
-                                one_meter_certified_mask[r][c] = True
-                                certified_approved_cells += 1
+                            # Fine research visualization remains possible,
+                            # but effective scientific resolution is *not*
+                            # improved by model fit, archive score or a display
+                            # resampling operation.
+                            effective_resolution_map[r][c] = max(10.0, float(selected_res_m))
+                            approval_reasons_by_cell[r][c].append(
+                                "state_cell_fine_evidence_unverified"
+                            )
                         elif physics_geometry_passed_sub5m and real_evidence_passed:
                             one_meter_advisory_mask[r][c] = False
                             model_assisted_2_5m_mask[r][c] = True
                             generalized_5m_mask[r][c] = False
-                            effective_resolution_map[r][c] = float(selected_res_m)
+                            # Keep model-assisted display diagnostic separate
+                            # from independent, state-specific effective scale.
+                            effective_resolution_map[r][c] = max(10.0, float(selected_res_m))
                             model_assisted_2_5m_cells += 1
                             cell_rejections = physics_rejections_1m + archive_rejections
                             approval_reasons_by_cell[r][c].extend(cell_rejections)
@@ -2709,6 +2727,33 @@ class ASMAEEngine:
         grid_spec["transform_convention"] = "GDAL"
         grid_spec["metric_grid_authoritative"] = True
 
+        # IR-04/IR-08: evaluate 13 state-specific support layers on the
+        # *scientific graph* (never on the resampled quick-visual grid).
+        # No native scene or plot-level boolean is treated as an independently
+        # qualified source footprint. An authoritative upstream footprint
+        # adapter must be established before local fine detail is credited.
+        from .resolution.statewise_engine_bridge import build_statewise_engine_support
+        replay_receipt = getattr(inp, "bitemporal_replay_receipt", {}) or {}
+        replay_query = replay_receipt.get("query_parameters", {}) if isinstance(replay_receipt, dict) else {}
+        if not isinstance(replay_query, dict):
+            replay_query = {}
+        statewise_support = build_statewise_engine_support(
+            raster_maps=statewise_scientific_raster_maps,
+            uncertainty_maps=statewise_scientific_uncertainty_maps,
+            grid_spec=grid_spec,
+            geometry_sha256=str(getattr(inp, "geometry_hash", "") or ""),
+            tenant_id=str(getattr(inp, "tenant_id", "") or ""),
+            farm_id=str(getattr(inp, "farm_id", "") or ""),
+            plot_id=str(inp.plot_id),
+            valid_time=str(replay_query.get("observation_valid_time") or ""),
+            knowledge_cutoff=str(replay_query.get("knowledge_cutoff_time") or ""),
+            qualified_footprints=(),
+        )
+        diagnostics["statewise_spatial_support"] = statewise_support
+        diagnostics["legacy_effective_resolution_map_role"] = (
+            "advisory_display_only_not_state_cell_scientific_proof"
+        )
+
         # Build asmae_evidence_state
         s2_count = 0
         s1_count = 0
@@ -2843,10 +2888,9 @@ class ASMAEEngine:
             if one_meter_advisory_coverage_pct < 60.0:
                 asmae_evidence_state["current_1m_approval_allowed"] = False
 
-        has_local_evidence = (
-            (getattr(self, "_resolution_evidence", None) is not None and self._resolution_evidence.evidence_status == "available")
-            or getattr(scene_stack_status, "current_1m_approval_allowed", False)
-        )
+        # A global scene/plot approval is never valid per-cell certification.
+        # True support must originate in the state-cell proof ledger.
+        has_local_evidence = False
         if not has_local_evidence:
             asmae_evidence_state["current_1m_approval_allowed"] = False
 

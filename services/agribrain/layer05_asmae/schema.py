@@ -135,6 +135,12 @@ class ASMAEInput:
     # ensembles when this scientific resource ceiling is exceeded.
     resource_memory_limit_mb: Optional[float] = None
 
+    # IR-04: namespace and authoritative replay boundary for spatial support.
+    # Absent values disable statewise evidence claims, never default to now.
+    tenant_id: str = ""
+    farm_id: str = ""
+    bitemporal_replay_receipt: dict = field(default_factory=dict)
+
     def __post_init__(self) -> None:
         if self.mode not in ASMAE_MODES:
             raise ValueError(
@@ -560,6 +566,11 @@ class ASMAEOutput:
             'retro_score': (self.diagnostics or {}).get('retro_score'),
             'bma_status': (self.diagnostics or {}).get('bma_status'),
         })
+        # Bind state-cell support only when an actual, qualified graph evaluation
+        # exists. Unavailable/diagnostic results must not change old identities.
+        statewise_sha = ((self.diagnostics or {}).get('statewise_spatial_support') or {}).get('support_records_sha256')
+        if statewise_sha:
+            payload['statewise_support_records_sha256'] = statewise_sha
         raw = json.dumps(payload, sort_keys=True, default=str).encode('utf-8')
         return hashlib.sha256(raw).hexdigest()
 
