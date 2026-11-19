@@ -2247,6 +2247,13 @@ class ASMAEEngine:
 
 
 
+        # IR-04: preserve native scientific rasters before quick_visual may
+        # rebind the public maps to display-only, bilinearly resampled grids.
+        # These are references to the original graph-grid dictionaries;
+        # display resampling constructs new dictionaries below.
+        statewise_scientific_raster_maps = raster_maps
+        statewise_scientific_uncertainty_maps = uncertainty_maps
+
         # P0-3: quick_visual bilinear grid resampling to match display-grid
         if is_quick_visual and not is_degraded and inp.source_policy != "hybrid":
             target_h, target_w = None, None
@@ -2727,8 +2734,8 @@ class ASMAEEngine:
         if not isinstance(replay_query, dict):
             replay_query = {}
         statewise_support = build_statewise_engine_support(
-            raster_maps=raster_maps,
-            uncertainty_maps=uncertainty_maps,
+            raster_maps=statewise_scientific_raster_maps,
+            uncertainty_maps=statewise_scientific_uncertainty_maps,
             grid_spec=grid_spec,
             geometry_sha256=str(getattr(inp, "geometry_hash", "") or ""),
             tenant_id=str(getattr(inp, "tenant_id", "") or ""),
