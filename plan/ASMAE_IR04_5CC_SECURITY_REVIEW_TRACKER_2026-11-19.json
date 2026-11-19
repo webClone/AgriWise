@@ -1,0 +1,51 @@
+{
+  "date": "2026-11-19",
+  "origin": "5ccca4aab4717e245fadf36bb13c7a8e0d0be40e",
+  "parent": "8c357ad3d4433abd04b9de9a66f29f03452afa68",
+  "branch": "feat/akaloris-asmae-ir04-admission-trust-review-20261119",
+  "pr32": "draft_unmodified",
+  "pr30": "unmodified",
+  "main": "unmodified",
+  "original_findings": 238,
+  "independently_closed": 0,
+  "findings": [
+    {
+      "id": "IR04-5CC-SEC-01",
+      "priority": "P0",
+      "status": "source_mitigated_qualification_pending"
+    },
+    {
+      "id": "IR04-5CC-P1-02",
+      "priority": "P1",
+      "status": "journal_reconciliation_implemented_signed_cutoff_authority_pending"
+    },
+    {
+      "id": "IR04-5CC-P1-03",
+      "priority": "P1",
+      "status": "source_mitigated_qualification_pending"
+    },
+    {
+      "id": "IR04-5CC-P2-04",
+      "priority": "P2",
+      "status": "versioned_non_rfc8785_profile_implemented_qualification_pending"
+    },
+    {
+      "id": "ASMAE-022/145",
+      "priority": "P0",
+      "status": "legacy_hmac_source_still_open"
+    }
+  ],
+  "evidence": {
+    "new_tests": "written_not_run",
+    "full_layer05": "not_rerun",
+    "frontend": "not_rerun",
+    "typescript": "not_rerun",
+    "worker_cold": "not_rerun"
+  },
+  "holds": {
+    "certified_1m": true,
+    "numerical_publication": true,
+    "actuator": true,
+    "adaptive_IR08": true
+  }
+}
