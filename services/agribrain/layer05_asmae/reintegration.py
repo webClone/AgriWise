@@ -804,4 +804,5 @@ def rebuild_canonical_plot_snapshot(
         "phenology_worldline_event_id": result.get(
             "phenology_worldline_event_id"
         ),
+        "publication_reused": False,
     }

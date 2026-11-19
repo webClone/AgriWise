@@ -2755,12 +2755,22 @@ class ASMAEEngine:
                         valid_time = latest_acq.replace(tzinfo=timezone.utc).isoformat()
 
         if not knowledge_cutoff:
-            if replay_receipt.get("knowledge_watermark"):
-                knowledge_cutoff = str(replay_receipt["knowledge_watermark"])
+            # IR04-665-02: Require verified Worldline replay receipt or authenticated journal watermark.
+            # Never fall back to inp.as_of_utc, which lacks durable journal authority.
+            if (
+                isinstance(replay_receipt, dict)
+                and replay_receipt.get("contract_version") == "canonical_bitemporal_replay_receipt_v1"
+            ):
+                query_params = replay_receipt.get("query_parameters", {})
+                k_candidate = (
+                    query_params.get("knowledge_cutoff_time")
+                    or replay_receipt.get("knowledge_watermark")
+                    or query_params.get("knowledge_cutoff_K")
+                )
+                if k_candidate:
+                    knowledge_cutoff = str(k_candidate)
             elif getattr(inp, "journal_watermark", None):
                 knowledge_cutoff = str(inp.journal_watermark)
-            elif getattr(inp, "as_of_utc", None):
-                knowledge_cutoff = str(inp.as_of_utc)
 
         # IR04-R03: Adapt admitted observation scenes to qualified evidence footprints
         tenant_str = str(getattr(inp, "tenant_id", "") or "")

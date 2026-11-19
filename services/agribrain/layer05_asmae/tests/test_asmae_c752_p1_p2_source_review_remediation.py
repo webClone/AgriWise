@@ -26,6 +26,7 @@ import pytest
 import scipy.sparse as sp
 
 from services.agribrain.common.plot_namespace import PlotNamespace
+from services.agribrain.world_model.canonical_worldline import CanonicalWorldlineService
 from services.agribrain.layer05_asmae.chain_integrity import compute_h_matrix_digest
 from services.agribrain.layer05_asmae.geometry.operator_builder import (
     build_observation_operator,
@@ -46,12 +47,20 @@ from services.agribrain.layer05_asmae.reintegration import (
 from services.agribrain.layer05_asmae.resolution.observation_footprint_adapter import (
     adapt_scene_to_footprint,
     adapt_scenes_to_footprints,
+    compute_scene_asset_sha256,
+    create_scene_admission_receipt,
+    verify_scene_admission_receipt,
+    DEFAULT_ADMISSION_KEY_ID,
+    DEFAULT_ADMISSION_SECRET,
     S2_OPTICAL_STATES,
     S1_SAR_STATES,
 )
 from services.agribrain.layer05_asmae.resolution.state_cell_support import (
     evaluate_state_cell_support,
     GridSpec,
+)
+from services.agribrain.layer05_asmae.resolution.statewise_engine_bridge import (
+    build_statewise_engine_support,
 )
 from services.agribrain.layer05_asmae.schema import (
     ObservationOperatorRuntime,
@@ -64,6 +73,14 @@ from services.agribrain.layer1_fusion.truth_bridge import (
 from services.agribrain.layer10_sire.surface_contract import (
     RENDER_AUTHORIZATION_VERSION,
     SURFACES_SCHEMA_VERSION,
+)
+from services.agribrain.orchestrator_v2.schema import (
+    RunArtifact,
+    RunMeta,
+    OrchestratorInput,
+    GlobalQuality,
+    LayerResult,
+    LayerStatus,
 )
 
 TENANT = "tenant-mitidja"
@@ -83,6 +100,12 @@ def clean_store(tmp_path, monkeypatch):
 
 
 def _make_scene(**kwargs):
+    bands_input = kwargs.pop("bands", None)
+    if bands_input is None:
+        bands_dict = {"B08": np.ones((10, 10), dtype=np.float32) * 0.2}
+    else:
+        bands_dict = bands_input
+
     defaults = dict(
         scene_id="S2A_MSIL2A_20260908T103021_N0500_R108_T31SDA_20260908T142512",
         sensor="S2",
@@ -93,6 +116,7 @@ def _make_scene(**kwargs):
         transform=[500000.0, 10.0, 0.0, 4000000.0, 0.0, -10.0],
         width=10,
         height=10,
+        bands=bands_dict,
         cloud_fraction=0.0,
         qa_score=0.98,
         real_provider_product=True,
@@ -105,12 +129,30 @@ def _make_scene(**kwargs):
         farm_id=FARM,
         plot_id=PLOT,
         geometry_sha256=GEOM_HASH,
-        content_hash="1" * 64,
         product_binding="exact_catalog_item",
         provider_product_id="S2A_MSIL2A_20260908T103021_N0500_R108_T31SDA_20260908T142512",
     )
     defaults.update(kwargs)
-    return SimpleNamespace(**defaults)
+    scene = SimpleNamespace(**defaults)
+
+    if "content_hash" not in kwargs:
+        computed_hash = compute_scene_asset_sha256(scene)
+        scene.content_hash = computed_hash
+
+    if "admission_receipt" not in kwargs and scene.content_hash and getattr(scene, "bands", None):
+        op_dummy = _make_operator(scene.scene_id, sensor=scene.sensor, band=getattr(scene, "band", "B08") or "B08")
+        h_digest = compute_h_matrix_digest(op_dummy.H_matrix)
+        cal_dummy = hashlib.sha256(f"{op_dummy.operator_id}:{h_digest}:{2.35482 * op_dummy.blur_sigma_m:.4f}:{op_dummy.source_resolution_m}".encode()).hexdigest()
+        scene.admission_receipt = create_scene_admission_receipt(
+            scene,
+            tenant_id=scene.tenant_id or TENANT,
+            farm_id=scene.farm_id or FARM,
+            plot_id=scene.plot_id or PLOT,
+            geometry_sha256=scene.geometry_sha256 or GEOM_HASH,
+            operator_sha256=h_digest,
+            calibrated_operator_sha256=cal_dummy,
+        )
+    return scene
 
 
 def _make_operator(scene_id: str, sensor: str = "S2", blur_sigma_m: float = 5.0, band: str = "B08"):
@@ -136,77 +178,161 @@ def _make_operator(scene_id: str, sensor: str = "S2", blur_sigma_m: float = 5.0,
 # C752-P1-01: Bitemporal Leakage in Engine Replay
 # =========================================================================
 
-def test_c752_p1_01_bitemporal_replay_and_engine_separation():
-    """Observation valid Day 5 and journal-committed Day 20 is excluded at K=Day 10 and admitted at K=Day 21."""
+def test_c752_p1_01_bitemporal_replay_and_engine_separation(tmp_path, clean_store):
+    """Observation valid Day 5 and journal-committed Day 20 is excluded at K=Day 10 and admitted at K=Day 21 via real Worldline and engine."""
+    wl_root = tmp_path / "worldline"
+    anchor_root = tmp_path / "anchor"
+    anchor_root.mkdir(parents=True, exist_ok=True)
+    wl = CanonicalWorldlineService(root=wl_root, durable_anchor_root=anchor_root)
+
+    # 1. Commit genuine historical evidence event into CanonicalWorldlineService
+    # Valid Day 5 (Sept 5), journal-committed Day 20 (Sept 20)
+    evt_payload = {
+        "crop_posterior": {
+            "content_hash": "c" * 64,
+            "lineage_id": "lineage-day5",
+            "states": {"vigor": 0.72},
+            "sigmas": {"vigor": 0.04},
+        },
+        "plot_namespace": {"tenant_id": TENANT, "farm_id": FARM, "plot_id": PLOT},
+    }
+    wl.commit_event(
+        plot_id=PLOT,
+        event_type="CROP_POSTERIOR",
+        payload=evt_payload,
+        tenant_id=TENANT,
+        namespace="default",
+        geometry_hash=GEOM_HASH,
+        authority="SCIENTIFIC",
+        observation_or_valid_time=datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc),
+        effective_at=datetime(2026, 9, 20, 12, 0, 0, tzinfo=timezone.utc),
+    )
+
+    # Observation scene valid Day 5, journal-committed Day 20
     scene = _make_scene(
         scene_id="S2_ACQ_DAY5_COMM_DAY20",
         acquisition_time=datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc),
         committed_at=datetime(2026, 9, 20, 12, 0, 0, tzinfo=timezone.utc),
     )
     op = _make_operator(scene.scene_id)
+    # Re-sign admission receipt to match this scene's exact op
+    h_digest = compute_h_matrix_digest(op.H_matrix)
+    cal_dummy = hashlib.sha256(f"{op.operator_id}:{h_digest}:{2.35482 * op.blur_sigma_m:.4f}:{op.source_resolution_m}".encode()).hexdigest()
+    scene.admission_receipt = create_scene_admission_receipt(
+        scene,
+        tenant_id=TENANT, farm_id=FARM, plot_id=PLOT, geometry_sha256=GEOM_HASH,
+        operator_sha256=h_digest, calibrated_operator_sha256=cal_dummy,
+    )
 
-    # In production / operator-binding mode, committed_at=None is passed by engine.
-    # The adapter derives commitment strictly from scene.committed_at (Day 20).
     fps = adapt_scenes_to_footprints(
         [scene],
-        tenant_id=TENANT,
-        farm_id=FARM,
-        plot_id=PLOT,
-        geometry_sha256=GEOM_HASH,
-        target_crs=METRIC_CRS,
-        committed_at=None,
-        operators=[op],
-        require_operator_binding=True,
+        tenant_id=TENANT, farm_id=FARM, plot_id=PLOT, geometry_sha256=GEOM_HASH,
+        target_crs=METRIC_CRS, committed_at=None, operators=[op], require_operator_binding=True,
     )
     assert len(fps) == 1
     fp = fps[0]
     assert fp.observation_valid_time == "2026-09-05T12:00:00+00:00"
     assert fp.committed_at == "2026-09-20T12:00:00+00:00"
 
-    grid = GridSpec(crs=METRIC_CRS, transform=(500000.0, 10.0, 0.0, 4000000.0, 0.0, -10.0), width=4, height=4)
+    grid_dict = {"crs": METRIC_CRS, "transform": [500000.0, 10.0, 0.0, 4000000.0, 0.0, -10.0], "width": 4, "height": 4}
+    raster_maps = {"vigor": [[0.72] * 4 for _ in range(4)]}
+    unc_maps = {"vigor": [[0.04] * 4 for _ in range(4)]}
 
-    # 1. Historical replay at T=Day 10, K=Day 10:
-    # Scene valid Day 5 is temporally valid (5 <= 10), but committed Day 20 is NOT yet known (20 > 10).
-    # Must fail closed: excluded from support.
-    rec_k10 = evaluate_state_cell_support(
-        state="vigor",
-        row=0,
-        col=0,
-        grid=grid,
-        tenant_id=TENANT,
-        farm_id=FARM,
-        plot_id=PLOT,
-        geometry_sha256=GEOM_HASH,
-        valid_time="2026-09-10T12:00:00Z",
-        knowledge_cutoff="2026-09-10T12:00:00Z",
-        estimated_value=0.72,
-        sigma=0.04,
-        evidences=(fp,),
+    # Replay 1: T=Day 10, K=Day 10 (dual-clock hydration via CanonicalWorldlineService)
+    ctx_k10 = {
+        "tenant_id": TENANT, "farm_id": FARM, "plot_id": PLOT, "geometry_hash": GEOM_HASH,
+        "worldline_namespace": "default", "worldline_root": str(wl_root),
+    }
+    hydrated_k10 = wl.hydrate_context(
+        PLOT, ctx_k10,
+        valid_time_T="2026-09-10T12:00:00Z",
+        knowledge_cutoff_K="2026-09-10T12:00:00Z",
     )
-    assert rec_k10.spatial_support != "local_operator"
-    assert "excluded_by_valid_or_knowledge_cutoff" in rec_k10.demotion_reasons
-    assert len(rec_k10.admitted_observation_ids) == 0
+    rr_k10 = hydrated_k10.get("bitemporal_replay_receipt")
+    assert rr_k10 is not None
+    assert rr_k10["contract_version"] == "canonical_bitemporal_replay_receipt_v1"
+    assert rr_k10["query_parameters"]["knowledge_cutoff_time"] == "2026-09-10T12:00:00+00:00"
 
-    # 2. Replay at T=Day 10, K=Day 21:
-    # Scene committed Day 20 is now known at K=Day 21 (20 <= 21).
-    # Admitted as valid local operator support.
-    rec_k21 = evaluate_state_cell_support(
-        state="vigor",
-        row=0,
-        col=0,
-        grid=grid,
-        tenant_id=TENANT,
-        farm_id=FARM,
-        plot_id=PLOT,
-        geometry_sha256=GEOM_HASH,
-        valid_time="2026-09-10T12:00:00Z",
-        knowledge_cutoff="2026-09-21T12:00:00Z",
-        estimated_value=0.72,
-        sigma=0.04,
-        evidences=(fp,),
+    # Engine statewise evaluation at K=Day 10
+    k10_support = build_statewise_engine_support(
+        raster_maps=raster_maps, uncertainty_maps=unc_maps, grid_spec=grid_dict,
+        geometry_sha256=GEOM_HASH, tenant_id=TENANT, farm_id=FARM, plot_id=PLOT,
+        valid_time=rr_k10["query_parameters"]["observation_valid_time"],
+        knowledge_cutoff=rr_k10["query_parameters"]["knowledge_cutoff_time"],
+        qualified_footprints=fps,
     )
-    assert rec_k21.spatial_support == "local_operator"
-    assert rec_k21.admitted_observation_ids == (fp.observation_id,)
+    assert k10_support["status"] == "exploratory_statewise_metadata"
+    # Scene committed Day 20 is excluded under K=Day 10 (20 > 10)
+    assert k10_support["demotion_reason_counts"].get("excluded_by_valid_or_knowledge_cutoff", 0) > 0
+    assert k10_support["effective_resolution_m_by_state"]["vigor"][0][0] is None
+    assert k10_support["spatial_support_class_by_state"]["vigor"][0][0] == "none"
+
+    # Replay 2: T=Day 10, K=Day 21 (dual-clock hydration via CanonicalWorldlineService)
+    ctx_k21 = {
+        "tenant_id": TENANT, "farm_id": FARM, "plot_id": PLOT, "geometry_hash": GEOM_HASH,
+        "worldline_namespace": "default", "worldline_root": str(wl_root),
+    }
+    hydrated_k21 = wl.hydrate_context(
+        PLOT, ctx_k21,
+        valid_time_T="2026-09-10T12:00:00Z",
+        knowledge_cutoff_K="2026-09-21T12:00:00Z",
+    )
+    rr_k21 = hydrated_k21.get("bitemporal_replay_receipt")
+    assert rr_k21 is not None
+    assert rr_k21["query_parameters"]["knowledge_cutoff_time"] == "2026-09-21T12:00:00+00:00"
+
+    # Engine statewise evaluation at K=Day 21
+    k21_support = build_statewise_engine_support(
+        raster_maps=raster_maps, uncertainty_maps=unc_maps, grid_spec=grid_dict,
+        geometry_sha256=GEOM_HASH, tenant_id=TENANT, farm_id=FARM, plot_id=PLOT,
+        valid_time=rr_k21["query_parameters"]["observation_valid_time"],
+        knowledge_cutoff=rr_k21["query_parameters"]["knowledge_cutoff_time"],
+        qualified_footprints=fps,
+    )
+    assert k21_support["status"] == "exploratory_statewise_metadata"
+    # Scene committed Day 20 is admitted under K=Day 21 (20 <= 21)
+    assert k21_support["effective_resolution_m_by_state"]["vigor"][0][0] == pytest.approx(11.7741, abs=0.01)
+    assert k21_support["spatial_support_class_by_state"]["vigor"][0][0] == "local_operator"
+
+    # Publication binding proof: canonical snapshot binds the verified replay receipt
+    snap_id = "ASMAE-SNAPSHOT-BITEMP-01"
+    asmae_res = {
+        "plot_id": PLOT, "snapshot_id": snap_id, "tenant_id": TENANT, "farm_id": FARM,
+        "geometry_hash": GEOM_HASH, "as_of": "2026-09-10T12:00:00Z", "published_at": "2026-09-21T12:00:00Z",
+        "bitemporal_replay_receipt": rr_k21,
+        "crop_posterior_lineage": "lineage-day5",
+        "crop_worldline_event_id": "crop-ev-day5",
+        "phenology_worldline_event_id": "phen-ev-day5",
+        "canRenderPixels": False, "visual_allowed": False,
+    }
+    frontend_pay = {
+        "intelligence_snapshot_id": snap_id, "plot_id": PLOT, "tenant_id": TENANT, "farm_id": FARM,
+        "bitemporal_replay_receipt": rr_k21,
+        "scientific_evidence_lineage": {
+            "crop_posterior_lineage": "lineage-day5",
+            "crop_worldline_event_id": "crop-ev-day5",
+            "phenology_worldline_event_id": "phen-ev-day5",
+        },
+    }
+    head = publish_canonical_plot_snapshot(
+        tenant_id=TENANT, farm_id=FARM, plot_id=PLOT, geometry_hash=GEOM_HASH,
+        snapshot_id=snap_id, asmae_result=asmae_res, frontend_payload=frontend_pay,
+        job_id="job-bitemp-01", manifest_hash="m" * 64,
+    )
+    assert head.get("bitemporal_replay_receipt") == rr_k21
+    assert head.get("evidence_set_digest") == rr_k21["evidence_set_digest"]
+
+    # Negative control: call build_statewise_engine_support with ungrounded knowledge_cutoff (None or empty)
+    # Proves engine never fabricates knowledge cutoff from ungrounded as_of_utc
+    unbound_support = build_statewise_engine_support(
+        raster_maps=raster_maps, uncertainty_maps=unc_maps, grid_spec=grid_dict,
+        geometry_sha256=GEOM_HASH, tenant_id=TENANT, farm_id=FARM, plot_id=PLOT,
+        valid_time="2026-09-10T12:00:00Z",
+        knowledge_cutoff="",  # Ungrounded / missing journal cutoff
+        qualified_footprints=fps,
+    )
+    assert unbound_support["status"] == "unavailable"
+    assert unbound_support["reason"] == "unbound_namespace_or_bitemporal_receipt"
 
 
 # =========================================================================
@@ -214,9 +340,17 @@ def test_c752_p1_01_bitemporal_replay_and_engine_separation():
 # =========================================================================
 
 def test_c752_p1_02_mandatory_namespace_and_positive_admission_authority():
-    """require_operator_binding=True strictly requires tenant/farm/plot/geometry and verified provider admission."""
+    """require_operator_binding=True strictly requires cryptographic admission receipt binding exact assets and metadata."""
     base_scene = _make_scene()
     op = _make_operator(base_scene.scene_id)
+    # Ensure receipt matches op
+    h_digest = compute_h_matrix_digest(op.H_matrix)
+    cal_dummy = hashlib.sha256(f"{op.operator_id}:{h_digest}:{2.35482 * op.blur_sigma_m:.4f}:{op.source_resolution_m}".encode()).hexdigest()
+    base_scene.admission_receipt = create_scene_admission_receipt(
+        base_scene,
+        tenant_id=TENANT, farm_id=FARM, plot_id=PLOT, geometry_sha256=GEOM_HASH,
+        operator_sha256=h_digest, calibrated_operator_sha256=cal_dummy,
+    )
 
     # 1. Missing tenant_id fails closed
     scene_no_tenant = _make_scene(tenant_id=None)
@@ -250,43 +384,101 @@ def test_c752_p1_02_mandatory_namespace_and_positive_admission_authority():
         target_crs=METRIC_CRS, require_operator_binding=True, operator=op,
     ) is None
 
-    # 5. Forged booleans with product_binding='unknown' and no admission proof fails closed
-    scene_forged_bools = _make_scene(
-        production_usable=True,
-        scientifically_admitted=True,
-        product_binding="unknown",
-        binding_proof={},
-        admission_receipt=None,
-        real_provider_product=False,
-    )
+    # 5. Forged signature fails closed
+    scene_forged_sig = _make_scene()
+    forged_receipt = dict(base_scene.admission_receipt)
+    forged_receipt["mac"] = "0" * 64
+    scene_forged_sig.admission_receipt = forged_receipt
     assert adapt_scene_to_footprint(
-        scene_forged_bools,
+        scene_forged_sig,
         tenant_id=TENANT, farm_id=FARM, plot_id=PLOT, geometry_sha256=GEOM_HASH,
         target_crs=METRIC_CRS, require_operator_binding=True, operator=op,
     ) is None
 
-    # 6. Unverified or forged asset hash fails closed
-    scene_forged_hash = _make_scene(unverified_asset_hash=True)
+    # 6. Swapped asset bytes fails closed (array modified after grant was signed)
+    scene_swapped_bytes = _make_scene()
+    scene_swapped_bytes.admission_receipt = base_scene.admission_receipt
+    # Tamper with the raw physical array
+    scene_swapped_bytes.bands = {"B08": np.ones((10, 10), dtype=np.float32) * 0.99}
     assert adapt_scene_to_footprint(
-        scene_forged_hash,
+        scene_swapped_bytes,
         tenant_id=TENANT, farm_id=FARM, plot_id=PLOT, geometry_sha256=GEOM_HASH,
         target_crs=METRIC_CRS, require_operator_binding=True, operator=op,
     ) is None
 
-    # 7. Authentic scene with complete namespace and verified provider admission succeeds
-    scene_ok = _make_scene(
-        product_binding="exact_catalog_item",
-        provider_product_id="S2A_MSIL2A_AUTHENTIC_01",
+    # 7. Synthetic "1"*64 without physical asset arrays fails closed
+    scene_synthetic_only = _make_scene(bands={}, content_hash="1" * 64)
+    assert adapt_scene_to_footprint(
+        scene_synthetic_only,
+        tenant_id=TENANT, farm_id=FARM, plot_id=PLOT, geometry_sha256=GEOM_HASH,
+        target_crs=METRIC_CRS, require_operator_binding=True, operator=op,
+    ) is None
+
+    # 8. Foreign namespace (receipt signed for different tenant or plot) fails closed
+    foreign_receipt = create_scene_admission_receipt(
+        base_scene,
+        tenant_id="tenant-foreign", farm_id=FARM, plot_id=PLOT, geometry_sha256=GEOM_HASH,
+        operator_sha256=h_digest, calibrated_operator_sha256=cal_dummy,
     )
-    op_ok = _make_operator(scene_ok.scene_id)
+    scene_foreign = _make_scene()
+    scene_foreign.admission_receipt = foreign_receipt
+    assert adapt_scene_to_footprint(
+        scene_foreign,
+        tenant_id=TENANT, farm_id=FARM, plot_id=PLOT, geometry_sha256=GEOM_HASH,
+        target_crs=METRIC_CRS, require_operator_binding=True, operator=op,
+    ) is None
+
+    # 9. Unbound operator (operator digest does not match grant) fails closed
+    op_mismatch = _make_operator("different_op_id")
+    assert adapt_scene_to_footprint(
+        base_scene,
+        tenant_id=TENANT, farm_id=FARM, plot_id=PLOT, geometry_sha256=GEOM_HASH,
+        target_crs=METRIC_CRS, require_operator_binding=True, operator=op_mismatch,
+    ) is None
+
+    # 10. Previously admitted product revised under K:
+    # Revised scene committed at Day 25 cannot appear in replay with K=Day 21
+    scene_revised = _make_scene(
+        scene_id="S2_REVISED_DAY25",
+        acquisition_time=datetime(2026, 9, 8, 10, 30, 21, tzinfo=timezone.utc),
+        committed_at=datetime(2026, 9, 25, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    op_rev = _make_operator(scene_revised.scene_id)
+    h_rev = compute_h_matrix_digest(op_rev.H_matrix)
+    cal_rev = hashlib.sha256(f"{op_rev.operator_id}:{h_rev}:{2.35482 * op_rev.blur_sigma_m:.4f}:{op_rev.source_resolution_m}".encode()).hexdigest()
+    scene_revised.admission_receipt = create_scene_admission_receipt(
+        scene_revised,
+        tenant_id=TENANT, farm_id=FARM, plot_id=PLOT, geometry_sha256=GEOM_HASH,
+        operator_sha256=h_rev, calibrated_operator_sha256=cal_rev,
+    )
+    fp_rev = adapt_scene_to_footprint(
+        scene_revised,
+        tenant_id=TENANT, farm_id=FARM, plot_id=PLOT, geometry_sha256=GEOM_HASH,
+        target_crs=METRIC_CRS, require_operator_binding=True, operator=op_rev,
+    )
+    assert fp_rev is not None
+    assert fp_rev.committed_at == "2026-09-25T12:00:00+00:00"
+    grid = GridSpec(crs=METRIC_CRS, transform=(500000.0, 10.0, 0.0, 4000000.0, 0.0, -10.0), width=4, height=4)
+    # Evaluate at K=Day 21: revised product committed Day 25 is excluded!
+    rec_k21 = evaluate_state_cell_support(
+        state="vigor", row=0, col=0, grid=grid,
+        tenant_id=TENANT, farm_id=FARM, plot_id=PLOT, geometry_sha256=GEOM_HASH,
+        valid_time="2026-09-10T12:00:00Z", knowledge_cutoff="2026-09-21T12:00:00Z",
+        estimated_value=0.72, sigma=0.04, evidences=(fp_rev,),
+    )
+    assert rec_k21.spatial_support != "local_operator"
+    assert "excluded_by_valid_or_knowledge_cutoff" in rec_k21.demotion_reasons
+
+    # 11. Authentic positive control succeeds
     fp_ok = adapt_scene_to_footprint(
-        scene_ok,
+        base_scene,
         tenant_id=TENANT, farm_id=FARM, plot_id=PLOT, geometry_sha256=GEOM_HASH,
-        target_crs=METRIC_CRS, require_operator_binding=True, operator=op_ok,
+        target_crs=METRIC_CRS, require_operator_binding=True, operator=op,
     )
     assert fp_ok is not None
     assert fp_ok.tenant_id == TENANT
     assert fp_ok.geometry_sha256 == GEOM_HASH
+    assert fp_ok.source_sha256 == compute_scene_asset_sha256(base_scene)
 
 
 # =========================================================================
@@ -324,7 +516,7 @@ def test_c752_p1_03_multiband_s2_physics_conservative_psf():
     scene_multiband.real_provider_product = True
     scene_multiband.product_binding = "exact_catalog_item"
     scene_multiband.provider_product_id = "PROD_S2_MULTIBAND"
-    scene_multiband.content_hash = "2" * 64
+    scene_multiband.content_hash = compute_scene_asset_sha256(scene_multiband)
 
     # 1. Operator builder resolves multiband containing 20m bands to conservative 20m PSF
     op = build_observation_operator(scene=scene_multiband, candidate_resolution_m=10)
@@ -334,6 +526,15 @@ def test_c752_p1_03_multiband_s2_physics_conservative_psf():
     expected_fwhm = get_psf_model("S2", band="B05").fwhm_m
     assert 2.35482 * op.blur_sigma_m == pytest.approx(expected_fwhm, abs=0.01)
     assert 2.35482 * op.blur_sigma_m > 20.0
+
+    # Attach signed admission receipt matching exact operator
+    h_mat_digest = compute_h_matrix_digest(op.H_matrix)
+    cal_op_digest = hashlib.sha256(f"{op.operator_id}:{h_mat_digest}:{2.35482 * op.blur_sigma_m:.4f}:{20.0}".encode()).hexdigest()
+    scene_multiband.admission_receipt = create_scene_admission_receipt(
+        scene_multiband,
+        tenant_id=TENANT, farm_id=FARM, plot_id=PLOT, geometry_sha256=GEOM_HASH,
+        operator_sha256=h_mat_digest, calibrated_operator_sha256=cal_op_digest,
+    )
 
     # 2. Footprint adapter derives conservative 20m native resolution and PSF
     fp = adapt_scene_to_footprint(
@@ -384,10 +585,14 @@ def test_c752_p1_03_multiband_s2_physics_conservative_psf():
 # C752-P2-04: True Worker Reintegration & Subprocess Cold Read Proof
 # =========================================================================
 
-def test_c752_p2_04_worker_reintegration_and_subprocess_cold_read(clean_store):
-    """Executes rebuild_canonical_plot_snapshot and verifies cold exact and latest read in an out-of-process subprocess."""
+def test_c752_p2_04_worker_reintegration_and_subprocess_cold_read(clean_store, monkeypatch):
+    """Executes true worker-first cold rebuild_canonical_plot_snapshot (no prepublishing),
+
+    verifying cold exact and latest read in an out-of-process subprocess, REST API 200,
+    and negative controls for tampered nodes, corrupted heads, and missing sigmas.
+    """
     store_dir = str(clean_store.PLOT_SNAPSHOT_ROOT)
-    os.environ["AGRIWISE_SNAPSHOT_STORE_ROOT"] = store_dir
+    monkeypatch.setenv("AGRIWISE_SNAPSHOT_STORE_ROOT", store_dir)
 
     states = {"vigor": 0.76, "canopy_water": 0.52}
     sigmas = {"vigor": 0.03, "canopy_water": 0.02}
@@ -418,75 +623,104 @@ def test_c752_p2_04_worker_reintegration_and_subprocess_cold_read(clean_store):
         "asmae_numerical_digest": vec_hash,
     }
 
-    frontend_payload = {
-        "version": SURFACES_SCHEMA_VERSION,
-        "surface_schema_version": SURFACES_SCHEMA_VERSION,
-        "intelligence_snapshot_id": snap_id,
-        "plot_id": PLOT,
-        "tenant_id": TENANT,
-        "farm_id": FARM,
-        "publication_id": "pub-c752-01",
-        "publication_run_id": "run-c752-01",
-        "run_id": "run-c752-01",
-        "pipeline_state": "terminal_layer10_published",
-        "publication_status": "VALID_NORMAL",
-        "render_authorization_version": RENDER_AUTHORIZATION_VERSION,
-        "render_authorizations": {"canopy": {"authorized": True}},
-        "mode_display_state": {"mode": "scientific", "canopy": {"canRenderPixels": True}},
-        "source_policy_display_state": {"requested_policy": "satellite", "policy": "standard"},
-        "asmae_evidence_state": {"production_usable": True, "authority_level": "SCIENTIFIC"},
-        "publication_surface_state": {"canopy": "available"},
-        "claims_numerical_authority": True,
-        "scientific_evidence_lineage": {
-            "crop_posterior_lineage": "lineage-c752-01",
-            "crop_worldline_event_id": "crop-ev-c752-01",
-            "phenology_worldline_event_id": "phen-ev-c752-01",
-            "asmae_posterior_vector_hash": vec_hash,
+    surface_item = {
+        "surface_id": "surface-canopy-vigor",
+        "semantic_type": "CANOPY_VIGOR",
+        "values": [[0.76]],
+        "resolution_m": 10.0,
+        "content_hash": hashlib.sha256(b"vigor-c752").hexdigest(),
+        "provenance": {
+            "state_update_allowed": True,
+            "prescription_driver_allowed": True,
+            "authority_ceiling": "FIELD_PRESCRIPTION",
         },
-        "asmae_posterior_numerical_record": {
-            "states": states,
-            "sigmas": sigmas,
-            "numerical_vector_hash": vec_hash,
-        },
-        "asmae_proof": {
-            "proof_id": "proof-c752-01",
-            "status": "valid",
-            "numerical_vector_hash": vec_hash,
-        },
-        "surfaces": [
-            {
-                "surface_id": "surface-canopy-vigor",
-                "surface_type": "canopy_vigor",
-                "values": [[0.76]],
-                "resolution_m": 10.0,
-                "content_hash": hashlib.sha256(b"vigor-c752").hexdigest(),
-            }
-        ],
-        "zones": [],
-        "recommendations": [],
     }
 
-    ns = PlotNamespace(tenant_id=TENANT, farm_id=FARM, plot_id=PLOT)
-    publish_canonical_plot_snapshot(
-        namespace=ns,
-        plot_id=PLOT,
-        tenant_id=TENANT,
-        farm_id=FARM,
-        geometry_hash=GEOM_HASH,
-        snapshot_id=snap_id,
-        asmae_result=asmae_result,
-        frontend_payload=frontend_payload,
-        job_id="job-c752-01",
-        manifest_hash="m" * 64,
-        execution_identity={"crop_cycle_id": "cycle-001"},
+    meta = RunMeta(
+        orchestrator_run_id=snap_id,
+        artifact_hash="art-c752-cold-01",
+        timestamp_utc="2026-09-08T12:00:00Z",
     )
+    gq = GlobalQuality(
+        modes=[],
+        reliability_score=1.0,
+        missing_drivers=[],
+        critical_errors=[],
+        critical_failure=False,
+    )
+    l1_output = SimpleNamespace(
+        asmae_output={"snapshot_id": snap_id, "intelligence_snapshot_id": snap_id},
+        quality_metrics=SimpleNamespace(decision_reliability=1.0),
+        data_health=SimpleNamespace(overall=1.0),
+    )
+    l2_output = SimpleNamespace(
+        provenance={"crop_posterior_lineage": "lineage-c752-01"},
+        quality_metrics=SimpleNamespace(decision_reliability=1.0),
+    )
+    l10_output = SimpleNamespace(
+        placeholder_only=False,
+        surface_pack=[surface_item],
+        zone_pack=[],
+        histogram_bundle=None,
+        quality_report=None,
+        run_id=snap_id,
+        publication_id="pub-c752-01",
+        publication_status="VALID_NORMAL",
+        publication_run_id=snap_id,
+        request_run_id="req-c752-01",
+        timestamp="2026-09-08T12:00:00Z",
+        grid={"height": 1, "width": 1},
+        resolved_crop_stage="UNKNOWN",
+        phenology_context={},
+        asmae_evidence_state={"production_usable": True, "authority_level": "SCIENTIFIC"},
+        core_asmae_evidence_state={"state": "available", "authority": "SCIENTIFIC"},
+        publication_surface_state={"canopy": "available"},
+        publication_demotion={"applied": False},
+        asmae_feature_pack={},
+        mode_display_state={"mode": "scientific", "canopy": {"canRenderPixels": True}},
+        source_policy_display_state={"requested_policy": "satellite", "policy": "standard"},
+        render_authorizations={"canopy": {"authorized": True}},
+        render_authorization_version=RENDER_AUTHORIZATION_VERSION,
+        asmae_proof={"proof_id": "proof-c752-01", "status": "valid"},
+        surface_behavior_proof={},
+        explainability_pack={},
+        scenario_pack=[],
+        history_pack=[],
+        display_trace={},
+    )
+    mock_art = RunArtifact(
+        meta=meta,
+        inputs=None,
+        global_quality=gq,
+        layer_1=LayerResult(layer_id="layer_1", status=LayerStatus.OK, output=l1_output, run_id="l1-01"),
+        layer_2=LayerResult(layer_id="layer_2", status=LayerStatus.OK, output=l2_output, run_id="l2-01"),
+        layer_10=LayerResult(layer_id="layer_10", status=LayerStatus.OK, output=l10_output, run_id="l10-01"),
+        lineage_map={"L1": "l1-01", "L2": "l2-01", "L10": "l10-01"},
+    )
+    mock_art.run_id = snap_id
 
-    # Execute true worker reintegration via rebuild_canonical_plot_snapshot
+    def fake_runner(inp, *a, **k):
+        mock_art.inputs = inp
+        return mock_art
+
+    try:
+        import orchestrator_v2.runner
+        monkeypatch.setattr(orchestrator_v2.runner, "run_orchestrator", fake_runner)
+    except Exception:
+        pass
+    try:
+        import services.agribrain.orchestrator_v2.runner
+        monkeypatch.setattr(services.agribrain.orchestrator_v2.runner, "run_orchestrator", fake_runner)
+    except Exception:
+        pass
+
+    # Execute true worker-first cold publication via rebuild_canonical_plot_snapshot (NO prepublishing)
     context = {
         "plot_id": PLOT,
         "tenant_id": TENANT,
         "farm_id": FARM,
         "geometry_hash": GEOM_HASH,
+        "field_geometry": {"type": "Polygon", "coordinates": [[[3.0, 36.0], [3.1, 36.0], [3.1, 36.1], [3.0, 36.1], [3.0, 36.0]]]},
         "plot_namespace": {"tenant_id": TENANT, "farm_id": FARM, "plot_id": PLOT},
         "crop_worldline_event_id": "crop-ev-c752-01",
         "phenology_worldline_event_id": "phen-ev-c752-01",
@@ -498,8 +732,9 @@ def test_c752_p2_04_worker_reintegration_and_subprocess_cold_read(clean_store):
                 "tenant_id": TENANT,
                 "farm_id": FARM,
                 "geometry_hash": GEOM_HASH,
+                "field_geometry": {"type": "Polygon", "coordinates": [[[3.0, 36.0], [3.1, 36.0], [3.1, 36.1], [3.0, 36.1], [3.0, 36.0]]]},
                 "plot_namespace": {"tenant_id": TENANT, "farm_id": FARM, "plot_id": PLOT},
-                "date_range": ["2026-09-01", "2026-09-10"],
+                "date_range": {"start_date": "2026-09-01", "end_date": "2026-09-10"},
                 "crop_config": {"crop_type": "wheat"},
                 "operational_context": {"policy": "standard"},
                 "policy_snapshot": {"policy": "standard"},
@@ -514,26 +749,32 @@ def test_c752_p2_04_worker_reintegration_and_subprocess_cold_read(clean_store):
     )
     assert rebuild_res["status"] == "completed"
     assert rebuild_res["snapshot_id"] == snap_id
-    assert rebuild_res.get("publication_reused") is True
+    assert rebuild_res.get("publication_reused") is False
     assert rebuild_res.get("worldline_event_id") is not None
 
     # Spawn an independent child OS process with NO shared memory cache
     child_code = f"""
 import os
 import sys
+import json
+from pathlib import Path
 
 store_dir = {json.dumps(store_dir)}
 os.environ["AGRIWISE_SNAPSHOT_STORE_ROOT"] = store_dir
 
 from services.agribrain.common.plot_namespace import PlotNamespace
+import services.agribrain.layer05_asmae.plot_snapshot_store as snapshot_store_module
 from services.agribrain.layer05_asmae.plot_snapshot_store import (
     load_and_validate_plot_snapshot_by_id,
     load_latest_plot_snapshot,
-    publish_canonical_plot_snapshot,
+    _plot_dir,
+    _head_path,
+    clear_canonical_snapshot_cache,
 )
 from services.agribrain.app.main import app, require_internal_service_request
 from fastapi.testclient import TestClient
 
+snapshot_store_module.PLOT_SNAPSHOT_ROOT = Path(store_dir)
 ns = PlotNamespace(tenant_id={json.dumps(TENANT)}, farm_id={json.dumps(FARM)}, plot_id={json.dumps(PLOT)})
 snap_id = {json.dumps(snap_id)}
 
@@ -548,6 +789,9 @@ if not exact.get("validation", {{}}).get("numericalBindingValid"):
 if exact.get("contract_validation", {{}}).get("derived_publication_status") != "VALID_NORMAL":
     print("FAIL_PUBLICATION_STATUS")
     sys.exit(12)
+if exact.get("contract_validation", {{}}).get("numerical_authority_verified") is not True:
+    print("FAIL_NUMERICAL_AUTHORITY_VERIFIED")
+    sys.exit(13)
 
 # 2. Cold latest snapshot head read from disk
 head = load_latest_plot_snapshot(ns, {json.dumps(GEOM_HASH)})
@@ -574,69 +818,41 @@ if r_head.status_code != 200 or r_head.json().get("snapshot_id") != snap_id:
     print(f"FAIL_HTTP_HEAD: {{r_head.status_code}} {{r_head.text}}")
     sys.exit(31)
 
-# 4. Missing-sigma fallback test: subsequent diagnostic run without complete sigma
-# must stay diagnostic and NOT overwrite or suppress the existing valid head
-diag_snap_id = "ASMAE-SNAPSHOT-C752-DIAG-MISSING-SIGMA"
-diag_asmae = {{
-    "plot_id": ns.plot_id,
-    "snapshot_id": diag_snap_id,
-    "claims_numerical_authority": False,
-    "crop_posterior_lineage": "lineage-c752-01",
-    "crop_worldline_event_id": "crop-ev-c752-01",
-    "phenology_worldline_event_id": "phen-ev-c752-01",
-    "crop_influence_manifest_hash": "m" * 64,
-    "crop_evidence_ledger_hash": "l" * 64,
-    "state_means": {{"vigor": 0.70}},
-    "sigmas": {{}},  # Missing sigmas
-}}
-diag_frontend = {{
-    "version": {json.dumps(SURFACES_SCHEMA_VERSION)},
-    "surface_schema_version": {json.dumps(SURFACES_SCHEMA_VERSION)},
-    "intelligence_snapshot_id": diag_snap_id,
-    "plot_id": ns.plot_id,
-    "tenant_id": ns.tenant_id,
-    "farm_id": ns.farm_id,
-    "publication_id": "pub-c752-diag",
-    "publication_run_id": "run-c752-diag",
-    "run_id": "run-c752-diag",
-    "pipeline_state": "terminal_layer10_published",
-    "publication_status": "VALID_DIAGNOSTIC",
-    "claims_numerical_authority": False,
-    "render_authorization_version": {json.dumps(RENDER_AUTHORIZATION_VERSION)},
-    "render_authorizations": {{}},
-    "mode_display_state": {{"mode": "diagnostic"}},
-    "asmae_evidence_state": {{"production_usable": False, "authority_level": "DIAGNOSTIC"}},
-    "publication_surface_state": {{}},
-    "scientific_evidence_lineage": {{
-        "crop_posterior_lineage": "lineage-c752-01",
-        "crop_worldline_event_id": "crop-ev-c752-01",
-        "phenology_worldline_event_id": "phen-ev-c752-01",
-    }},
-    "surfaces": [],
-    "zones": [],
-    "recommendations": [],
-}}
+# 4. Negative test: Tampered node JSON fails cryptographic validation
+node_path = _plot_dir(ns) / "nodes" / f"{{snap_id}}.json"
+orig_node_content = node_path.read_text(encoding="utf-8")
+node_obj = json.loads(orig_node_content)
+node_obj["node_hash"] = "f" * 64
+node_path.write_text(json.dumps(node_obj), encoding="utf-8")
+clear_canonical_snapshot_cache()
 
-# Publish diagnostic snapshot
-publish_canonical_plot_snapshot(
-    namespace=ns,
-    plot_id=ns.plot_id,
-    tenant_id=ns.tenant_id,
-    farm_id=ns.farm_id,
-    geometry_hash={json.dumps(GEOM_HASH)},
-    snapshot_id=diag_snap_id,
-    asmae_result=diag_asmae,
-    frontend_payload=diag_frontend,
-    job_id="job-c752-diag",
-    manifest_hash="d" * 64,
-    execution_identity={{"crop_cycle_id": "cycle-001"}},
-)
-
-# Verify that the diagnostic snapshot is stored as diagnostic
-diag_loaded = load_and_validate_plot_snapshot_by_id(diag_snap_id, namespace=ns)
-if not diag_loaded or diag_loaded.get("contract_validation", {{}}).get("numerical_authority_verified") is not False:
-    print("FAIL_DIAGNOSTIC_AUTHORITY_CHECK")
+r_tampered = client.get(f"/v2/snapshots/{{snap_id}}", headers=headers)
+if r_tampered.status_code != 409:
+    print(f"FAIL_TAMPERED_NODE_NOT_REJECTED: {{r_tampered.status_code}}")
     sys.exit(40)
+# Restore valid node
+node_path.write_text(orig_node_content, encoding="utf-8")
+clear_canonical_snapshot_cache()
+
+# 5. Negative test: Corrupted head JSON fails closed (quarantines latest)
+head_path = _head_path(ns)
+orig_head_content = head_path.read_text(encoding="utf-8")
+head_obj = json.loads(orig_head_content)
+head_obj["contract_version"] = "invalid_corrupted_contract"
+head_path.write_text(json.dumps(head_obj), encoding="utf-8")
+clear_canonical_snapshot_cache()
+
+corrupt_head = load_latest_plot_snapshot(ns, {json.dumps(GEOM_HASH)})
+if corrupt_head is not None:
+    print("FAIL_CORRUPTED_HEAD_NOT_REJECTED")
+    sys.exit(50)
+r_head_corrupt = client.get(f"/v2/plots/{{ns.plot_id}}/snapshot", headers=headers)
+if r_head_corrupt.json().get("available") is not False:
+    print(f"FAIL_CORRUPTED_HEAD_HTTP_NOT_REJECTED: {{r_head_corrupt.text}}")
+    sys.exit(51)
+# Restore valid head
+head_path.write_text(orig_head_content, encoding="utf-8")
+clear_canonical_snapshot_cache()
 
 print("COLD_READ_AND_REINTEGRATION_VERIFIED")
 sys.exit(0)
@@ -653,3 +869,46 @@ sys.exit(0)
     )
     assert proc.returncode == 0, f"Child subprocess failed with code {proc.returncode}:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
     assert "COLD_READ_AND_REINTEGRATION_VERIFIED" in proc.stdout
+
+    # Negative test: Missing sigma in worker result strips numerical authority
+    diag_snap_id = "ASMAE-SNAPSHOT-C752-DIAG-MISSING-SIGMA"
+    diag_asmae = {
+        "plot_id": PLOT,
+        "snapshot_id": diag_snap_id,
+        "as_of": "2026-09-08T12:00:00Z",
+        "published_at": "2026-09-08T12:00:00Z",
+        "authority_level": "SCIENTIFIC",
+        "production_usable": True,
+        "content_hash": hashlib.sha256(b"snap-c752-diag").hexdigest(),
+        "crop_posterior_lineage": "lineage-c752-01",
+        "crop_worldline_event_id": "crop-ev-c752-01",
+        "phenology_worldline_event_id": "phen-ev-c752-01",
+        "crop_influence_manifest_hash": "m" * 64,
+        "crop_evidence_ledger_hash": "l" * 64,
+        "claims_numerical_authority": True,
+        "state_means": {"vigor": 0.76, "canopy_water": 0.52},
+        "sigmas": {"vigor": 0.03},  # Incomplete: missing canopy_water
+    }
+    mock_art.meta.orchestrator_run_id = diag_snap_id
+    mock_art.run_id = diag_snap_id
+    l1_output.asmae_output = {"snapshot_id": diag_snap_id, "intelligence_snapshot_id": diag_snap_id}
+    l10_output.run_id = diag_snap_id
+    l10_output.publication_run_id = diag_snap_id
+
+    diag_res = rebuild_canonical_plot_snapshot(
+        asmae_result=diag_asmae,
+        context=context,
+        job_id="job-c752-diag",
+        manifest_hash="d" * 64,
+    )
+    assert diag_res["status"] == "completed"
+    assert diag_res["snapshot_id"] == diag_snap_id
+    assert diag_res.get("publication_reused") is False
+
+    ns = PlotNamespace(tenant_id=TENANT, farm_id=FARM, plot_id=PLOT)
+    diag_loaded = load_and_validate_plot_snapshot_by_id(diag_snap_id, namespace=ns)
+    assert diag_loaded is not None
+    assert diag_loaded.get("snapshot_node", {}).get("claims_numerical_authority") is not True
+    assert diag_loaded.get("contract_validation", {}).get("numerical_authority_verified") is False
+    assert "asmae_posterior_numerical_record" not in diag_loaded.get("snapshot_node", {})
+

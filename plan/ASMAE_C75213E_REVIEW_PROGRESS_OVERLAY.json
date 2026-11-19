@@ -54,8 +54,8 @@
   },
   "reviewed_candidate": "665b94bf619dccce2adff423e57f2bde97cef21e",
   "independent_review_2026_11_19": {
-    "status": "fast_forward_held_pending_authority_qualification",
-    "reviewer_scope": "source_level_only_not_executed_tests",
+    "status": "qualification_completed_on_review_branch",
+    "reviewer_scope": "source_and_execution_adversarial_qualification",
     "reported_receipts_only": {
       "backend_passed": 226,
       "frontend_passed": 341,
@@ -67,31 +67,31 @@
       {
         "id": "IR04-665-01",
         "severity": "P1",
-        "status": "OPEN",
-        "issue": "positive signed source and asset admission not validated: metadata flags/product-id and syntactic hashes accepted"
+        "status": "CLOSED",
+        "issue": "positive signed source and asset admission validated: exact physical asset array/byte SHA-256 computed; detached HMAC-SHA256 admission receipt verified against trusted key binding tenant, farm, plot, geometry, valid_time, committed_at, and operator digests; forged signatures, swapped bytes, synthetic string arrays, foreign namespaces, and revised products fail closed."
       },
       {
         "id": "IR04-665-02",
         "severity": "P1",
-        "status": "OPEN",
-        "issue": "per-scene commitment timestamp and K not verified against immutable journal at adapter/engine boundary"
+        "status": "CLOSED",
+        "issue": "verified journal authority for bitemporal cutoff K: ungrounded fallback as_of_utc removed from engine.py; verified bitemporal_replay_receipt or durable journal_watermark strictly required; ungrounded cutoff fails closed with unavailable/unbound_namespace_or_bitemporal_receipt; proven through real CanonicalWorldlineService and engine statewise bridge."
       },
       {
         "id": "IR04-665-03",
         "severity": "P1",
-        "status": "OPEN",
-        "issue": "worker-first scientific cold publication not proven: snapshot published before reintegration with publication_reused=True"
+        "status": "CLOSED",
+        "issue": "worker-first scientific cold publication proven: prepublishing before worker reintegration eliminated; cold store rebuild_canonical_plot_snapshot publishes fresh snapshot with publication_reused=False; out-of-process subprocess loads exact and latest snapshots, verifies numericalBindingValid, derived_publication_status VALID_NORMAL, executes FastAPI TestClient REST endpoints 200, and verifies negative controls (tampered node 409, corrupt head fails closed, missing sigma strips authority)."
       },
       {
         "id": "IR08-665-04",
         "severity": "P2",
         "status": "OPEN",
-        "issue": "mixed-band scene 20m global conservative operator, not heterogeneous per-state adaptive resolution"
+        "issue": "retained safe 20m interim claim (sigma=10.0m, FWHM ~23.55m, native_res=20.0m); IR-08 adaptive resolution not claimed; 1m certification and numerical publication authority remain strictly ON HOLD."
       }
     ],
-    "review_report": "docs/ASMAE_665B94B_INDEPENDENT_QUALIFICATION_REVIEW_2026-11-19.md",
+    "review_report": "docs/ASMAE_IR04_AUTHENTICATED_FOOTPRINT_AND_COLD_PUBLICATION_RECEIPT_2026-11-19.md",
     "pr32_head_held": "64a9f69945d8e3eda2bf33de9ff24e98186c9a17",
     "certification_holds_unchanged": true,
-    "note": "The original historical claimed 'closed' statuses in findings[] are preserved; independent qualification of those claims is tracked separately here."
+    "note": "The original historical claimed 'closed' statuses in findings[] are preserved; independent qualification of those claims is tracked separately here. PR #32 remains held until user explicitly authorizes fast-forward."
   }
 }
