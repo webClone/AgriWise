@@ -2732,45 +2732,24 @@ class ASMAEEngine:
         from .resolution.statewise_engine_bridge import build_statewise_engine_support
         from .resolution.observation_footprint_adapter import adapt_scenes_to_footprints
 
+        # IR04-5CC: Reconcile an incoming replay receipt with the authoritative
+        # durable Worldline journal. Caller-supplied T/K values are NOT trusted.
+        # No acquisition-time, wall-clock, or bare watermark fallback may mint
+        # scientific state-cell resolution support.
+        from .resolution.bitemporal_receipt_verifier import (
+            verify_bitemporal_replay_receipt,
+        )
         replay_receipt = getattr(inp, "bitemporal_replay_receipt", {}) or {}
-        replay_query = replay_receipt.get("query_parameters", {}) if isinstance(replay_receipt, dict) else {}
-        if not isinstance(replay_query, dict):
-            replay_query = {}
-
-        valid_time = str(replay_query.get("observation_valid_time") or "")
-        knowledge_cutoff = str(replay_query.get("knowledge_cutoff_time") or "")
-
-        # IR04-R04: Derive temporal boundary strictly from verified committed observations and durable journal watermarks
-        if not valid_time:
-            if production_scenes:
-                acq_candidates = [
-                    getattr(s, "acquisition_time", None) for s in production_scenes
-                    if getattr(s, "acquisition_time", None) is not None
-                ]
-                if acq_candidates:
-                    latest_acq = max(acq_candidates)
-                    if hasattr(latest_acq, "tzinfo") and latest_acq.tzinfo is not None:
-                        valid_time = latest_acq.astimezone(timezone.utc).isoformat()
-                    else:
-                        valid_time = latest_acq.replace(tzinfo=timezone.utc).isoformat()
-
-        if not knowledge_cutoff:
-            # IR04-665-02: Require verified Worldline replay receipt or authenticated journal watermark.
-            # Never fall back to inp.as_of_utc, which lacks durable journal authority.
-            if (
-                isinstance(replay_receipt, dict)
-                and replay_receipt.get("contract_version") == "canonical_bitemporal_replay_receipt_v1"
-            ):
-                query_params = replay_receipt.get("query_parameters", {})
-                k_candidate = (
-                    query_params.get("knowledge_cutoff_time")
-                    or replay_receipt.get("knowledge_watermark")
-                    or query_params.get("knowledge_cutoff_K")
-                )
-                if k_candidate:
-                    knowledge_cutoff = str(k_candidate)
-            elif getattr(inp, "journal_watermark", None):
-                knowledge_cutoff = str(inp.journal_watermark)
+        verified_T, verified_K, journal_reason = verify_bitemporal_replay_receipt(
+            replay_receipt,
+            tenant_id=str(getattr(inp, "tenant_id", "") or ""),
+            plot_id=str(inp.plot_id),
+            geometry_sha256=str(getattr(inp, "geometry_hash", "") or ""),
+            worldline_namespace=str(getattr(inp, "worldline_namespace", "") or ""),
+        )
+        valid_time = verified_T or ""
+        knowledge_cutoff = verified_K or ""
+        diagnostics["statewise_bitemporal_authority"] = journal_reason
 
         # IR04-R03: Adapt admitted observation scenes to qualified evidence footprints
         tenant_str = str(getattr(inp, "tenant_id", "") or "")
