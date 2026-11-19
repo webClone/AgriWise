@@ -150,7 +150,7 @@ export default function WorkspaceSpatialCanvas({
           <span>
             ASMAE State <strong>{activeAsmaeAvailability.state.name}</strong>{" "}
             {activeAsmaeAvailability.canonicalStatus === "PLOT_ESTIMATE" && activeAsmaeAvailability.mean !== null
-              ? `has an admitted plot-level scalar estimate (${activeAsmaeAvailability.mean}${activeAsmaeAvailability.sigma !== null ? ` ± ${activeAsmaeAvailability.sigma}` : " (uncertainty unavailable)"} ${activeAsmaeAvailability.state.unit}). Full-field spatial raster withheld.`
+              ? `has an admitted plot-level estimate of ${activeAsmaeAvailability.mean} ${activeAsmaeAvailability.state.unit}${activeAsmaeAvailability.sigma !== null ? ` (σ = ${activeAsmaeAvailability.sigma} ${activeAsmaeAvailability.state.unit})` : " (uncertainty not provided)"}. Full-field spatial raster withheld.`
               : activeAsmaeAvailability.canonicalStatus === "BLOCKED"
                 ? "has a blocked scientific publication or authority for this context. No scientific estimate or raster is authorized."
                 : activeAsmaeAvailability.canonicalStatus === "UNAVAILABLE"
