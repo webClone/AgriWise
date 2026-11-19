@@ -7,11 +7,11 @@
   "frozen_original_findings": 238,
   "new_original_findings_closed": 0,
   "reported_test_counts": {
-    "layer05_passed": 227,
+    "layer05_passed": 228,
     "layer05_deselected": 1,
     "frontend_passed": 341,
     "typescript_errors": 0,
-    "acceptance_remediation_tests": 5
+    "acceptance_remediation_tests": 6
   },
   "certification_holds": {
     "one_meter": true,
@@ -19,7 +19,7 @@
     "actuator": true
   },
   "independent_security_review_2026_11_19": {
-    "status": "security_remediation_completed_on_review_branch",
+    "status": "security_and_trust_root_remediation_completed_on_review_branch",
     "reviewer_scope": "source_and_execution_adversarial_qualification",
     "qualification_gates": [
       {
@@ -45,6 +45,12 @@
         "severity": "P2",
         "status": "locally_remediated_awaiting_independent_remote_qualification",
         "issue": "Canonical RFC 8785 JSON Canonicalization Scheme (JCS): replaced ad-hoc Python dictionary dumps with strict RFC 8785 serialization (canonical_grant_bytes via rfc8785.dumps) with non-finite float rejection and canonical_format rfc8785_jcs_v1."
+      },
+      {
+        "id": "IR04-X01",
+        "severity": "P0",
+        "status": "locally_remediated_awaiting_independent_remote_qualification",
+        "issue": "Legacy evidence trust-root exposure in evidence_classifier.py: hardcoded HMAC trust-root keys (b'agriwise_secure_production_master_root_2026', drone, and satellite roots) completely removed; verifier-only in-memory trust store deployed, fail-closed by default; mandatory unexpired valid_until timestamps and geometry binding enforced; cross-sensor rejection enforced; production signing capabilities segregated outside ASMAE runtime into Layer 0 Authority (admission_signer.py); 1m spatial resolution certification hold strictly enforced across evidence classification."
       },
       {
         "id": "IR08-665-04",

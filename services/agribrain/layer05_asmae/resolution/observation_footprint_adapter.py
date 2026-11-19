@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from dataclasses import dataclass
 
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 import rfc8785
 
 from .state_cell_support import EvidenceFootprint, STATE_NAMES, SpatialSupportViolation
@@ -67,7 +67,7 @@ ALLOWED_ADMISSION_PURPOSES = frozenset((
 class TrustedAdmissionIssuerKey:
     """Independently provisioned Ed25519 public key and authorized issuer scope."""
     key_id: str
-    public_key: ed25519.Ed25519PublicKey
+    public_key: Ed25519PublicKey
     source: str = "sentinel2"
     purpose: str = "kalman_state_observation"
 
@@ -91,11 +91,11 @@ def register_trusted_admission_public_key(
         raise ValueError("invalid key_id: must be non-empty string")
     clean_key_id = key_id.strip()
 
-    if isinstance(public_key, ed25519.Ed25519PublicKey):
+    if isinstance(public_key, Ed25519PublicKey):
         pub = public_key
     elif isinstance(public_key, bytes):
         if len(public_key) == 32:
-            pub = ed25519.Ed25519PublicKey.from_public_bytes(public_key)
+            pub = Ed25519PublicKey.from_public_bytes(public_key)
         else:
             raise ValueError(f"Ed25519 public key bytes must be exactly 32 bytes, got {len(public_key)}")
     elif isinstance(public_key, str):
@@ -105,7 +105,7 @@ def register_trusted_admission_public_key(
         pub_bytes = bytes.fromhex(clean_key)
         if len(pub_bytes) != 32:
             raise ValueError(f"Ed25519 public key hex must decode to 32 bytes, got {len(pub_bytes)}")
-        pub = ed25519.Ed25519PublicKey.from_public_bytes(pub_bytes)
+        pub = Ed25519PublicKey.from_public_bytes(pub_bytes)
     else:
         raise TypeError(f"unsupported public key type: {type(public_key).__name__}")
 
@@ -152,7 +152,7 @@ def get_trusted_admission_keyring() -> Dict[str, TrustedAdmissionIssuerKey]:
                                 try:
                                     decoded = base64.b64decode(pub_raw)
                                     if len(decoded) == 32:
-                                        pub = ed25519.Ed25519PublicKey.from_public_bytes(decoded)
+                                        pub = Ed25519PublicKey.from_public_bytes(decoded)
                                     else:
                                         continue
                                 except Exception:
@@ -160,7 +160,7 @@ def get_trusted_admission_keyring() -> Dict[str, TrustedAdmissionIssuerKey]:
                             else:
                                 if isinstance(pub_raw, str) and pub_raw.startswith("ed25519:"):
                                     pub_raw = pub_raw[len("ed25519:"):]
-                                pub = ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(pub_raw))
+                                pub = Ed25519PublicKey.from_public_bytes(bytes.fromhex(pub_raw))
                             src = str(cfg.get("source", "sentinel2")).lower().strip()
                             purp = str(cfg.get("purpose", "kalman_state_observation")).strip()
                             keyring[str(k_id)] = TrustedAdmissionIssuerKey(
@@ -177,7 +177,7 @@ def get_trusted_admission_keyring() -> Dict[str, TrustedAdmissionIssuerKey]:
                         if pub_raw:
                             if isinstance(pub_raw, str) and pub_raw.startswith("ed25519:"):
                                 pub_raw = pub_raw[len("ed25519:"):]
-                            pub = ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(pub_raw))
+                            pub = Ed25519PublicKey.from_public_bytes(bytes.fromhex(pub_raw))
                             src = str(item.get("source", "sentinel2")).lower().strip()
                             purp = str(item.get("purpose", "kalman_state_observation")).strip()
                             keyring[k_id] = TrustedAdmissionIssuerKey(
@@ -271,78 +271,17 @@ def compute_scene_asset_sha256(scene: Any) -> Optional[str]:
     return None
 
 
-def create_scene_admission_receipt(
-    scene: Any,
-    *,
-    tenant_id: str,
-    farm_id: str,
-    plot_id: str,
-    geometry_sha256: str,
-    operator_sha256: str,
-    calibrated_operator_sha256: Optional[str] = None,
-    key_id: str = DEFAULT_ADMISSION_KEY_ID,
-    private_key: Optional[ed25519.Ed25519PrivateKey] = None,
-    domain: str = ADMISSION_GRANT_DOMAIN,
-    purpose: str = ADMISSION_PURPOSE,
-    source: Optional[str] = None,
-    now: Optional[datetime] = None,
-) -> Dict[str, Any]:
-    """Create a signed cryptographic admission receipt for a scene using Ed25519 over RFC 8785 JCS.
-    
-    Requires an explicit authorized issuer private key capability (Ed25519PrivateKey).
-    Private signing keys are NEVER bundled or defaulted into ASMAE source or worker processes.
+def create_scene_admission_receipt(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+    """ASMAE runtime is strictly verifier-only (IR04-5CC-P0-01, IR04-X01).
+
+    Signing capabilities are segregated outside the ASMAE Layer 05 runtime into Layer 0 Authority:
+    `services.agribrain.layer0.authority.admission_signer.create_scene_admission_receipt`.
+    Production verifier and worker runtimes cannot sign or provision admission receipts.
     """
-    if private_key is None:
-        raise PermissionError(
-            "Authorized issuer capability required: private_key must be explicitly provided; "
-            "production verifier and worker code cannot self-provision or embed private keys."
-        )
-    if not isinstance(private_key, ed25519.Ed25519PrivateKey):
-        raise TypeError("private_key must be an ed25519.Ed25519PrivateKey instance")
-
-    asset_sha = compute_scene_asset_sha256(scene)
-    if not asset_sha:
-        raise ValueError("Cannot create admission receipt: scene has no exact asset data")
-
-    valid_time = _ensure_utc_iso(
-        getattr(scene, "acquisition_time", None)
-        or getattr(scene, "timestamp", None)
-        or getattr(scene, "date", None)
+    raise RuntimeError(
+        "ASMAE runtime is strictly verifier-only. Production signing capabilities are segregated "
+        "outside ASMAE into Layer 0 Authority (services.agribrain.layer0.authority.admission_signer)."
     )
-    commit_time = _ensure_utc_iso(
-        getattr(scene, "committed_at", None)
-        or getattr(scene, "journal_committed_at", None)
-        or getattr(scene, "journal_entry_time", None)
-    )
-    if not valid_time or not commit_time:
-        raise ValueError("Cannot create admission receipt: valid_time or committed_at missing")
-
-    sensor_str = str(source or getattr(scene, "sensor", "sentinel2")).lower()
-    run_now = now or datetime.now(timezone.utc)
-    grant = {
-        "domain": str(domain),
-        "version": "v1",
-        "canonical_format": "rfc8785_jcs_v1",
-        "algorithm": "Ed25519",
-        "key_id": str(key_id),
-        "purpose": str(purpose),
-        "source": sensor_str,
-        "tenant_id": str(tenant_id),
-        "farm_id": str(farm_id),
-        "plot_id": str(plot_id),
-        "geometry_hash": str(geometry_sha256),
-        "asset_sha256": str(asset_sha),
-        "operator_sha256": str(operator_sha256),
-        "calibrated_operator_sha256": str(calibrated_operator_sha256 or operator_sha256),
-        "observation_valid_time": valid_time,
-        "committed_at": commit_time,
-        "issued_at": run_now.isoformat(),
-        "expires_at": (run_now + timedelta(days=365)).isoformat(),
-    }
-    canonical = canonical_grant_bytes(grant)
-    sig_bytes = private_key.sign(canonical)
-    sig_str = "ed25519:" + sig_bytes.hex()
-    return {"grant": grant, "signature": sig_str, "mac": sig_str}
 
 
 def verify_scene_admission_receipt(

@@ -145,8 +145,9 @@ def classify_scene_stack(scenes: list) -> SceneStackClassification:
     else:
         mode = "no_scenes"
 
-    from ..evidence_classifier import _is_valid_proof
-    current_1m_approval_allowed = any(_is_valid_proof(s) for s in scenes)
+    # IR08-665-04 / IR04-X01: 1m spatial certification strictly ON HOLD across ASMAE.
+    # Scene-level proofs can never authorize 1m resolution or publication.
+    current_1m_approval_allowed = False
 
     return SceneStackClassification(
         mode=mode,

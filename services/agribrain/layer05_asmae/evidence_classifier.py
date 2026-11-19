@@ -5,6 +5,9 @@ import os
 import hashlib
 import hmac
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
 
 def _attr(obj: Any, key: str, default: Any = None) -> Any:
     if isinstance(obj, dict):
@@ -12,7 +15,101 @@ def _attr(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
+@dataclass(frozen=True)
+class TrustedEvidenceTrustRoot:
+    """Independently provisioned evidence trust root."""
+    root_id: str
+    verifier_key: Any  # Ed25519PublicKey or bytes (for explicitly registered HMAC)
+    source: str = ""    # e.g., "sentinel2", "sentinel1", "drone"
+    purpose: str = "kalman_state_observation"
+
+
+# Verifier-only: starts strictly EMPTY by default.
+# Never contains hardcoded production signing secrets or embedded trust keys (IR04-X01).
+_TRUSTED_PROOF_VERIFIERS: Dict[str, TrustedEvidenceTrustRoot] = {}
+
+
+def register_evidence_trust_root(
+    root_id: str,
+    verifier_key: Any,
+    source: str = "",
+    purpose: str = "kalman_state_observation",
+) -> None:
+    """Register an independently provisioned verification key or public key in the trust store.
+    
+    Starts strictly empty in production. Fails closed if unconfigured.
+    """
+    if not isinstance(root_id, str) or not root_id.strip():
+        raise ValueError("invalid root_id: must be non-empty string")
+    clean_id = root_id.strip()
+
+    if isinstance(verifier_key, Ed25519PublicKey):
+        vk = verifier_key
+    elif isinstance(verifier_key, bytes):
+        if len(verifier_key) == 32:
+            try:
+                vk = Ed25519PublicKey.from_public_bytes(verifier_key)
+            except Exception:
+                vk = verifier_key
+        else:
+            vk = verifier_key
+    elif isinstance(verifier_key, str):
+        clean_k = verifier_key.strip()
+        if clean_k.startswith("ed25519:"):
+            clean_k = clean_k[len("ed25519:"):]
+            vk = Ed25519PublicKey.from_public_bytes(bytes.fromhex(clean_k))
+        else:
+            vk = clean_k.encode("utf-8")
+    else:
+        raise TypeError(f"unsupported verifier_key type: {type(verifier_key).__name__}")
+
+    _TRUSTED_PROOF_VERIFIERS[clean_id] = TrustedEvidenceTrustRoot(
+        root_id=clean_id,
+        verifier_key=vk,
+        source=str(source).lower().strip(),
+        purpose=str(purpose).strip(),
+    )
+
+
+def clear_evidence_trust_roots() -> None:
+    """Clear all registered evidence trust roots (restores fail-closed state)."""
+    _TRUSTED_PROOF_VERIFIERS.clear()
+
+
+def get_trusted_evidence_roots() -> Dict[str, TrustedEvidenceTrustRoot]:
+    """Return copy of currently registered evidence trust roots."""
+    return dict(_TRUSTED_PROOF_VERIFIERS)
+
+
 def _is_valid_proof(s: Any) -> bool:
+    """Cryptographically verify evidence authenticity. Fails closed on unconfigured or forged roots (IR04-X01)."""
+    # 1. Check for modern positive admission receipt first
+    adm_receipt = _attr(s, "admission_receipt", None)
+    if not adm_receipt:
+        bp_maybe = _attr(s, "binding_proof", None)
+        if isinstance(bp_maybe, dict):
+            adm_receipt = bp_maybe.get("admission_receipt")
+    if adm_receipt:
+        try:
+            from .resolution.observation_footprint_adapter import verify_scene_admission_receipt
+            valid, _ = verify_scene_admission_receipt(
+                adm_receipt,
+                scene=s,
+                tenant_id=str(_attr(s, "tenant_id", "") or ""),
+                farm_id=str(_attr(s, "farm_id", "") or ""),
+                plot_id=str(_attr(s, "plot_id", "") or ""),
+                geometry_sha256=str(_attr(s, "geometry_hash", "") or ""),
+                operator_sha256=str(_attr(s, "operator_sha256", "") or ""),
+                calibrated_operator_sha256=_attr(s, "calibrated_operator_sha256", None),
+                valid_time=str(_attr(s, "acquisition_time", "") or ""),
+                committed_at=str(_attr(s, "committed_at", "") or ""),
+            )
+            if valid:
+                return True
+        except Exception:
+            pass
+
+    # 2. Legacy proof verification
     bp = _attr(s, "binding_proof", None) or {}
     meta = _attr(s, "metadata", None) or {}
     hp = (
@@ -44,41 +141,68 @@ def _is_valid_proof(s: Any) -> bool:
         return False
     if not sig or sig in ("invalid", "unverified", "revoked", "none"):
         return False
-    if valid_until:
+
+    # Strict expiry check: valid_until is mandatory and must not be expired
+    if not valid_until:
+        return False
+    try:
+        if isinstance(valid_until, str):
+            exp_dt = datetime.fromisoformat(valid_until.replace("Z", "+00:00"))
+        elif isinstance(valid_until, (datetime, date)):
+            exp_dt = valid_until if isinstance(valid_until, datetime) else datetime(valid_until.year, valid_until.month, valid_until.day, tzinfo=timezone.utc)
+        else:
+            return False
+        now_dt = datetime.now(timezone.utc) if exp_dt.tzinfo is not None else datetime.now()
+        if exp_dt <= now_dt:
+            return False
+    except Exception:
+        return False
+
+    # Strict geometry binding: geometry_hash must match target scene geometry
+    target_geom = str(_attr(s, "geometry_hash", "") or _attr(_attr(s, "runtime", None), "geometry_hash", "") or "").strip()
+    if not geom_hash:
+        return False
+    if target_geom and geom_hash != target_geom:
+        return False
+
+    # FAIL-CLOSED: Check enrolled trust roots in memory registry
+    if not _TRUSTED_PROOF_VERIFIERS:
+        return False
+    if trust_root not in _TRUSTED_PROOF_VERIFIERS:
+        return False
+
+    trusted = _TRUSTED_PROOF_VERIFIERS[trust_root]
+
+    # Check sensor scope / cross-sensor rejection
+    if trusted.source:
+        s_sensor = str(_attr(s, "sensor", "") or _attr(_attr(s, "runtime", None), "sensor", "") or "").strip().lower()
+        if trusted.source in ("sentinel2", "s2"):
+            if s_sensor not in ("sentinel2", "s2"):
+                return False
+        elif trusted.source in ("sentinel1", "s1"):
+            if s_sensor not in ("sentinel1", "s1"):
+                return False
+        elif trusted.source != s_sensor:
+            return False
+
+    # Verify signature
+    valid_until_str = valid_until if isinstance(valid_until, str) else exp_dt.isoformat()
+    payload = f"{trust_root}:{geom_hash or target_geom}:{valid_until_str}".encode("utf-8")
+
+    if isinstance(trusted.verifier_key, Ed25519PublicKey):
+        clean_sig = sig
+        if clean_sig.startswith("ed25519:"):
+            clean_sig = clean_sig[len("ed25519:"):]
         try:
-            if isinstance(valid_until, str):
-                exp_dt = datetime.fromisoformat(valid_until.replace("Z", "+00:00"))
-            elif isinstance(valid_until, (datetime, date)):
-                exp_dt = valid_until
-            else:
-                exp_dt = None
-            if exp_dt:
-                now_dt = datetime.now(timezone.utc) if exp_dt.tzinfo is not None else datetime.now()
-                if exp_dt < now_dt:
-                    return False
+            sig_bytes = bytes.fromhex(clean_sig)
+            trusted.verifier_key.verify(sig_bytes, payload)
+            return True
         except Exception:
             return False
-    target_geom = str(_attr(s, "geometry_hash", "") or "").strip()
-    if target_geom and geom_hash and geom_hash != target_geom:
-        return False
-    # Cryptographic verification against enrolled Trust Store roots
-    TRUSTED_ROOTS = {
-        "AGRIWISE_ROOT_CA_V1": b"agriwise_secure_production_master_root_2026",
-        "AGRIWISE_DRONE_CERT_V1": b"agriwise_drone_aerial_certified_root_2026",
-        "COPERNICUS_SENTINEL_TRUST_ROOT": b"esa_copernicus_spatial_certification_key_2026",
-        "ESA_S2_DATA_AUTHORITY": b"esa_sentinel2_calval_cryptographic_root_2026",
-    }
-    if trust_root not in TRUSTED_ROOTS:
-        return False
-    root_key = TRUSTED_ROOTS[trust_root]
-    payload = f"{trust_root}:{geom_hash or target_geom}:{valid_until or ''}".encode("utf-8")
-    expected_sig = hmac.new(root_key, payload, hashlib.sha256).hexdigest()
-    if hmac.compare_digest(sig.lower(), expected_sig.lower()):
-        return True
-    alt_payload = f"{trust_root}:{geom_hash or target_geom}".encode("utf-8")
-    alt_sig = hmac.new(root_key, alt_payload, hashlib.sha256).hexdigest()
-    if hmac.compare_digest(sig.lower(), alt_sig.lower()):
-        return True
+    elif isinstance(trusted.verifier_key, (bytes, bytearray)):
+        expected_sig = hmac.new(trusted.verifier_key, payload, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(sig.lower(), expected_sig.lower())
+
     return False
 
 
@@ -309,19 +433,17 @@ def classify_asmae_evidence(
 
     if state == "full_scene_stack":
         real_asmae_evidence = True
-        current_1m_approval_allowed = has_certification_proof
+        current_1m_approval_allowed = False  # 1m spatial certification strictly ON HOLD (IR08-665-04)
         visual_fusion_allowed = True
         archive_context_allowed = True
         experimental_visual_allowed = True
         source_reality = "real_raster"
         allowed_outputs = ["ASMAE_VISUAL_FUSION_CANOPY", "canopy_water", "vigor"]
+        blocked_outputs = ["ASMAE_1M_ADVISORY_MASK"]  # 1m advisory mask strictly blocked
         if has_certification_proof:
-            allowed_outputs.append("ASMAE_1M_ADVISORY_MASK")
-            blocked_outputs = []
-            authority = "asmae_certified"
+            authority = "authenticated_observation_stack"
             reason = "ok"
         else:
-            blocked_outputs = ["ASMAE_1M_ADVISORY_MASK"]
             authority = "advisory_only"
             reason = "1m_approval_unavailable_certification_proof_missing"
     elif state == "diagnostic_scene_stack":
@@ -432,10 +554,13 @@ def classify_asmae_evidence(
             composite_advisory_allowed = True
             scientific_surface_allowed = has_certification_proof
             prescription_driver_allowed = has_certification_proof
-            current_1m_approval_allowed_val = has_certification_proof
+            current_1m_approval_allowed_val = False  # 1m spatial certification strictly ON HOLD (IR08-665-04)
             if not has_certification_proof:
                 authority = "advisory_only"
                 reason = "1m_approval_unavailable_certification_proof_missing"
+            else:
+                authority = "authenticated_observation_stack"
+                reason = "ok"
     elif state == "diagnostic_scene_stack":
         res_test_override = has_test_override
         res_real_provider_product = has_real_provider_product

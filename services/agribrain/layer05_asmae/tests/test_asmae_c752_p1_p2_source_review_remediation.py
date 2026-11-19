@@ -45,11 +45,11 @@ from services.agribrain.layer05_asmae.reintegration import (
     REINTEGRATION_CONTRACT_VERSION,
 )
 from cryptography.hazmat.primitives.asymmetric import ed25519
+from services.agribrain.layer0.authority.admission_signer import create_scene_admission_receipt
 from services.agribrain.layer05_asmae.resolution.observation_footprint_adapter import (
     adapt_scene_to_footprint,
     adapt_scenes_to_footprints,
     compute_scene_asset_sha256,
-    create_scene_admission_receipt,
     verify_scene_admission_receipt,
     verify_bitemporal_replay_receipt,
     register_trusted_admission_public_key,
@@ -1118,3 +1118,248 @@ sys.exit(0)
     )
     assert proc.returncode == 0, f"Child subprocess failed with code {proc.returncode}:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
     assert "COLD_READ_AND_REINTEGRATION_VERIFIED" in proc.stdout
+
+
+def test_ir04_x01_evidence_trust_root_and_authority_remediation():
+    """Adversarial negative and positive controls for IR04-X01 legacy trust-root exposure.
+    
+    Verifies:
+    1. Empty trust store fails closed.
+    2. Embedded production secrets (b"agriwise_secure_production_master_root_2026") are rejected.
+    3. Adversarial exploitability: forged proof cannot escalate scientific_surface_allowed,
+       state_update_allowed, prescription_driver_allowed, or authority='asmae_certified'.
+    4. Expired proof rejected even with valid signature.
+    5. Missing valid_until rejected.
+    6. Mismatched geometry hash rejected.
+    7. Cross-sensor proof (e.g. Sentinel-2 root on S1 scene) rejected.
+    8. 1m certification hold invariant: valid proof does NOT authorize 1m resolution.
+    9. Verifier-only separation: observation_footprint_adapter raises RuntimeError on signing attempt.
+    """
+    import hmac
+    from datetime import datetime, timezone, timedelta
+    from services.agribrain.layer05_asmae.evidence_classifier import (
+        _is_valid_proof,
+        classify_asmae_evidence,
+        register_evidence_trust_root,
+        clear_evidence_trust_roots,
+        get_trusted_evidence_roots,
+    )
+    from services.agribrain.layer05_asmae.resolution.observation_footprint_adapter import (
+        create_scene_admission_receipt as runtime_signer_stub,
+    )
+
+    geom_target = "f" * 64
+    now = datetime.now(timezone.utc)
+    future_iso = (now + timedelta(days=30)).isoformat()
+    past_iso = (now - timedelta(days=5)).isoformat()
+
+    # Sub-test 1: Empty trust store fails closed
+    clear_evidence_trust_roots()
+    assert len(get_trusted_evidence_roots()) == 0
+
+    legacy_secret = b"agriwise_secure_production_master_root_2026"
+    forged_payload = f"AGRIWISE_ROOT_CA_V1:{geom_target}:{future_iso}".encode("utf-8")
+    forged_sig = hmac.new(legacy_secret, forged_payload, hashlib.sha256).hexdigest()
+
+    scene_forged = SimpleNamespace(
+        sensor="S2",
+        geometry_hash=geom_target,
+        binding_proof={
+            "holdout_proof": {
+                "trust_root_id": "AGRIWISE_ROOT_CA_V1",
+                "signature": forged_sig,
+                "geometry_hash": geom_target,
+                "valid_until": future_iso,
+            },
+            "registration_proof": {"geometry_hash": geom_target},
+            "field_approval": {"approved": True},
+        },
+    )
+    assert not _is_valid_proof(scene_forged), "Empty trust root store must fail closed on any proof"
+
+    # Sub-test 2: Exploitability prevention in classify_asmae_evidence with forged proof
+    make_s2_forged = lambda idx: {
+        "runtime": {
+            "sensor": "S2",
+            "width": 10,
+            "height": 10,
+            "crs": "EPSG:32631",
+            "transform": [500000.0, 10.0, 0.0, 4000000.0, 0.0, -10.0],
+            "acquisition_time": (now - timedelta(days=idx)).isoformat(),
+            "bands": {"B04": np.ones((10, 10), dtype=np.float32), "B08": np.ones((10, 10), dtype=np.float32)},
+            "qa_score": 0.95,
+            "source_reality": "real_raster",
+            "production_usable": True,
+            "real_provider_product": True,
+            "test_override": False,
+            "geometry_hash": geom_target,
+            "binding_proof": scene_forged.binding_proof,
+        },
+        "source_reality": "real_raster",
+        "production_usable": True,
+        "real_provider_product": True,
+        "test_override": False,
+        "geometry_hash": geom_target,
+        "binding_proof": scene_forged.binding_proof,
+    }
+    forged_scenes = [make_s2_forged(1), make_s2_forged(2), make_s2_forged(3)]
+    res_forged = classify_asmae_evidence(
+        scenes=forged_scenes,
+        archive_metrics_status="available",
+        archive_metrics_hash="h" * 64,
+        archive_baselines={"b": 1},
+        retrovalidation_residuals={"r": 0.05},
+        archive_bma={"m": 1},
+        raster_composites={},
+        layer0_source_packages={},
+    )
+    assert res_forged.state == "full_scene_stack"
+    assert res_forged.authority == "advisory_only", "Forged proof must never escalate authority to asmae_certified"
+    assert res_forged.current_1m_approval_allowed is False, "Forged proof must not authorize 1m approval"
+    assert res_forged.scientific_surface_allowed is False, "Forged proof must not authorize scientific surface"
+    assert res_forged.state_update_allowed is False, "Forged proof must not authorize state updates"
+    assert res_forged.prescription_driver_allowed is False, "Forged proof must not authorize prescription driver"
+    assert res_forged.production_usable is False, "Forged proof must not be production usable"
+    assert "ASMAE_1M_ADVISORY_MASK" in res_forged.blocked_outputs
+    assert "ASMAE_1M_ADVISORY_MASK" not in res_forged.allowed_outputs
+
+    # Sub-test 3: Registered trust key allows valid unexpired proof
+    test_key = b"ephemeral_authorized_test_root_key_2026_xyz"
+    register_evidence_trust_root("TEST_AUTHORIZED_ROOT", test_key, source="sentinel2")
+    assert "TEST_AUTHORIZED_ROOT" in get_trusted_evidence_roots()
+
+    auth_payload = f"TEST_AUTHORIZED_ROOT:{geom_target}:{future_iso}".encode("utf-8")
+    auth_sig = hmac.new(test_key, auth_payload, hashlib.sha256).hexdigest()
+
+    scene_valid = SimpleNamespace(
+        sensor="S2",
+        geometry_hash=geom_target,
+        binding_proof={
+            "holdout_proof": {
+                "trust_root_id": "TEST_AUTHORIZED_ROOT",
+                "signature": auth_sig,
+                "geometry_hash": geom_target,
+                "valid_until": future_iso,
+            },
+            "registration_proof": {"geometry_hash": geom_target},
+            "field_approval": {"approved": True},
+        },
+    )
+    assert _is_valid_proof(scene_valid), "Legitimately registered proof must pass validation"
+
+    # Sub-test 4: Expired proof rejected even with authentic signature
+    expired_payload = f"TEST_AUTHORIZED_ROOT:{geom_target}:{past_iso}".encode("utf-8")
+    expired_sig = hmac.new(test_key, expired_payload, hashlib.sha256).hexdigest()
+    scene_expired = SimpleNamespace(
+        sensor="S2",
+        geometry_hash=geom_target,
+        binding_proof={
+            "holdout_proof": {
+                "trust_root_id": "TEST_AUTHORIZED_ROOT",
+                "signature": expired_sig,
+                "geometry_hash": geom_target,
+                "valid_until": past_iso,
+            },
+            "registration_proof": {"geometry_hash": geom_target},
+            "field_approval": {"approved": True},
+        },
+    )
+    assert not _is_valid_proof(scene_expired), "Expired proof must fail closed"
+
+    # Sub-test 5: Missing valid_until rejected
+    scene_no_exp = SimpleNamespace(
+        sensor="S2",
+        geometry_hash=geom_target,
+        binding_proof={
+            "holdout_proof": {
+                "trust_root_id": "TEST_AUTHORIZED_ROOT",
+                "signature": auth_sig,
+                "geometry_hash": geom_target,
+            },
+            "registration_proof": {"geometry_hash": geom_target},
+            "field_approval": {"approved": True},
+        },
+    )
+    assert not _is_valid_proof(scene_no_exp), "Proof with missing valid_until must fail closed"
+
+    # Sub-test 6: Mismatched geometry rejected
+    scene_geom_mismatch = SimpleNamespace(
+        sensor="S2",
+        geometry_hash="0" * 64,  # different from geom_target in proof
+        binding_proof={
+            "holdout_proof": {
+                "trust_root_id": "TEST_AUTHORIZED_ROOT",
+                "signature": auth_sig,
+                "geometry_hash": geom_target,
+                "valid_until": future_iso,
+            },
+            "registration_proof": {"geometry_hash": geom_target},
+            "field_approval": {"approved": True},
+        },
+    )
+    assert not _is_valid_proof(scene_geom_mismatch), "Mismatched geometry must fail closed"
+
+    # Sub-test 7: Cross-sensor proof rejected
+    scene_wrong_sensor = SimpleNamespace(
+        sensor="S1",  # Root registered for sentinel2
+        geometry_hash=geom_target,
+        binding_proof={
+            "holdout_proof": {
+                "trust_root_id": "TEST_AUTHORIZED_ROOT",
+                "signature": auth_sig,
+                "geometry_hash": geom_target,
+                "valid_until": future_iso,
+            },
+            "registration_proof": {"geometry_hash": geom_target},
+            "field_approval": {"approved": True},
+        },
+    )
+    assert not _is_valid_proof(scene_wrong_sensor), "Cross-sensor proof must fail closed"
+
+    # Sub-test 8: 1m spatial resolution certification hold invariant
+    make_s2_auth = lambda idx: {
+        "runtime": {
+            "sensor": "S2",
+            "width": 10,
+            "height": 10,
+            "crs": "EPSG:32631",
+            "transform": [500000.0, 10.0, 0.0, 4000000.0, 0.0, -10.0],
+            "acquisition_time": (now - timedelta(days=idx)).isoformat(),
+            "bands": {"B04": np.ones((10, 10), dtype=np.float32), "B08": np.ones((10, 10), dtype=np.float32)},
+            "qa_score": 0.95,
+            "source_reality": "real_raster",
+            "production_usable": True,
+            "real_provider_product": True,
+            "test_override": False,
+            "geometry_hash": geom_target,
+            "binding_proof": scene_valid.binding_proof,
+        },
+        "source_reality": "real_raster",
+        "production_usable": True,
+        "real_provider_product": True,
+        "test_override": False,
+        "geometry_hash": geom_target,
+        "binding_proof": scene_valid.binding_proof,
+    }
+    auth_scenes = [make_s2_auth(1), make_s2_auth(2), make_s2_auth(3)]
+    res_auth = classify_asmae_evidence(
+        scenes=auth_scenes,
+        archive_metrics_status="available",
+        archive_metrics_hash="h" * 64,
+        archive_baselines={"b": 1},
+        retrovalidation_residuals={"r": 0.05},
+        archive_bma={"m": 1},
+        raster_composites={},
+        layer0_source_packages={},
+    )
+    assert res_auth.current_1m_approval_allowed is False, "1m spatial certification strictly ON HOLD across ASMAE"
+    assert "ASMAE_1M_ADVISORY_MASK" in res_auth.blocked_outputs
+    assert res_auth.state_update_allowed is True
+    assert res_auth.scientific_surface_allowed is True
+    assert res_auth.authority == "authenticated_observation_stack"
+
+    # Sub-test 9: Strict verifier-only separation in ASMAE runtime
+    with pytest.raises(RuntimeError, match="ASMAE runtime is strictly verifier-only"):
+        runtime_signer_stub()
+
+    clear_evidence_trust_roots()
