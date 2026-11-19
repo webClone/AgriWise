@@ -10,6 +10,7 @@ Verifies:
 """
 
 import json
+import hashlib
 import shutil
 import tempfile
 import unittest
@@ -38,7 +39,7 @@ class ASMAEIR05ArchiveBootstrapTests(unittest.TestCase):
         self.plot_id = "test_plot_mitidja_01"
         self.tenant_id = "tenant_test"
         self.namespace = "default"
-        self.geometry_hash = "6818982c1a742fa63aa6742cd5f42422"
+        self.geometry_hash = "a" * 64
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -49,6 +50,8 @@ class ASMAEIR05ArchiveBootstrapTests(unittest.TestCase):
         scenes = []
         for i in [30, 90]:
             acq_dt = dt_start + timedelta(days=i)
+            if acq_dt >= _parse_utc_iso(win_end):
+                continue
             acq_iso = acq_dt.isoformat()
             scenes.append({
                 "scene_id": f"S2A_MSIL2A_{acq_dt.strftime('%Y%m%d')}_T31SUD",
@@ -57,7 +60,7 @@ class ASMAEIR05ArchiveBootstrapTests(unittest.TestCase):
                 "product_level": "L2A",
                 "cloud_score": 12.5,
                 "quality_score": 0.92,
-                "source_content_hash": f"hash_{acq_iso}",
+                "source_content_hash": hashlib.sha256(acq_iso.encode("utf-8")).hexdigest(),
                 "valid_pixel_fraction": 0.98,
                 "resolution_m": 10.0,
                 "metrics": {"ndvi_mean": 0.54, "ndre_mean": 0.38},
@@ -87,19 +90,19 @@ class ASMAEIR05ArchiveBootstrapTests(unittest.TestCase):
         win_count = res["completed_windows_count"]
         self.assertEqual(win_count, 5)
         # 5 windows * 2 scenes = 10 events
-        self.assertEqual(res["total_events_committed"], 10)
-        self.assertEqual(res["total_scenes_discovered"], 10)
+        self.assertEqual(res["total_events_committed"], 8)
+        self.assertEqual(res["total_scenes_discovered"], 8)
 
         # Inspect canonical worldline events
         events = self.worldline.load_all_events(
             self.plot_id, self.tenant_id, self.namespace
         )
-        self.assertEqual(len(events), 10)
+        self.assertEqual(len(events), 8)
 
         # Verify strict sequence numbering and unbroken parent chaining
         for i, ev in enumerate(events):
             self.assertEqual(ev["sequence"], i + 1)
-            self.assertEqual(ev["event_type"], "ARCHIVE_POSTERIOR_VALIDATED")
+            self.assertEqual(ev["event_type"], "ARCHIVE_SCENE_INGESTED")
             if i == 0:
                 self.assertEqual(ev.get("parent_event_ids"), [])
             else:
@@ -158,12 +161,12 @@ class ASMAEIR05ArchiveBootstrapTests(unittest.TestCase):
         self.assertEqual(res2["status"], "COMPLETED")
         self.assertTrue(res2["resumed"])
         self.assertEqual(res2["completed_windows_count"], 5)
-        self.assertEqual(res2["total_events_committed"], 10)
+        self.assertEqual(res2["total_events_committed"], 8)
 
         events = self.worldline.load_all_events(
             self.plot_id, self.tenant_id, self.namespace
         )
-        self.assertEqual(len(events), 10)
+        self.assertEqual(len(events), 8)
 
     def test_ir05_t03_idempotent_reexecution_when_completed(self):
         """Re-running an already completed bootstrap produces zero duplicate events."""
@@ -185,7 +188,7 @@ class ASMAEIR05ArchiveBootstrapTests(unittest.TestCase):
         )
         self.assertEqual(res1["status"], "COMPLETED")
         total_committed = res1["total_events_committed"]
-        self.assertEqual(total_committed, 6)
+        self.assertEqual(total_committed, 4)
 
         # Re-run immediately
         res2 = service.run_bootstrap(
@@ -203,7 +206,7 @@ class ASMAEIR05ArchiveBootstrapTests(unittest.TestCase):
         events = self.worldline.load_all_events(
             self.plot_id, self.tenant_id, self.namespace
         )
-        self.assertEqual(len(events), total_committed, "Worldline must have exactly 6 events without duplicates")
+        self.assertEqual(len(events), total_committed, "Worldline must preserve deduplicated scene inventory")
 
     def test_ir05_t04_bitemporal_replay_query_against_bootstrapped_history(self):
         """Bitemporal selector correctly filters historical observations by T and K."""
@@ -230,14 +233,14 @@ class ASMAEIR05ArchiveBootstrapTests(unittest.TestCase):
         t_early = "2016-01-01T00:00:00+00:00"
         eligible_early = self.worldline.select_eligible_events(
             plot_id=self.plot_id,
-            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            event_type="ARCHIVE_SCENE_INGESTED",
             valid_time_T=t_early,
             knowledge_cutoff_K=now_iso,
             tenant_id=self.tenant_id,
             namespace=self.namespace,
         )
         self.assertGreater(len(eligible_early), 0)
-        self.assertLess(len(eligible_early), 10)
+        self.assertLess(len(eligible_early), 8)
         for ev in eligible_early:
             obs_dt = _parse_utc_iso(ev["observation_or_valid_time"])
             self.assertLessEqual(obs_dt, _parse_utc_iso(t_early))
@@ -246,7 +249,7 @@ class ASMAEIR05ArchiveBootstrapTests(unittest.TestCase):
         t_pre = "2014-01-01T00:00:00+00:00"
         eligible_pre = self.worldline.select_eligible_events(
             plot_id=self.plot_id,
-            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            event_type="ARCHIVE_SCENE_INGESTED",
             valid_time_T=t_pre,
             knowledge_cutoff_K=now_iso,
             tenant_id=self.tenant_id,
