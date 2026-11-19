@@ -93,5 +93,61 @@
     "pr32_head_held": "64a9f69945d8e3eda2bf33de9ff24e98186c9a17",
     "certification_holds_unchanged": true,
     "note": "The original historical claimed 'closed' statuses in findings[] are preserved; independent qualification of those claims is tracked separately here. PR #32 remains held until user explicitly authorizes fast-forward."
+  },
+  "independent_review_5ccca4a_2026_11_19": {
+    "reviewed_commit": "5ccca4aab4717e245fadf36bb13c7a8e0d0be40e",
+    "source_reviewed": true,
+    "tests_executed_by_independent_reviewer": false,
+    "status": "FAST_FORWARD_HOLD",
+    "pr32_target_head": "64a9f69945d8e3eda2bf33de9ff24e98186c9a17",
+    "new_original_findings_closed": 0,
+    "verified_improvements": [
+      "exact decoded scene-asset content hashing and HMAC signature verification are present",
+      "as_of_utc fallback for K removed",
+      "worker-first cold publication test now checks publication_reused=False with subprocess FastAPI cold reads",
+      "IR08 20m mixed-band conservative hold retained"
+    ],
+    "qualification_blockers": [
+      {
+        "id": "IR04-5CC-P0-01",
+        "severity": "P0",
+        "status": "OPEN",
+        "area": "issuer_key_security",
+        "issue": "production-labeled static HMAC secrets embedded in source and trusted for signing/verifying; forgeable admission grants"
+      },
+      {
+        "id": "IR04-5CC-P1-02",
+        "severity": "P1",
+        "status": "OPEN",
+        "area": "bitemporal_authority",
+        "issue": "engine accepts K from caller receipt query_parameters or journal_watermark without independent authoritative receipt verification at this boundary"
+      },
+      {
+        "id": "IR04-5CC-P1-03",
+        "severity": "P1",
+        "status": "OPEN",
+        "area": "issuer_policy",
+        "issue": "keyring source restrictions and signed grant purpose are not checked; cross-sensor or cross-domain authority may be confused"
+      },
+      {
+        "id": "IR04-5CC-P2-04",
+        "severity": "P2",
+        "status": "OPEN",
+        "area": "canonical_serialization",
+        "issue": "Python json.dumps sort_keys is not fully equivalent to RFC 8785 JCS for all JSON values"
+      }
+    ],
+    "reported_local_test_receipts": {
+      "acceptance_passed": 4,
+      "layer05_passed": 226,
+      "frontend_passed": 341,
+      "typescript_errors": 0
+    },
+    "github_ci_runs_found": 0,
+    "github_statuses_found": 0,
+    "history_policy": "Do not overwrite prior claimed closure statuses in independent_review_2026_11_19; mark their acceptance as contested by later review",
+    "original_238_findings_untouched": true,
+    "certification_holds_unchanged": true,
+    "review_location": "https://github.com/webClone/AgriWise/pull/32"
   }
 }
