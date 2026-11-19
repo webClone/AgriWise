@@ -983,6 +983,7 @@ class ASMAERunner:
             resource_memory_limit_mb=context.get("resource_memory_limit_mb"),
             tenant_id=str(context.get("tenant_id") or ""),
             farm_id=str(context.get("farm_id") or ""),
+            worldline_namespace=str(context.get("worldline_namespace") or "default"),
             bitemporal_replay_receipt=dict(context.get("bitemporal_replay_receipt") or {}),
         )
 
