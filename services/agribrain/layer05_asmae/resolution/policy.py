@@ -68,7 +68,7 @@ class PolicyResult:
     visual_resolution_m: int = DEFAULT_RESOLUTION_M
     state_update_resolution_m: int = DEFAULT_RESOLUTION_M
     training_resolution_m: int = DEFAULT_RESOLUTION_M
-    research_resolution_m: int = 1  # Always 1m for research
+    research_resolution_m: int = 1  # Research sampling; never certified by this selector
 
     safe_for_1m_claim: bool = False
 
@@ -171,36 +171,28 @@ def apply_policies(
                     "sensor_limit": finest_nyquist,
                 })
 
-        # Gate 4: 1m certification
+        # Gate 4: 1 m scientific authority is NOT established by a high
+        # retrospective score, scene-wide proof, or a fine computational grid.
+        # Only the downstream qualified state×cell support contract may
+        # authorize such a claim, and this legacy selector receives no such
+        # proof. Preserve 1 m as research-only metadata below.
         if res_m == 1 and not ev.rejected:
             retro_1m = retro_scores.get(1, 0.0)
+            ev.rejected = True
+            ev.rejection_reason = "1m_scientific_claim_requires_state_cell_evidence"
             reasons.append(ReasonCodeDetail(
                 code=GATE_1M_CERTIFICATION_REQUIRED,
                 category="gate",
                 resolution_m=1,
                 value=retro_1m,
                 threshold=RETRO_SCORE_1M_THRESHOLD,
+                message="Legacy retrovalidation cannot certify local 1m support",
             ))
-
-            if retro_1m >= RETRO_SCORE_1M_THRESHOLD:
-                result.safe_for_1m_claim = True
-                reasons.append(ReasonCodeDetail(
-                    code=GATE_1M_RETRO_PASS,
-                    category="gate",
-                    resolution_m=1,
-                    value=retro_1m,
-                    threshold=RETRO_SCORE_1M_THRESHOLD,
-                ))
-            else:
-                ev.rejected = True
-                ev.rejection_reason = f"1m retro {retro_1m:.3f} < {RETRO_SCORE_1M_THRESHOLD}"
-                reasons.append(ReasonCodeDetail(
-                    code=GATE_1M_RETRO_FAIL,
-                    category="gate",
-                    resolution_m=1,
-                    value=retro_1m,
-                    threshold=RETRO_SCORE_1M_THRESHOLD,
-                ))
+            result.demoted_candidates.append({
+                "resolution_m": 1,
+                "reason": "missing_qualified_state_cell_1m_evidence",
+                "retro_score": float(retro_1m),
+            })
 
         # Gate 5: Sub-5m retrovalidation
         if 1 < res_m <= 5 and not ev.rejected:
@@ -239,8 +231,8 @@ def apply_policies(
             fine_eligible.sort(key=lambda x: (x[0], -x[1].composite_score))
             best_res, best_ev = fine_eligible[0]
             result.effective_resolution_m = best_res
-            if best_res == 1:
-                result.safe_for_1m_claim = True
+            # Fine candidate rankings are not evidence of scientific
+            # 1 m authority. This selector cannot assert that claim.
         else:
             eligible.sort(key=lambda x: (-x[1].composite_score, x[0]))
             best_res, best_ev = eligible[0]
