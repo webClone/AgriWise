@@ -981,6 +981,9 @@ class ASMAERunner:
             missing_variables=weather["missing_variables"],
             variable_completeness=weather["variable_completeness"],
             resource_memory_limit_mb=context.get("resource_memory_limit_mb"),
+            tenant_id=str(context.get("tenant_id") or ""),
+            farm_id=str(context.get("farm_id") or ""),
+            bitemporal_replay_receipt=dict(context.get("bitemporal_replay_receipt") or {}),
         )
 
     def _validate_contracts(
