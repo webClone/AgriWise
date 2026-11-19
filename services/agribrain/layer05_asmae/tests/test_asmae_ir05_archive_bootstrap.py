@@ -422,5 +422,39 @@ class ASMAEIR05ArchiveBootstrapTests(unittest.TestCase):
             service.run_bootstrap(**args)
 
 
+    def test_ir05_t13_completed_checkpoint_requires_cold_journal(self):
+        service = ArchiveBootstrapService(
+            worldline=self.worldline, bootstrap_root=self.bootstrap_root,
+            fetcher_factory=self._mock_fetcher,
+        )
+        args = dict(
+            plot_id=self.plot_id, geometry_hash=self.geometry_hash,
+            tenant_id=self.tenant_id, namespace=self.namespace,
+            target_end_date="2015-12-23T00:00:00Z",
+        )
+        service.run_bootstrap(**args)
+        events = self.worldline.load_all_events(self.plot_id, self.tenant_id, self.namespace)
+        self.worldline._event_path(
+            self.plot_id, events[-1]["event_id"], self.tenant_id, self.namespace,
+        ).unlink()
+        with self.assertRaises(Exception):
+            service.run_bootstrap(**args)
+
+    def test_ir05_t14_no_fake_posterior_created_by_inventory_only(self):
+        service = ArchiveBootstrapService(
+            worldline=self.worldline, bootstrap_root=self.bootstrap_root,
+            fetcher_factory=self._mock_fetcher,
+        )
+        service.run_bootstrap(
+            plot_id=self.plot_id, geometry_hash=self.geometry_hash,
+            tenant_id=self.tenant_id, namespace=self.namespace,
+            target_end_date="2015-12-23T00:00:00Z",
+        )
+        self.assertFalse(self.worldline.latest_payload(
+            self.plot_id, "ARCHIVE_POSTERIOR_VALIDATED",
+            self.tenant_id, self.namespace,
+        ))
+
+
 if __name__ == "__main__":
     unittest.main()
