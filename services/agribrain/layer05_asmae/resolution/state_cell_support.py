@@ -117,6 +117,8 @@ class EvidenceFootprint:
     classification: Literal["physical", "forecast", "synthetic", "scenario"] = "physical"
     nodata: bool = False
     independent_holdout_sha256: Optional[str] = None
+    valid_cell_indices: Optional[Tuple[int, ...]] = None
+    valid_support_hash: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.observation_id or not all((self.tenant_id, self.farm_id, self.plot_id, self.crs)):
@@ -127,6 +129,11 @@ class EvidenceFootprint:
             _hash(self.calibrated_operator_sha256, "calibrated_operator_sha256")
         if self.independent_holdout_sha256 is not None:
             _hash(self.independent_holdout_sha256, "independent_holdout_sha256")
+        if self.valid_support_hash is not None:
+            _hash(self.valid_support_hash, "valid_support_hash")
+        if self.valid_cell_indices is not None:
+            if not all(isinstance(i, int) and i >= 0 for i in self.valid_cell_indices):
+                raise SpatialSupportViolation("valid_cell_indices must contain non-negative integers")
         _utc(self.observation_valid_time)
         _utc(self.committed_at)
         if not self.supported_states or any(s not in STATE_NAMES for s in self.supported_states):
@@ -167,6 +174,8 @@ class StateCellSupport:
     holdout_references: Tuple[str, ...]
     demotion_reasons: Tuple[str, ...]
     certified_1m: bool = False
+    admitted_operator_hashes: Tuple[str, ...] = ()
+    admitted_calibration_hashes: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.certified_1m:
@@ -247,6 +256,11 @@ def evaluate_state_cell_support(
         if coverage < 0.95:
             reasons.append("insufficient_local_footprint_overlap")
             continue
+        if ev.valid_cell_indices is not None:
+            cell_idx = row * grid.width + col
+            if cell_idx not in ev.valid_cell_indices:
+                reasons.append("masked_by_scene_valid_support")
+                continue
         if ev.observability < 0.7:
             reasons.append("weak_state_specific_observability")
             continue
@@ -288,6 +302,8 @@ def evaluate_state_cell_support(
         estimated_value=estimated_value, sigma=sigma, effective_resolution_m=resolution_m,
         admitted_observation_ids=tuple(sorted(ev.observation_id for ev in usable)),
         admitted_source_hashes=tuple(sorted(ev.source_sha256 for ev in usable)),
+        admitted_operator_hashes=tuple(sorted(ev.operator_sha256 for ev in usable)),
+        admitted_calibration_hashes=tuple(sorted(ev.calibrated_operator_sha256 for ev in usable if ev.calibrated_operator_sha256)),
         propagated_source_hashes=tuple(sorted(set(propagation_source_hashes))),
         holdout_references=tuple(sorted(ev.independent_holdout_sha256 for ev in usable if ev.independent_holdout_sha256)),
         demotion_reasons=tuple(sorted(set(reasons))), certified_1m=False,

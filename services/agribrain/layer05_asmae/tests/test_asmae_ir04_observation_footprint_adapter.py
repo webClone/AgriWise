@@ -97,7 +97,7 @@ def test_s2_scene_generates_valid_optical_footprint():
     assert fp is not None
     assert fp.observation_id == scene.scene_id
     assert fp.native_resolution_m == 10.0
-    assert fp.psf_fwhm_m == 12.0
+    assert fp.psf_fwhm_m == pytest.approx(11.774, abs=0.01)
     assert fp.supported_states == S2_OPTICAL_STATES
     assert "vigor" in fp.supported_states
     assert "root_zone_water" not in fp.supported_states
@@ -120,9 +120,10 @@ def test_s1_scene_generates_valid_sar_footprint():
     assert fp is not None
     assert fp.observation_id == scene.scene_id
     assert fp.native_resolution_m == 20.0
-    assert fp.psf_fwhm_m == 20.0
+    assert fp.psf_fwhm_m == pytest.approx(17.661, abs=0.01)
     assert fp.supported_states == S1_SAR_STATES
-    assert "root_zone_water" in fp.supported_states
+    assert "surface_wetness_event" in fp.supported_states
+    assert "root_zone_water" not in fp.supported_states
     assert "vigor" not in fp.supported_states
     assert fp.observability == pytest.approx(0.95, abs=0.01)
 
@@ -295,8 +296,8 @@ def test_s2_footprint_supports_vigor_cell_at_12m_not_1m():
         evidences=(fp,),
     )
     assert record.spatial_support == "local_operator"
-    # Instrument scale is max(native 10.0, PSF 12.0) = 12.0m
-    assert record.effective_resolution_m == 12.0
+    # Instrument scale is max(native 10.0, PSF ~11.774m)
+    assert record.effective_resolution_m == pytest.approx(fp.psf_fwhm_m, abs=0.01)
     assert record.certified_1m is False
     assert record.admitted_observation_ids == (scene.scene_id,)
 

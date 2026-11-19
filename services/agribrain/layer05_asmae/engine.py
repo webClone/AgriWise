@@ -2740,7 +2740,7 @@ class ASMAEEngine:
         valid_time = str(replay_query.get("observation_valid_time") or "")
         knowledge_cutoff = str(replay_query.get("knowledge_cutoff_time") or "")
 
-        # IR04-R04: In live runs lacking replay receipt, derive temporal boundary from observations
+        # IR04-R04: Derive temporal boundary strictly from verified committed observations and durable journal watermarks
         if not valid_time:
             if production_scenes:
                 acq_candidates = [
@@ -2753,17 +2753,14 @@ class ASMAEEngine:
                         valid_time = latest_acq.astimezone(timezone.utc).isoformat()
                     else:
                         valid_time = latest_acq.replace(tzinfo=timezone.utc).isoformat()
-            if not valid_time and getattr(inp, "end_date", None):
-                from datetime import time as _dt_time
-                valid_time = datetime.combine(inp.end_date, _dt_time(23, 59, 59)).replace(tzinfo=timezone.utc).isoformat()
 
         if not knowledge_cutoff:
-            if getattr(inp, "as_of_utc", None):
-                knowledge_cutoff = str(inp.as_of_utc)
-            elif replay_receipt.get("knowledge_watermark"):
+            if replay_receipt.get("knowledge_watermark"):
                 knowledge_cutoff = str(replay_receipt["knowledge_watermark"])
-            elif valid_time:
-                knowledge_cutoff = valid_time
+            elif getattr(inp, "journal_watermark", None):
+                knowledge_cutoff = str(inp.journal_watermark)
+            elif getattr(inp, "as_of_utc", None):
+                knowledge_cutoff = str(inp.as_of_utc)
 
         # IR04-R03: Adapt admitted observation scenes to qualified evidence footprints
         tenant_str = str(getattr(inp, "tenant_id", "") or "")
@@ -2780,6 +2777,7 @@ class ASMAEEngine:
             geometry_sha256=geom_hash_str,
             target_crs=target_crs_str,
             committed_at=knowledge_cutoff if knowledge_cutoff else None,
+            operator_bundle=self._selected_bundle,
         )
 
         statewise_support = build_statewise_engine_support(

@@ -15,6 +15,8 @@ import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .state_cell_support import EvidenceFootprint, STATE_NAMES, SpatialSupportViolation
+from ..chain_integrity import compute_h_matrix_digest
+from ..geometry.psf import get_psf_model
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -23,8 +25,10 @@ S2_OPTICAL_STATES = (
     "vigor", "lai", "chlorophyll", "canopy_water",
     "structure", "bare_soil_fraction", "phenology_progress",
 )
+# C-band SAR directly senses surface roughness and near-surface moisture (top ~5cm).
+# Root-zone soil moisture is an indirect modeled coupling (EnKF propagation), never a direct observation.
 S1_SAR_STATES = (
-    "surface_wetness_event", "root_zone_water", "structure",
+    "surface_wetness_event", "structure",
 )
 
 S2_OPERATOR_SHA256 = hashlib.sha256(b"akaloris/operator/s2_msi/spatial_v1").hexdigest()
@@ -97,6 +101,8 @@ def adapt_scene_to_footprint(
     geometry_sha256: str,
     target_crs: str,
     committed_at: Optional[str] = None,
+    operator: Optional[Any] = None,
+    require_operator_binding: bool = False,
 ) -> Optional[EvidenceFootprint]:
     """Translate an admitted scene into an EvidenceFootprint or fail closed (return None).
 
@@ -105,6 +111,7 @@ def adapt_scene_to_footprint(
     2. Scene must be production-usable or scientifically admitted (not test/diagnostic-only).
     3. Scene CRS must match target projected metric CRS.
     4. Valid non-degenerate bounding box and UTC timestamp required.
+    5. When operator is supplied or required, binds to genuine H_t matrix digest and PSF model.
     """
     if not all((tenant_id, farm_id, plot_id, geometry_sha256, target_crs)):
         return None
@@ -163,23 +170,108 @@ def adapt_scene_to_footprint(
     # Sensor classification
     sensor_raw = str(getattr(scene, "sensor", "") or "").upper()
     if sensor_raw in ("S2", "SENTINEL-2", "SENTINEL_2", "S2_MSI"):
-        native_res = 10.0
-        psf_fwhm = 12.0
+        sensor = "S2"
         supported_states = S2_OPTICAL_STATES
-        op_sha = S2_OPERATOR_SHA256
-        cal_op_sha = S2_CALIBRATED_OPERATOR_SHA256
         cloud_frac = float(getattr(scene, "cloud_fraction", 0.0) or 0.0)
-        observability = max(0.0, min(1.0, 1.0 - cloud_frac))
+        # When per-cell valid_support or operator valid support mask is provided,
+        # cell validity is enforced cell-by-cell. Observability for unmasked cells
+        # is determined by radiometric QA score (or 0.95), not penalized by whole-scene clouds.
+        if (hasattr(scene, "valid_support") and scene.valid_support is not None) or (
+            operator is not None and getattr(operator, "valid_support_hash", "")
+        ):
+            qa = getattr(scene, "qa_score", None)
+            observability = float(qa) if qa is not None and 0 <= float(qa) <= 1 else 0.95
+        else:
+            observability = max(0.0, min(1.0, 1.0 - cloud_frac))
     elif sensor_raw in ("S1", "SENTINEL-1", "SENTINEL_1", "S1_SAR"):
-        native_res = 20.0
-        psf_fwhm = 20.0
+        sensor = "S1"
         supported_states = S1_SAR_STATES
-        op_sha = S1_OPERATOR_SHA256
-        cal_op_sha = S1_CALIBRATED_OPERATOR_SHA256
-        observability = 0.95
+        qa = getattr(scene, "qa_score", None)
+        observability = float(qa) if qa is not None and 0 <= float(qa) <= 1 else 0.85
     else:
         # Unknown or uncalibrated sensor: cannot confer calibrated local footprint
         return None
+
+    band = str(getattr(scene, "band", "") or (getattr(operator, "band", "") if operator else "") or "").upper()
+
+    # PSF & Resolution calibration
+    if operator is not None:
+        blur_sigma = float(getattr(operator, "blur_sigma_m", 0.0) or 0.0)
+        if blur_sigma > 0:
+            psf_model = get_psf_model(sensor, band=band, custom_sigma_m=blur_sigma)
+        else:
+            psf_model = get_psf_model(sensor, band=band)
+        psf_fwhm = round(psf_model.fwhm_m, 4)
+
+        src_res = float(getattr(operator, "source_resolution_m", 0.0) or 0.0)
+        if src_res > 0:
+            native_res = src_res
+        elif sensor == "S2":
+            native_res = 20.0 if band in ("B05", "B06", "B07", "B8A", "B11", "B12") else 10.0
+        else:
+            native_res = 20.0
+    else:
+        if require_operator_binding:
+            return None
+        psf_model = get_psf_model(sensor, band=band)
+        psf_fwhm = round(psf_model.fwhm_m, 4)
+        if hasattr(scene, "psf_fwhm_m") and scene.psf_fwhm_m is not None:
+            psf_fwhm = float(scene.psf_fwhm_m)
+        if hasattr(scene, "native_resolution_m") and scene.native_resolution_m is not None:
+            native_res = float(scene.native_resolution_m)
+        elif sensor == "S2":
+            native_res = 20.0 if band in ("B05", "B06", "B07", "B8A", "B11", "B12") else 10.0
+        else:
+            native_res = 20.0
+
+    valid_cell_indices: Optional[Tuple[int, ...]] = None
+    valid_support_hash: Optional[str] = None
+
+    if operator is not None:
+        if getattr(operator, "scene_id", "") and str(operator.scene_id) != scene_id:
+            return None
+        op_target_crs = str(getattr(operator, "target_crs", "") or "").upper()
+        if op_target_crs and op_target_crs != str(target_crs).upper():
+            return None
+        op_source_crs = str(getattr(operator, "source_crs", "") or "").upper()
+        if op_source_crs and op_source_crs != scene_crs:
+            return None
+
+        h_mat = getattr(operator, "H_matrix", None)
+        matrix_digest = compute_h_matrix_digest(h_mat)
+        if not matrix_digest or not _SHA256_RE.fullmatch(matrix_digest):
+            return None
+        op_sha = matrix_digest
+
+        if h_mat is not None and hasattr(h_mat, "indices"):
+            valid_cell_indices = tuple(sorted(set(int(idx) for idx in h_mat.indices)))
+
+        op_valid_hash = getattr(operator, "valid_support_hash", "") or ""
+        if op_valid_hash:
+            valid_support_hash = op_valid_hash
+            if hasattr(scene, "valid_support") and scene.valid_support is not None:
+                supp_str = str(scene.valid_support).encode()
+                actual_supp_hash = hashlib.sha256(supp_str).hexdigest()
+                if op_valid_hash != actual_supp_hash:
+                    return None
+
+        op_id = getattr(operator, "operator_id", "") or scene_id
+        cal_op_sha = hashlib.sha256(
+            f"{op_id}:{matrix_digest}:{psf_fwhm:.4f}:{native_res}".encode()
+        ).hexdigest()
+    else:
+        op_sha = getattr(scene, "operator_sha256", None) or (S2_OPERATOR_SHA256 if sensor == "S2" else S1_OPERATOR_SHA256)
+        cal_op_sha = getattr(scene, "calibrated_operator_sha256", None) or (S2_CALIBRATED_OPERATOR_SHA256 if sensor == "S2" else S1_CALIBRATED_OPERATOR_SHA256)
+        if hasattr(scene, "valid_support") and scene.valid_support is not None:
+            valid_support = scene.valid_support
+            if isinstance(valid_support, (list, tuple)):
+                val_indices = []
+                w = getattr(scene, "width", 0) or (len(valid_support[0]) if valid_support else 0)
+                for r_idx, row_vals in enumerate(valid_support):
+                    for c_idx, is_valid in enumerate(row_vals):
+                        if is_valid:
+                            val_indices.append(r_idx * w + c_idx)
+                valid_cell_indices = tuple(val_indices)
 
     # Deterministic source content hash
     src_hash = getattr(scene, "content_hash", None) or getattr(scene, "sha256", None)
@@ -208,6 +300,8 @@ def adapt_scene_to_footprint(
             classification="physical",
             nodata=False,
             independent_holdout_sha256=None,
+            valid_cell_indices=valid_cell_indices,
+            valid_support_hash=valid_support_hash,
         )
     except (SpatialSupportViolation, ValueError, TypeError):
         return None
@@ -222,14 +316,27 @@ def adapt_scenes_to_footprints(
     geometry_sha256: str,
     target_crs: str,
     committed_at: Optional[str] = None,
+    operator_bundle: Optional[Any] = None,
+    operators: Optional[Sequence[Any]] = None,
+    require_operator_binding: bool = False,
 ) -> Tuple[EvidenceFootprint, ...]:
     """Translate a sequence of scenes into EvidenceFootprint instances.
 
     Filters out scenes that fail admission, CRS match, or namespace boundaries.
+    Binds post-selection operators when provided via operator_bundle or operators.
     """
+    ops_list = []
+    if operator_bundle is not None:
+        ops_list.extend(getattr(operator_bundle, "operators", ()) or ())
+    if operators:
+        ops_list.extend(operators)
+    op_map = {getattr(op, "scene_id", ""): op for op in ops_list if getattr(op, "scene_id", "")}
+
     footprints: List[EvidenceFootprint] = []
     seen_ids = set()
     for scene in scenes:
+        s_id = str(getattr(scene, "scene_id", "") or "").strip()
+        matched_op = op_map.get(s_id)
         fp = adapt_scene_to_footprint(
             scene,
             tenant_id=tenant_id,
@@ -238,6 +345,8 @@ def adapt_scenes_to_footprints(
             geometry_sha256=geometry_sha256,
             target_crs=target_crs,
             committed_at=committed_at,
+            operator=matched_op,
+            require_operator_binding=require_operator_binding,
         )
         if fp is not None and fp.observation_id not in seen_ids:
             footprints.append(fp)
