@@ -8,13 +8,9 @@ invalid geometry hashes.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
-import base64
+from datetime import datetime, timezone
 import hashlib
-import hmac
-import json
 import math
-import os
 import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -41,76 +37,13 @@ S2_CALIBRATED_OPERATOR_SHA256 = hashlib.sha256(b"akaloris/operator/s2_msi/calibr
 S1_OPERATOR_SHA256 = hashlib.sha256(b"akaloris/operator/s1_cband_sar/spatial_v1").hexdigest()
 S1_CALIBRATED_OPERATOR_SHA256 = hashlib.sha256(b"akaloris/operator/s1_cband_sar/calibrated_psf_v1").hexdigest()
 
-# Cryptographic Admission Authority (IR04-665-01)
-DEFAULT_ADMISSION_KEY_ID = "akaloris-l0-s2-production-key-v1"
-DEFAULT_ADMISSION_SECRET = b"\x1a\xbf\x3c\x8e\x5d\x42\x19\x70" * 4  # 32 bytes
-ADMISSION_GRANT_DOMAIN = "akaloris/layer05/positive-scene-admission/v1"
-ALLOWED_ADMISSION_DOMAINS = frozenset((
-    ADMISSION_GRANT_DOMAIN,
-    "akaloris/layer0/positive-state-observation/v1",
-    "akaloris/layer0/positive-scene-admission/v1",
-    "akaloris/layer0/positive-state-input/v3",
-))
-
-_TRUSTED_KEYRING: Dict[str, Tuple[str, bytes]] = {
-    DEFAULT_ADMISSION_KEY_ID: ("sentinel2", DEFAULT_ADMISSION_SECRET),
-    "akaloris-l0-s1-production-key-v1": ("sentinel1", b"\x2c\xde\x4f\x9a\x6e\x53\x2a\x81" * 4),
-}
-
-
-def register_trusted_admission_key(key_id: str, source: str, secret: bytes) -> None:
-    """Register a trusted issuer key in the process admission keyring."""
-    if not isinstance(key_id, str) or not key_id:
-        raise ValueError("invalid key_id")
-    if not isinstance(secret, bytes) or len(secret) < 32:
-        raise ValueError("issuer secret must be at least 32 bytes")
-    _TRUSTED_KEYRING[key_id] = (str(source), secret)
-
-
-def get_trusted_admission_keyring() -> Dict[str, Tuple[str, bytes]]:
-    """Return immutable copy of trusted issuer keyring, merged with deployment env."""
-    keyring = dict(_TRUSTED_KEYRING)
-    raw_env = os.getenv("AKALORIS_LAYER0_ISSUER_KEYS", "").strip()
-    if raw_env:
-        try:
-            parsed = json.loads(raw_env)
-            if isinstance(parsed, dict):
-                for k_id, cfg in parsed.items():
-                    if isinstance(cfg, dict) and "secret_b64" in cfg:
-                        sec = base64.b64decode(cfg["secret_b64"], validate=True)
-                        if len(sec) >= 32:
-                            keyring[str(k_id)] = (str(cfg.get("source", "unknown")), sec)
-        except Exception:
-            pass
-    return keyring
-
-
-def _normalized(value: Any) -> Any:
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError("nonfinite value in signed grant")
-        return value
-    if isinstance(value, datetime):
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("unsigned or naive timestamp in signed grant")
-        return value.astimezone(timezone.utc).isoformat()
-    if isinstance(value, Mapping):
-        return {str(k): _normalized(v) for k, v in sorted(value.items())}
-    if isinstance(value, (list, tuple)):
-        return [_normalized(item) for item in value]
-    return str(value)
-
-
-def _canonical_bytes(payload: Any) -> bytes:
-    return json.dumps(
-        _normalized(payload),
-        sort_keys=True,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
+# IR04-5CC: verifier-only, externally configured Ed25519 public-key trust.
+# No production issuer secret or receipt-signing function is available here.
+from .admission_trust import (
+    ADMISSION_DOMAIN as ADMISSION_GRANT_DOMAIN,
+    get_trusted_admission_keyring,
+    verify_admission_grant,
+)
 
 
 def compute_scene_asset_sha256(scene: Any) -> Optional[str]:
@@ -159,69 +92,6 @@ def compute_scene_asset_sha256(scene: Any) -> Optional[str]:
     return None
 
 
-def create_scene_admission_receipt(
-    scene: Any,
-    *,
-    tenant_id: str,
-    farm_id: str,
-    plot_id: str,
-    geometry_sha256: str,
-    operator_sha256: str,
-    calibrated_operator_sha256: Optional[str] = None,
-    key_id: str = DEFAULT_ADMISSION_KEY_ID,
-    secret: Optional[bytes] = None,
-    domain: str = ADMISSION_GRANT_DOMAIN,
-    now: Optional[datetime] = None,
-) -> Dict[str, Any]:
-    """Create a signed cryptographic admission receipt for a scene."""
-    asset_sha = compute_scene_asset_sha256(scene)
-    if not asset_sha:
-        raise ValueError("Cannot create admission receipt: scene has no exact asset data")
-
-    valid_time = _ensure_utc_iso(
-        getattr(scene, "acquisition_time", None)
-        or getattr(scene, "timestamp", None)
-        or getattr(scene, "date", None)
-    )
-    commit_time = _ensure_utc_iso(
-        getattr(scene, "committed_at", None)
-        or getattr(scene, "journal_committed_at", None)
-        or getattr(scene, "journal_entry_time", None)
-    )
-    if not valid_time or not commit_time:
-        raise ValueError("Cannot create admission receipt: valid_time or committed_at missing")
-
-    keyring = get_trusted_admission_keyring()
-    if secret is not None:
-        key_secret = secret
-    elif key_id in keyring:
-        key_secret = keyring[key_id][1]
-    else:
-        raise ValueError(f"Unknown key_id {key_id}")
-
-    run_now = now or datetime.now(timezone.utc)
-    grant = {
-        "domain": domain,
-        "purpose": "kalman_state_observation",
-        "key_id": key_id,
-        "source": getattr(scene, "sensor", "sentinel2").lower(),
-        "tenant_id": tenant_id,
-        "farm_id": farm_id,
-        "plot_id": plot_id,
-        "geometry_hash": geometry_sha256,
-        "asset_sha256": asset_sha,
-        "operator_sha256": operator_sha256,
-        "calibrated_operator_sha256": calibrated_operator_sha256 or operator_sha256,
-        "observation_valid_time": valid_time,
-        "committed_at": commit_time,
-        "issued_at": run_now.isoformat(),
-        "expires_at": (run_now + timedelta(days=365)).isoformat(),
-    }
-    canonical = _canonical_bytes(grant)
-    mac = hmac.new(key_secret, canonical, hashlib.sha256).hexdigest()
-    return {"grant": grant, "mac": mac}
-
-
 def verify_scene_admission_receipt(
     receipt: Any,
     *,
@@ -234,79 +104,23 @@ def verify_scene_admission_receipt(
     calibrated_operator_sha256: Optional[str] = None,
     valid_time: str,
     committed_at: str,
-    trusted_keyring: Optional[Mapping[str, Tuple[str, bytes]]] = None,
+    trusted_keyring: Optional[Mapping[str, Any]] = None,
     now: Optional[datetime] = None,
 ) -> Tuple[bool, str]:
-    """Verify signed, immutable provider/Layer0 admission receipt against trusted key.
-
-    Binds:
-    - tenant_id, farm_id, plot_id, geometry_sha256
-    - exact asset SHA-256
-    - operator_sha256 and calibrated_operator_sha256
-    - observation_valid_time and committed_at
-    """
-    if not isinstance(receipt, dict) or set(receipt) != {"grant", "mac"}:
-        return False, "malformed_receipt_structure"
-    grant, mac = receipt["grant"], receipt["mac"]
-    if not isinstance(grant, dict) or not isinstance(mac, str) or len(mac) != 64:
-        return False, "malformed_grant_or_mac"
-
-    keyring = trusted_keyring or get_trusted_admission_keyring()
-    key_id = grant.get("key_id")
-    if not key_id or key_id not in keyring:
-        return False, "untrusted_or_unknown_issuer_key"
-    key_rule = keyring[key_id]
-    secret_bytes = key_rule[1]
-
-    # Verify HMAC signature
-    canonical = _canonical_bytes(grant)
-    expected_mac = hmac.new(secret_bytes, canonical, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected_mac, mac):
-        return False, "forged_admission_signature"
-
-    # Verify domain
-    domain = grant.get("domain")
-    if domain not in ALLOWED_ADMISSION_DOMAINS:
-        return False, "unauthorized_admission_domain"
-
-    # Verify namespace scope
-    if grant.get("tenant_id") != str(tenant_id):
-        return False, "foreign_tenant_scope"
-    if grant.get("farm_id") and grant.get("farm_id") != str(farm_id):
-        return False, "foreign_farm_scope"
-    if grant.get("plot_id") != str(plot_id):
-        return False, "foreign_plot_scope"
-    grant_geom = grant.get("geometry_hash") or grant.get("geometry_sha256")
-    if grant_geom != str(geometry_sha256):
-        return False, "foreign_geometry_digest"
-
-    # Verify exact asset content hash
-    computed_asset_sha = compute_scene_asset_sha256(scene)
-    if not computed_asset_sha or grant.get("asset_sha256") != computed_asset_sha:
-        return False, "swapped_or_unverified_asset_bytes"
-
-    # Verify operator binding
-    if grant.get("operator_sha256") != operator_sha256:
-        return False, "operator_digest_mismatch"
-    if calibrated_operator_sha256 and grant.get("calibrated_operator_sha256"):
-        if grant.get("calibrated_operator_sha256") != calibrated_operator_sha256:
-            return False, "calibrated_operator_mismatch"
-
-    # Verify timestamps
-    if grant.get("observation_valid_time") != valid_time:
-        return False, "observation_time_mismatch"
-    if grant.get("committed_at") != committed_at:
-        return False, "committed_time_mismatch"
-
-    # Expiry
-    check_time = now or datetime.now(timezone.utc)
-    exp = grant.get("expires_at")
-    if exp:
-        exp_dt = _ensure_utc_iso(exp)
-        if exp_dt and datetime.fromisoformat(exp_dt) <= check_time:
-            return False, "expired_admission_receipt"
-
-    return True, "verified_positive_admission_grant"
+    """Verify externally signed Ed25519 authority; never sign in ASMAE."""
+    if trusted_keyring is not None:
+        # Runtime caller must not inject arbitrary verification roots.
+        return False, "caller_supplied_trust_forbidden"
+    return verify_admission_grant(
+        receipt,
+        scene_source=getattr(scene, "sensor", None),
+        tenant_id=str(tenant_id), farm_id=str(farm_id), plot_id=str(plot_id),
+        geometry_sha256=str(geometry_sha256),
+        asset_sha256=compute_scene_asset_sha256(scene),
+        operator_sha256=str(operator_sha256),
+        calibrated_operator_sha256=str(calibrated_operator_sha256 or operator_sha256),
+        valid_time=valid_time, committed_at=committed_at, now=now,
+    )
 
 
 def _ensure_utc_iso(dt: Any) -> Optional[str]:
