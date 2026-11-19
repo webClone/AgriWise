@@ -24,6 +24,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,7 +44,21 @@ logger = logging.getLogger(__name__)
 # Sentinel-2A mission launch date (definitive floor for European open Earth observation)
 MISSION_START_DATE = "2015-06-23T00:00:00+00:00"
 DEFAULT_WINDOW_DAYS = 180  # Half-yearly partition slices
-BOOTSTRAP_STATE_VERSION = "archive_bootstrap_v1"
+BOOTSTRAP_STATE_VERSION = "archive_bootstrap_v2"
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _strict_utc(value: Any, label: str) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label}_must_be_explicit_utc_time")
+    try:
+        instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label}_invalid_timestamp") from exc
+    if instant.tzinfo is None or instant.utcoffset() is None:
+        raise ValueError(f"{label}_timezone_required")
+    return instant.astimezone(timezone.utc)
+
 
 
 @dataclass
@@ -104,7 +121,14 @@ class ArchiveBootstrapService:
     def _checkpoint_path(
         self, plot_id: str, tenant_id: str, namespace: str
     ) -> Path:
-        p = self.bootstrap_root / tenant_id / namespace / plot_id / "checkpoint.json"
+        for name, value in (("tenant_id", tenant_id), ("namespace", namespace), ("plot_id", plot_id)):
+            if (not isinstance(value, str) or not value or value.strip() != value
+                    or value in (".", "..") or "/" in value or chr(92) in value
+                    or chr(0) in value):
+                raise ValueError(f"invalid_archive_checkpoint_{name}")
+        p = (self.bootstrap_root / tenant_id / namespace / plot_id / "checkpoint.json").resolve()
+        if not p.is_relative_to(self.bootstrap_root):
+            raise ValueError("archive_checkpoint_path_escape")
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
@@ -118,17 +142,22 @@ class ArchiveBootstrapService:
             data = json.loads(cp_path.read_text(encoding="utf-8"))
             return BootstrapCheckpoint.from_dict(data)
         except Exception as exc:
-            logger.warning("Corrupted bootstrap checkpoint for %s: %s", plot_id, exc)
-            return None
+            raise RuntimeError("corrupt_archive_bootstrap_checkpoint") from exc
 
     def save_checkpoint(self, checkpoint: BootstrapCheckpoint) -> None:
         cp_path = self._checkpoint_path(
             checkpoint.plot_id, checkpoint.tenant_id, checkpoint.namespace
         )
         checkpoint.updated_at = datetime.now(timezone.utc).isoformat()
-        temp = cp_path.with_suffix(".tmp")
-        temp.write_text(json.dumps(checkpoint.to_dict(), indent=2), encoding="utf-8")
-        temp.replace(cp_path)
+        temp = cp_path.with_name(cp_path.name + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            with temp.open("w", encoding="utf-8") as handle:
+                json.dump(checkpoint.to_dict(), handle, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, cp_path)
+        finally:
+            temp.unlink(missing_ok=True)
 
     @staticmethod
     def _generate_windows(
@@ -166,8 +195,25 @@ class ArchiveBootstrapService:
         now_iso = datetime.now(timezone.utc).isoformat()
         target_end = target_end_date or now_iso
         start_iso = start_date
+        start_dt = _strict_utc(start_iso, "start_date")
+        end_dt = _strict_utc(target_end, "target_end_date")
+        if end_dt <= start_dt or end_dt > datetime.now(timezone.utc) + timedelta(minutes=1):
+            raise ValueError("invalid_or_future_archive_date_range")
+        if type(window_days) is not int or not (1 <= window_days <= 366):
+            raise ValueError("invalid_archive_window_days")
+        if not isinstance(geometry_hash, str) or not _SHA256.fullmatch(geometry_hash):
+            raise ValueError("archive_geometry_requires_sha256")
 
         checkpoint = self.load_checkpoint(plot_id, tenant_id, namespace)
+        if checkpoint:
+            if (checkpoint.bootstrap_version != BOOTSTRAP_STATE_VERSION
+                    or checkpoint.plot_id != plot_id or checkpoint.tenant_id != tenant_id
+                    or checkpoint.namespace != namespace or checkpoint.geometry_hash != geometry_hash
+                    or _strict_utc(checkpoint.mission_start_date, "checkpoint_start") != start_dt
+                    or checkpoint.window_days != window_days):
+                raise RuntimeError("archive_checkpoint_identity_or_version_mismatch")
+            if _strict_utc(checkpoint.target_end_date, "checkpoint_end") > end_dt:
+                raise RuntimeError("archive_target_cannot_move_backwards")
         if not checkpoint:
             checkpoint = BootstrapCheckpoint(
                 bootstrap_version=BOOTSTRAP_STATE_VERSION,
@@ -306,9 +352,9 @@ class ArchiveBootstrapService:
         if self._fetcher_factory:
             return self._fetcher_factory(win_start, win_end)
 
-        # Default provider search or mock generator
-        # In production this queries ArchiveQueryManager / STACClient
-        return []
+        # Never claim completion of 2015+ history with an unconfigured provider.
+        # A configured provider may return an empty list after a successful query.
+        raise RuntimeError("archive_provider_not_configured")
 
     def _commit_scene_to_worldline(
         self,
