@@ -2286,35 +2286,39 @@ class ASMAEEngine:
                 for name, grid in raster_maps.items():
                     orig_maps[name] = grid
                 
-                # Resample raster_maps
-                resampled_raster_maps = {}
-                for name, grid in raster_maps.items():
-                    resampled_raster_maps[name] = self._bilinear_resample(grid, target_h, target_w)
-                raster_maps = resampled_raster_maps
-
-                # Resample uncertainty_maps
-                resampled_unc = {}
-                for name, grid in uncertainty_maps.items():
-                    resampled_unc[name] = self._bilinear_resample(grid, target_h, target_w)
-                uncertainty_maps = resampled_unc
-
-                # Resample confidence_maps
-                resampled_conf = {}
-                for name, grid in confidence_maps.items():
-                    resampled_conf[name] = self._bilinear_resample(grid, target_h, target_w)
-                confidence_maps = resampled_conf
-
-                # Resample retrovalidation_maps
-                resampled_retro = {}
-                for name, grid in retrovalidation_maps.items():
-                    resampled_retro[name] = self._bilinear_resample(grid, target_h, target_w)
-                retrovalidation_maps = resampled_retro
-
-                # Resample bma_maps
-                resampled_bma = {}
-                for name, grid in bma_maps.items():
-                    resampled_bma[name] = self._bilinear_resample(grid, target_h, target_w)
-                bma_maps = resampled_bma
+                # Quick-visual interpolation is display-only. Do not replace
+                # the canonical graph-grid rasters, uncertainty, confidence,
+                # retrovalidation, or BMA maps with interpolated pixels: those
+                # products are exported alongside the native graph grid_spec.
+                display_only_rasters = {
+                    name: self._bilinear_resample(grid, target_h, target_w)
+                    for name, grid in raster_maps.items()
+                }
+                display_only_uncertainty = {
+                    name: self._bilinear_resample(grid, target_h, target_w)
+                    for name, grid in uncertainty_maps.items()
+                }
+                display_only_confidence = {
+                    name: self._bilinear_resample(grid, target_h, target_w)
+                    for name, grid in confidence_maps.items()
+                }
+                display_only_retro = {
+                    name: self._bilinear_resample(grid, target_h, target_w)
+                    for name, grid in retrovalidation_maps.items()
+                }
+                display_only_bma = {
+                    name: self._bilinear_resample(grid, target_h, target_w)
+                    for name, grid in bma_maps.items()
+                }
+                diagnostics["display_only_overlays"] = {
+                    "role": "scouting_display_only_not_scientific_grid",
+                    "resampled_from_microzone": True,
+                    "raster_maps": display_only_rasters,
+                    "uncertainty_maps": display_only_uncertainty,
+                    "confidence_maps": display_only_confidence,
+                    "retrovalidation_maps": display_only_retro,
+                    "bma_maps": display_only_bma,
+                }
 
                 orig_h = len(next(iter(orig_maps.values()))) if orig_maps else 3
                 orig_w = len(next(iter(orig_maps.values()))[0]) if orig_maps else 3
