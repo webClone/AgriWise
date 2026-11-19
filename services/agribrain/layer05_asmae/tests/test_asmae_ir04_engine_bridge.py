@@ -62,3 +62,17 @@ def test_b05_unqualified_future_source_is_ignored():
 def test_b06_deterministic_support_digest():
     kwargs = dict(BASE, raster_maps={'vigor': [[.1,.2],[.3,.4]]}, uncertainty_maps={})
     assert build_statewise_engine_support(**kwargs)['support_records_sha256'] == build_statewise_engine_support(**kwargs)['support_records_sha256']
+
+
+def test_b07_malformed_geometry_digest_fails_closed():
+    kw = dict(BASE); kw['geometry_sha256'] = 'legacy-short'
+    result = build_statewise_engine_support(**kw, raster_maps={'vigor': [[.1,.2],[.3,.4]]}, uncertainty_maps={})
+    assert result['status'] == 'unavailable'
+    assert result['reason'] == 'unqualified_geometry_digest'
+
+
+def test_b08_invalid_knowledge_cutoff_fails_closed():
+    kw = dict(BASE); kw['knowledge_cutoff'] = '2026-11-19T12:00:00'
+    result = build_statewise_engine_support(**kw, raster_maps={'vigor': [[.1,.2],[.3,.4]]}, uncertainty_maps={})
+    assert result['status'] == 'unavailable'
+    assert result['reason'] == 'invalid_bitemporal_boundary'
