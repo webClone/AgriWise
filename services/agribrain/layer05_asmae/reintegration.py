@@ -656,10 +656,10 @@ def rebuild_canonical_plot_snapshot(
     elif supplied is None:
         pairs.extend((
             (result.get("state_means") or result.get("states"),
-             result.get("sigmas") or result.get("uncertainties"), None),
+             result.get("sigmas"), None),
             ((embedded_asmae.get("state_means") or embedded_asmae.get("states"))
              if isinstance(embedded_asmae, dict) else None,
-             (embedded_asmae.get("sigmas") or embedded_asmae.get("uncertainties"))
+             embedded_asmae.get("sigmas")
              if isinstance(embedded_asmae, dict) else None, None),
         ))
     for state_means, sigmas, asserted_hash in pairs:
