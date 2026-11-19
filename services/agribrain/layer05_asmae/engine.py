@@ -2729,25 +2729,70 @@ class ASMAEEngine:
 
         # IR-04/IR-08: evaluate 13 state-specific support layers on the
         # *scientific graph* (never on the resampled quick-visual grid).
-        # No native scene or plot-level boolean is treated as an independently
-        # qualified source footprint. An authoritative upstream footprint
-        # adapter must be established before local fine detail is credited.
         from .resolution.statewise_engine_bridge import build_statewise_engine_support
+        from .resolution.observation_footprint_adapter import adapt_scenes_to_footprints
+
         replay_receipt = getattr(inp, "bitemporal_replay_receipt", {}) or {}
         replay_query = replay_receipt.get("query_parameters", {}) if isinstance(replay_receipt, dict) else {}
         if not isinstance(replay_query, dict):
             replay_query = {}
+
+        valid_time = str(replay_query.get("observation_valid_time") or "")
+        knowledge_cutoff = str(replay_query.get("knowledge_cutoff_time") or "")
+
+        # IR04-R04: In live runs lacking replay receipt, derive temporal boundary from observations
+        if not valid_time:
+            if production_scenes:
+                acq_candidates = [
+                    getattr(s, "acquisition_time", None) for s in production_scenes
+                    if getattr(s, "acquisition_time", None) is not None
+                ]
+                if acq_candidates:
+                    latest_acq = max(acq_candidates)
+                    if hasattr(latest_acq, "tzinfo") and latest_acq.tzinfo is not None:
+                        valid_time = latest_acq.astimezone(timezone.utc).isoformat()
+                    else:
+                        valid_time = latest_acq.replace(tzinfo=timezone.utc).isoformat()
+            if not valid_time and getattr(inp, "end_date", None):
+                from datetime import time as _dt_time
+                valid_time = datetime.combine(inp.end_date, _dt_time(23, 59, 59)).replace(tzinfo=timezone.utc).isoformat()
+
+        if not knowledge_cutoff:
+            if getattr(inp, "as_of_utc", None):
+                knowledge_cutoff = str(inp.as_of_utc)
+            elif replay_receipt.get("knowledge_watermark"):
+                knowledge_cutoff = str(replay_receipt["knowledge_watermark"])
+            elif valid_time:
+                knowledge_cutoff = valid_time
+
+        # IR04-R03: Adapt admitted observation scenes to qualified evidence footprints
+        tenant_str = str(getattr(inp, "tenant_id", "") or "")
+        farm_str = str(getattr(inp, "farm_id", "") or "")
+        plot_str = str(inp.plot_id)
+        geom_hash_str = str(getattr(inp, "geometry_hash", "") or "")
+        target_crs_str = str(grid_spec.get("crs", ""))
+
+        qualified_footprints = adapt_scenes_to_footprints(
+            production_scenes,
+            tenant_id=tenant_str,
+            farm_id=farm_str,
+            plot_id=plot_str,
+            geometry_sha256=geom_hash_str,
+            target_crs=target_crs_str,
+            committed_at=knowledge_cutoff if knowledge_cutoff else None,
+        )
+
         statewise_support = build_statewise_engine_support(
             raster_maps=statewise_scientific_raster_maps,
             uncertainty_maps=statewise_scientific_uncertainty_maps,
             grid_spec=grid_spec,
-            geometry_sha256=str(getattr(inp, "geometry_hash", "") or ""),
-            tenant_id=str(getattr(inp, "tenant_id", "") or ""),
-            farm_id=str(getattr(inp, "farm_id", "") or ""),
-            plot_id=str(inp.plot_id),
-            valid_time=str(replay_query.get("observation_valid_time") or ""),
-            knowledge_cutoff=str(replay_query.get("knowledge_cutoff_time") or ""),
-            qualified_footprints=(),
+            geometry_sha256=geom_hash_str,
+            tenant_id=tenant_str,
+            farm_id=farm_str,
+            plot_id=plot_str,
+            valid_time=valid_time,
+            knowledge_cutoff=knowledge_cutoff,
+            qualified_footprints=qualified_footprints,
         )
         diagnostics["statewise_spatial_support"] = statewise_support
         diagnostics["legacy_effective_resolution_map_role"] = (
