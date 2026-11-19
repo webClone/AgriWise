@@ -139,6 +139,7 @@ class ASMAEInput:
     # Absent values disable statewise evidence claims, never default to now.
     tenant_id: str = ""
     farm_id: str = ""
+    worldline_namespace: str = "default"
     bitemporal_replay_receipt: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
