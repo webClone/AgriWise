@@ -76,3 +76,30 @@ def test_b08_invalid_knowledge_cutoff_fails_closed():
     result = build_statewise_engine_support(**kw, raster_maps={'vigor': [[.1,.2],[.3,.4]]}, uncertainty_maps={})
     assert result['status'] == 'unavailable'
     assert result['reason'] == 'invalid_bitemporal_boundary'
+
+
+def test_b09_native_scientific_support_ignores_resampled_display_arrays():
+    """The engine must pass original scientific grids, not quick-visual overlays."""
+    native_values = {'vigor': [[0.1, 0.2], [0.3, 0.4]]}
+    native_sigmas = {'vigor': [[0.02, 0.03], [0.04, 0.05]]}
+    original = build_statewise_engine_support(
+        **BASE, raster_maps=native_values, uncertainty_maps=native_sigmas)
+    assert original['status'] == 'exploratory_statewise_metadata'
+    assert original['effective_resolution_m_by_state']['vigor'] == [[None] * 2 for _ in range(2)]
+    # A display-only interpolation can expand 2x2 to 8x8 independently.
+    display_values = {'vigor': [[0.2] * 8 for _ in range(8)]}
+    assert build_statewise_engine_support(
+        **BASE, raster_maps=display_values, uncertainty_maps=native_sigmas
+    )['reason'] == 'display_resampling_or_grid_shape_mismatch'
+    assert build_statewise_engine_support(
+        **BASE, raster_maps=native_values, uncertainty_maps=native_sigmas
+    )['support_records_sha256'] == original['support_records_sha256']
+
+
+def test_b10_oversize_grid_is_an_explicit_capacity_gap_not_fine_scientific_proof():
+    kw = dict(BASE)
+    kw['grid_spec'] = dict(BASE['grid_spec'], width=65, height=65)
+    result = build_statewise_engine_support(
+        **kw, raster_maps={}, uncertainty_maps={})
+    assert result['status'] == 'unavailable'
+    assert result['reason'] == 'missing_or_oversize_scientific_grid'
