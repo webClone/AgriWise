@@ -11,12 +11,16 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 import base64
 import hashlib
-import hmac
 import json
 import math
 import os
 import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from dataclasses import dataclass
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric import ed25519
+import rfc8785
 
 from .state_cell_support import EvidenceFootprint, STATE_NAMES, SpatialSupportViolation
 from ..chain_integrity import compute_h_matrix_digest
@@ -41,9 +45,8 @@ S2_CALIBRATED_OPERATOR_SHA256 = hashlib.sha256(b"akaloris/operator/s2_msi/calibr
 S1_OPERATOR_SHA256 = hashlib.sha256(b"akaloris/operator/s1_cband_sar/spatial_v1").hexdigest()
 S1_CALIBRATED_OPERATOR_SHA256 = hashlib.sha256(b"akaloris/operator/s1_cband_sar/calibrated_psf_v1").hexdigest()
 
-# Cryptographic Admission Authority (IR04-665-01)
+# Cryptographic Admission Authority (IR04-665-01, IR04-5CC-P0-01)
 DEFAULT_ADMISSION_KEY_ID = "akaloris-l0-s2-production-key-v1"
-DEFAULT_ADMISSION_SECRET = b"\x1a\xbf\x3c\x8e\x5d\x42\x19\x70" * 4  # 32 bytes
 ADMISSION_GRANT_DOMAIN = "akaloris/layer05/positive-scene-admission/v1"
 ALLOWED_ADMISSION_DOMAINS = frozenset((
     ADMISSION_GRANT_DOMAIN,
@@ -52,65 +55,174 @@ ALLOWED_ADMISSION_DOMAINS = frozenset((
     "akaloris/layer0/positive-state-input/v3",
 ))
 
-_TRUSTED_KEYRING: Dict[str, Tuple[str, bytes]] = {
-    DEFAULT_ADMISSION_KEY_ID: ("sentinel2", DEFAULT_ADMISSION_SECRET),
-    "akaloris-l0-s1-production-key-v1": ("sentinel1", b"\x2c\xde\x4f\x9a\x6e\x53\x2a\x81" * 4),
-}
+ADMISSION_PURPOSE = "kalman_state_observation"
+ADMISSION_SCENE_PURPOSE = "asmae_observation_admission"
+ALLOWED_ADMISSION_PURPOSES = frozenset((
+    ADMISSION_PURPOSE,
+    ADMISSION_SCENE_PURPOSE,
+))
 
 
-def register_trusted_admission_key(key_id: str, source: str, secret: bytes) -> None:
-    """Register a trusted issuer key in the process admission keyring."""
-    if not isinstance(key_id, str) or not key_id:
-        raise ValueError("invalid key_id")
-    if not isinstance(secret, bytes) or len(secret) < 32:
-        raise ValueError("issuer secret must be at least 32 bytes")
-    _TRUSTED_KEYRING[key_id] = (str(source), secret)
+@dataclass(frozen=True)
+class TrustedAdmissionIssuerKey:
+    """Independently provisioned Ed25519 public key and authorized issuer scope."""
+    key_id: str
+    public_key: ed25519.Ed25519PublicKey
+    source: str = "sentinel2"
+    purpose: str = "kalman_state_observation"
 
 
-def get_trusted_admission_keyring() -> Dict[str, Tuple[str, bytes]]:
-    """Return immutable copy of trusted issuer keyring, merged with deployment env."""
-    keyring = dict(_TRUSTED_KEYRING)
-    raw_env = os.getenv("AKALORIS_LAYER0_ISSUER_KEYS", "").strip()
+# Verifier-only: starts strictly EMPTY.
+# Never contains hardcoded private keys or HMAC shared secrets (IR04-5CC-P0-01).
+_TRUSTED_PUBLIC_KEYS: Dict[str, TrustedAdmissionIssuerKey] = {}
+
+
+def register_trusted_admission_public_key(
+    key_id: str,
+    public_key: Any,
+    source: str = "sentinel2",
+    purpose: str = "kalman_state_observation",
+) -> None:
+    """Register an independently provisioned Ed25519 public key in the verifier keyring.
+    
+    Verifier-only: private keys are NEVER registered or stored in the admission verifier.
+    """
+    if not isinstance(key_id, str) or not key_id.strip():
+        raise ValueError("invalid key_id: must be non-empty string")
+    clean_key_id = key_id.strip()
+
+    if isinstance(public_key, ed25519.Ed25519PublicKey):
+        pub = public_key
+    elif isinstance(public_key, bytes):
+        if len(public_key) == 32:
+            pub = ed25519.Ed25519PublicKey.from_public_bytes(public_key)
+        else:
+            raise ValueError(f"Ed25519 public key bytes must be exactly 32 bytes, got {len(public_key)}")
+    elif isinstance(public_key, str):
+        clean_key = public_key.strip()
+        if clean_key.startswith("ed25519:"):
+            clean_key = clean_key[len("ed25519:"):]
+        pub_bytes = bytes.fromhex(clean_key)
+        if len(pub_bytes) != 32:
+            raise ValueError(f"Ed25519 public key hex must decode to 32 bytes, got {len(pub_bytes)}")
+        pub = ed25519.Ed25519PublicKey.from_public_bytes(pub_bytes)
+    else:
+        raise TypeError(f"unsupported public key type: {type(public_key).__name__}")
+
+    _TRUSTED_PUBLIC_KEYS[clean_key_id] = TrustedAdmissionIssuerKey(
+        key_id=clean_key_id,
+        public_key=pub,
+        source=str(source).lower().strip(),
+        purpose=str(purpose).strip(),
+    )
+
+
+def register_trusted_admission_key(
+    key_id: str,
+    source: str,
+    public_key: Any,
+    purpose: str = "kalman_state_observation",
+) -> None:
+    """Alias for register_trusted_admission_public_key."""
+    register_trusted_admission_public_key(key_id, public_key, source=source, purpose=purpose)
+
+
+def clear_trusted_admission_public_keys() -> None:
+    """Clear all registered admission public keys (for test hygiene)."""
+    _TRUSTED_PUBLIC_KEYS.clear()
+
+
+def get_trusted_admission_keyring() -> Dict[str, TrustedAdmissionIssuerKey]:
+    """Return copy of trusted issuer public keys, merged with deployment env.
+    
+    Verifier-only: fails closed (returns empty dict) if no public keys are provisioned.
+    Never exposes or derives private keys.
+    """
+    keyring = dict(_TRUSTED_PUBLIC_KEYS)
+    raw_env = os.getenv("AKALORIS_LAYER0_ADMISSION_PUBLIC_KEYS", "").strip()
     if raw_env:
         try:
             parsed = json.loads(raw_env)
             if isinstance(parsed, dict):
                 for k_id, cfg in parsed.items():
-                    if isinstance(cfg, dict) and "secret_b64" in cfg:
-                        sec = base64.b64decode(cfg["secret_b64"], validate=True)
-                        if len(sec) >= 32:
-                            keyring[str(k_id)] = (str(cfg.get("source", "unknown")), sec)
+                    if isinstance(cfg, dict):
+                        pub_raw = cfg.get("public_key") or cfg.get("public_key_hex") or cfg.get("public_key_b64")
+                        if pub_raw:
+                            if isinstance(pub_raw, str) and not pub_raw.startswith("ed25519:") and len(pub_raw) not in (64, 72):
+                                try:
+                                    decoded = base64.b64decode(pub_raw)
+                                    if len(decoded) == 32:
+                                        pub = ed25519.Ed25519PublicKey.from_public_bytes(decoded)
+                                    else:
+                                        continue
+                                except Exception:
+                                    continue
+                            else:
+                                if isinstance(pub_raw, str) and pub_raw.startswith("ed25519:"):
+                                    pub_raw = pub_raw[len("ed25519:"):]
+                                pub = ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(pub_raw))
+                            src = str(cfg.get("source", "sentinel2")).lower().strip()
+                            purp = str(cfg.get("purpose", "kalman_state_observation")).strip()
+                            keyring[str(k_id)] = TrustedAdmissionIssuerKey(
+                                key_id=str(k_id),
+                                public_key=pub,
+                                source=src,
+                                purpose=purp,
+                            )
+            elif isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, dict) and "key_id" in item:
+                        k_id = str(item["key_id"])
+                        pub_raw = item.get("public_key") or item.get("public_key_hex")
+                        if pub_raw:
+                            if isinstance(pub_raw, str) and pub_raw.startswith("ed25519:"):
+                                pub_raw = pub_raw[len("ed25519:"):]
+                            pub = ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(pub_raw))
+                            src = str(item.get("source", "sentinel2")).lower().strip()
+                            purp = str(item.get("purpose", "kalman_state_observation")).strip()
+                            keyring[k_id] = TrustedAdmissionIssuerKey(
+                                key_id=k_id,
+                                public_key=pub,
+                                source=src,
+                                purpose=purp,
+                            )
         except Exception:
             pass
     return keyring
 
 
-def _normalized(value: Any) -> Any:
+def _canonical_normalize(value: Any) -> Any:
+    """Normalize values for RFC 8785 JSON Canonicalization Scheme (JCS)."""
     if value is None or isinstance(value, (str, bool, int)):
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
-            raise ValueError("nonfinite value in signed grant")
+            raise ValueError("non-finite float in signed grant")
+        if value.is_integer():
+            return int(value)
         return value
     if isinstance(value, datetime):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("unsigned or naive timestamp in signed grant")
         return value.astimezone(timezone.utc).isoformat()
     if isinstance(value, Mapping):
-        return {str(k): _normalized(v) for k, v in sorted(value.items())}
-    if isinstance(value, (list, tuple)):
-        return [_normalized(item) for item in value]
-    return str(value)
+        if any(not isinstance(k, str) for k in value):
+            raise TypeError("signed grant dictionary keys must be strings")
+        return {str(k): _canonical_normalize(v) for k, v in sorted(value.items())}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_canonical_normalize(x) for x in value]
+    raise TypeError(f"unsupported canonical type: {type(value).__name__}")
+
+
+def canonical_grant_bytes(grant_claims: Mapping[str, Any]) -> bytes:
+    """Return deterministic canonical RFC 8785 bytes for grant claims (IR04-5CC-P2-04)."""
+    normalized = _canonical_normalize(grant_claims)
+    return rfc8785.dumps(normalized)
 
 
 def _canonical_bytes(payload: Any) -> bytes:
-    return json.dumps(
-        _normalized(payload),
-        sort_keys=True,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    """Backward-compatible alias for canonical_grant_bytes."""
+    return canonical_grant_bytes(payload)
 
 
 def compute_scene_asset_sha256(scene: Any) -> Optional[str]:
@@ -169,11 +281,25 @@ def create_scene_admission_receipt(
     operator_sha256: str,
     calibrated_operator_sha256: Optional[str] = None,
     key_id: str = DEFAULT_ADMISSION_KEY_ID,
-    secret: Optional[bytes] = None,
+    private_key: Optional[ed25519.Ed25519PrivateKey] = None,
     domain: str = ADMISSION_GRANT_DOMAIN,
+    purpose: str = ADMISSION_PURPOSE,
+    source: Optional[str] = None,
     now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
-    """Create a signed cryptographic admission receipt for a scene."""
+    """Create a signed cryptographic admission receipt for a scene using Ed25519 over RFC 8785 JCS.
+    
+    Requires an explicit authorized issuer private key capability (Ed25519PrivateKey).
+    Private signing keys are NEVER bundled or defaulted into ASMAE source or worker processes.
+    """
+    if private_key is None:
+        raise PermissionError(
+            "Authorized issuer capability required: private_key must be explicitly provided; "
+            "production verifier and worker code cannot self-provision or embed private keys."
+        )
+    if not isinstance(private_key, ed25519.Ed25519PrivateKey):
+        raise TypeError("private_key must be an ed25519.Ed25519PrivateKey instance")
+
     asset_sha = compute_scene_asset_sha256(scene)
     if not asset_sha:
         raise ValueError("Cannot create admission receipt: scene has no exact asset data")
@@ -191,35 +317,32 @@ def create_scene_admission_receipt(
     if not valid_time or not commit_time:
         raise ValueError("Cannot create admission receipt: valid_time or committed_at missing")
 
-    keyring = get_trusted_admission_keyring()
-    if secret is not None:
-        key_secret = secret
-    elif key_id in keyring:
-        key_secret = keyring[key_id][1]
-    else:
-        raise ValueError(f"Unknown key_id {key_id}")
-
+    sensor_str = str(source or getattr(scene, "sensor", "sentinel2")).lower()
     run_now = now or datetime.now(timezone.utc)
     grant = {
-        "domain": domain,
-        "purpose": "kalman_state_observation",
-        "key_id": key_id,
-        "source": getattr(scene, "sensor", "sentinel2").lower(),
-        "tenant_id": tenant_id,
-        "farm_id": farm_id,
-        "plot_id": plot_id,
-        "geometry_hash": geometry_sha256,
-        "asset_sha256": asset_sha,
-        "operator_sha256": operator_sha256,
-        "calibrated_operator_sha256": calibrated_operator_sha256 or operator_sha256,
+        "domain": str(domain),
+        "version": "v1",
+        "canonical_format": "rfc8785_jcs_v1",
+        "algorithm": "Ed25519",
+        "key_id": str(key_id),
+        "purpose": str(purpose),
+        "source": sensor_str,
+        "tenant_id": str(tenant_id),
+        "farm_id": str(farm_id),
+        "plot_id": str(plot_id),
+        "geometry_hash": str(geometry_sha256),
+        "asset_sha256": str(asset_sha),
+        "operator_sha256": str(operator_sha256),
+        "calibrated_operator_sha256": str(calibrated_operator_sha256 or operator_sha256),
         "observation_valid_time": valid_time,
         "committed_at": commit_time,
         "issued_at": run_now.isoformat(),
         "expires_at": (run_now + timedelta(days=365)).isoformat(),
     }
-    canonical = _canonical_bytes(grant)
-    mac = hmac.new(key_secret, canonical, hashlib.sha256).hexdigest()
-    return {"grant": grant, "mac": mac}
+    canonical = canonical_grant_bytes(grant)
+    sig_bytes = private_key.sign(canonical)
+    sig_str = "ed25519:" + sig_bytes.hex()
+    return {"grant": grant, "signature": sig_str, "mac": sig_str}
 
 
 def verify_scene_admission_receipt(
@@ -234,40 +357,80 @@ def verify_scene_admission_receipt(
     calibrated_operator_sha256: Optional[str] = None,
     valid_time: str,
     committed_at: str,
-    trusted_keyring: Optional[Mapping[str, Tuple[str, bytes]]] = None,
+    trusted_keyring: Optional[Mapping[str, TrustedAdmissionIssuerKey]] = None,
     now: Optional[datetime] = None,
 ) -> Tuple[bool, str]:
-    """Verify signed, immutable provider/Layer0 admission receipt against trusted key.
+    """Verify signed, immutable provider/Layer0 admission receipt against trusted Ed25519 public key.
 
     Binds:
     - tenant_id, farm_id, plot_id, geometry_sha256
-    - exact asset SHA-256
+    - exact asset SHA-256 (computed over physical array/payload bytes)
     - operator_sha256 and calibrated_operator_sha256
     - observation_valid_time and committed_at
+    - issuer scope: authorized source/sensor and purpose
+    - Ed25519 cryptographic signature over canonical RFC 8785 JCS bytes
     """
-    if not isinstance(receipt, dict) or set(receipt) != {"grant", "mac"}:
+    if not isinstance(receipt, Mapping):
         return False, "malformed_receipt_structure"
-    grant, mac = receipt["grant"], receipt["mac"]
-    if not isinstance(grant, dict) or not isinstance(mac, str) or len(mac) != 64:
-        return False, "malformed_grant_or_mac"
+    grant = receipt.get("grant")
+    sig_str = receipt.get("signature") or receipt.get("mac")
+    if not isinstance(grant, Mapping) or not isinstance(sig_str, str):
+        return False, "malformed_grant_or_signature"
 
-    keyring = trusted_keyring or get_trusted_admission_keyring()
+    clean_sig = sig_str.strip()
+    if clean_sig.startswith("ed25519:"):
+        clean_sig = clean_sig[len("ed25519:"):]
+    try:
+        sig_bytes = bytes.fromhex(clean_sig)
+        if len(sig_bytes) != 64:
+            return False, "malformed_signature_length"
+    except (ValueError, TypeError):
+        return False, "invalid_signature_hex"
+
+    keyring = trusted_keyring if trusted_keyring is not None else get_trusted_admission_keyring()
+    if not keyring:
+        return False, "no_trusted_public_keys_configured"
+
     key_id = grant.get("key_id")
     if not key_id or key_id not in keyring:
         return False, "untrusted_or_unknown_issuer_key"
-    key_rule = keyring[key_id]
-    secret_bytes = key_rule[1]
+    trusted_key = keyring[key_id]
 
-    # Verify HMAC signature
-    canonical = _canonical_bytes(grant)
-    expected_mac = hmac.new(secret_bytes, canonical, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected_mac, mac):
+    try:
+        canonical_bytes = canonical_grant_bytes(grant)
+        trusted_key.public_key.verify(sig_bytes, canonical_bytes)
+    except InvalidSignature:
         return False, "forged_admission_signature"
+    except Exception as exc:
+        return False, f"canonical_verification_error:{exc}"
 
-    # Verify domain
     domain = grant.get("domain")
     if domain not in ALLOWED_ADMISSION_DOMAINS:
         return False, "unauthorized_admission_domain"
+
+    # IR04-5CC-P1-03: Verify purpose
+    grant_purpose = grant.get("purpose")
+    if grant_purpose not in ALLOWED_ADMISSION_PURPOSES:
+        return False, "wrong_admission_purpose"
+    if trusted_key.purpose and trusted_key.purpose not in ("*", "any") and grant_purpose != trusted_key.purpose:
+        return False, "wrong_admission_purpose"
+
+    # IR04-5CC-P1-03: Verify source & cross-sensor enforcement
+    grant_source = str(grant.get("source") or "").lower().strip()
+    scene_sensor = str(getattr(scene, "sensor", "") or "").lower().strip()
+    s2_variants = ("s2", "sentinel2", "sentinel-2", "sentinel_2", "s2_msi")
+    s1_variants = ("s1", "sentinel1", "sentinel-1", "sentinel_1", "s1_sar")
+
+    grant_norm = "sentinel2" if grant_source in s2_variants else ("sentinel1" if grant_source in s1_variants else grant_source)
+    scene_norm = "sentinel2" if scene_sensor in s2_variants else ("sentinel1" if scene_sensor in s1_variants else scene_sensor)
+
+    if grant_norm != scene_norm:
+        return False, "cross_sensor_admission_denied"
+
+    if trusted_key.source and trusted_key.source not in ("*", "any"):
+        key_source_norm = "sentinel2" if trusted_key.source in s2_variants else ("sentinel1" if trusted_key.source in s1_variants else trusted_key.source)
+        if key_source_norm != grant_norm:
+            return False, "issuer_source_scope_mismatch"
 
     # Verify namespace scope
     if grant.get("tenant_id") != str(tenant_id):
@@ -307,6 +470,117 @@ def verify_scene_admission_receipt(
             return False, "expired_admission_receipt"
 
     return True, "verified_positive_admission_grant"
+
+
+def verify_bitemporal_replay_receipt(
+    receipt: Any,
+    *,
+    tenant_id: str,
+    plot_id: str,
+    geometry_hash: str,
+    journal_watermark: Optional[str] = None,
+) -> Tuple[bool, str, Optional[str]]:
+    """Verify journal authority of bitemporal replay receipt at the engine boundary (IR04-5CC-P1-02).
+
+    Returns (is_valid, reason, validated_knowledge_cutoff).
+
+    Verifies:
+    1. Structure and schema (contract_version == 'canonical_bitemporal_replay_receipt_v1')
+    2. Deterministic replay mode ('bitemporal_deterministic_v1') and status ('replayed')
+    3. Namespace and geometry binding: tenant_id, plot_id, geometry_hash must match query
+    4. Selected evidence set digest integrity: recomputes SHA-256 over canonical sorted
+       selected_evidence_set and compares against evidence_set_digest
+    5. Knowledge cutoff K authority:
+       - knowledge_cutoff_time must be valid UTC ISO string
+       - No event in selected_evidence_set may have committed_at or effective_at strictly
+         greater than K (detects forged cutoff or future bitemporal leakage)
+       - If journal_watermark is provided, K cannot be in the uncommitted future (K <= watermark)
+    """
+    if not isinstance(receipt, Mapping):
+        return False, "missing_or_non_mapping_receipt", None
+
+    contract_ver = receipt.get("contract_version")
+    if contract_ver != "canonical_bitemporal_replay_receipt_v1":
+        return False, f"unsupported_contract_version:{contract_ver}", None
+
+    if receipt.get("replay_mode") != "bitemporal_deterministic_v1":
+        return False, "unsupported_replay_mode", None
+
+    if receipt.get("status") != "replayed":
+        return False, "receipt_not_replayed", None
+
+    if str(receipt.get("tenant_id") or "") != str(tenant_id):
+        return False, "foreign_tenant_receipt", None
+
+    if str(receipt.get("plot_id") or "") != str(plot_id):
+        return False, "foreign_plot_receipt", None
+
+    rec_geom = str(receipt.get("geometry_hash") or "")
+    if rec_geom != str(geometry_hash):
+        return False, "foreign_geometry_receipt", None
+
+    query_params = receipt.get("query_parameters")
+    if not isinstance(query_params, Mapping):
+        return False, "missing_query_parameters", None
+
+    k_str = (
+        query_params.get("knowledge_cutoff_time")
+        or receipt.get("knowledge_watermark")
+        or query_params.get("knowledge_cutoff_K")
+    )
+    if not k_str or not isinstance(k_str, str):
+        return False, "missing_knowledge_cutoff_in_receipt", None
+
+    k_iso = _ensure_utc_iso(k_str)
+    if not k_iso:
+        return False, "invalid_receipt_knowledge_cutoff_utc", None
+
+    k_dt = datetime.fromisoformat(k_iso.replace("Z", "+00:00"))
+
+    # Check watermark if present
+    if journal_watermark:
+        wm_iso = _ensure_utc_iso(journal_watermark)
+        if wm_iso:
+            wm_dt = datetime.fromisoformat(wm_iso.replace("Z", "+00:00"))
+            if k_dt > wm_dt:
+                return False, "forged_cutoff_exceeds_journal_watermark", None
+
+    # Evidence set digest verification
+    ev_digest = receipt.get("evidence_set_digest")
+    if not ev_digest or not isinstance(ev_digest, str):
+        return False, "missing_evidence_set_digest", None
+
+    ev_set = receipt.get("selected_evidence_set")
+    if not isinstance(ev_set, Sequence):
+        return False, "missing_or_invalid_evidence_set", None
+
+    try:
+        sorted_ev = sorted(
+            list(ev_set),
+            key=lambda item: (str(item.get("event_type")), str(item.get("event_id"))),
+        )
+        recomputed_digest = hashlib.sha256(
+            json.dumps(sorted_ev, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        expected_digest_str = f"sha256:{recomputed_digest}"
+        if ev_digest != expected_digest_str and ev_digest != recomputed_digest:
+            return False, "forged_evidence_set_digest", None
+    except Exception as exc:
+        return False, f"evidence_digest_computation_error:{exc}", None
+
+    # Check bitemporal leakage: no event in evidence set may be committed or effective after K
+    for ev in ev_set:
+        if isinstance(ev, Mapping):
+            for t_field in ("committed_at", "journal_committed_at", "effective_at"):
+                t_val = ev.get(t_field)
+                if t_val:
+                    t_iso = _ensure_utc_iso(t_val)
+                    if t_iso:
+                        t_dt = datetime.fromisoformat(t_iso.replace("Z", "+00:00"))
+                        if t_dt > k_dt:
+                            return False, f"bitemporal_leakage_event_after_cutoff:{t_field}", None
+
+    return True, "verified_journal_authority", k_iso
 
 
 def _ensure_utc_iso(dt: Any) -> Optional[str]:

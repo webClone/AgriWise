@@ -2729,18 +2729,49 @@ class ASMAEEngine:
 
         # IR-04/IR-08: evaluate 13 state-specific support layers on the
         # *scientific graph* (never on the resampled quick-visual grid).
+        tenant_str = str(getattr(inp, "tenant_id", "") or "")
+        farm_str = str(getattr(inp, "farm_id", "") or "")
+        plot_str = str(inp.plot_id)
+        geom_hash_str = str(getattr(inp, "geometry_hash", "") or "")
+        target_crs_str = str(grid_spec.get("crs", ""))
+
         from .resolution.statewise_engine_bridge import build_statewise_engine_support
-        from .resolution.observation_footprint_adapter import adapt_scenes_to_footprints
+        from .resolution.observation_footprint_adapter import (
+            adapt_scenes_to_footprints,
+            verify_bitemporal_replay_receipt,
+            _ensure_utc_iso,
+        )
 
-        replay_receipt = getattr(inp, "bitemporal_replay_receipt", {}) or {}
-        replay_query = replay_receipt.get("query_parameters", {}) if isinstance(replay_receipt, dict) else {}
-        if not isinstance(replay_query, dict):
-            replay_query = {}
+        replay_receipt = getattr(inp, "bitemporal_replay_receipt", None)
+        valid_time = ""
+        knowledge_cutoff = ""
 
-        valid_time = str(replay_query.get("observation_valid_time") or "")
-        knowledge_cutoff = str(replay_query.get("knowledge_cutoff_time") or "")
+        # IR04-5CC-P1-02: Require verified journal authority at the engine boundary.
+        # The engine must NEVER blindly read K from unverified receipt fields.
+        if replay_receipt:
+            is_valid_rr, rr_reason, validated_k = verify_bitemporal_replay_receipt(
+                replay_receipt,
+                tenant_id=tenant_str,
+                plot_id=plot_str,
+                geometry_hash=geom_hash_str,
+                journal_watermark=getattr(inp, "journal_watermark", None),
+            )
+            diagnostics["bitemporal_receipt_validation"] = {
+                "valid": is_valid_rr,
+                "reason": rr_reason,
+            }
+            if is_valid_rr and validated_k:
+                knowledge_cutoff = validated_k
+                replay_query = replay_receipt.get("query_parameters", {}) if isinstance(replay_receipt, dict) else {}
+                valid_time = str(replay_query.get("observation_valid_time") or "")
+            else:
+                knowledge_cutoff = ""
+        elif getattr(inp, "journal_watermark", None):
+            wm_iso = _ensure_utc_iso(inp.journal_watermark)
+            if wm_iso:
+                knowledge_cutoff = wm_iso
 
-        # IR04-R04: Derive temporal boundary strictly from verified committed observations and durable journal watermarks
+        # IR04-R04: Derive temporal boundary from scenes if valid_time was not set by validated receipt
         if not valid_time:
             if production_scenes:
                 acq_candidates = [
@@ -2753,31 +2784,6 @@ class ASMAEEngine:
                         valid_time = latest_acq.astimezone(timezone.utc).isoformat()
                     else:
                         valid_time = latest_acq.replace(tzinfo=timezone.utc).isoformat()
-
-        if not knowledge_cutoff:
-            # IR04-665-02: Require verified Worldline replay receipt or authenticated journal watermark.
-            # Never fall back to inp.as_of_utc, which lacks durable journal authority.
-            if (
-                isinstance(replay_receipt, dict)
-                and replay_receipt.get("contract_version") == "canonical_bitemporal_replay_receipt_v1"
-            ):
-                query_params = replay_receipt.get("query_parameters", {})
-                k_candidate = (
-                    query_params.get("knowledge_cutoff_time")
-                    or replay_receipt.get("knowledge_watermark")
-                    or query_params.get("knowledge_cutoff_K")
-                )
-                if k_candidate:
-                    knowledge_cutoff = str(k_candidate)
-            elif getattr(inp, "journal_watermark", None):
-                knowledge_cutoff = str(inp.journal_watermark)
-
-        # IR04-R03: Adapt admitted observation scenes to qualified evidence footprints
-        tenant_str = str(getattr(inp, "tenant_id", "") or "")
-        farm_str = str(getattr(inp, "farm_id", "") or "")
-        plot_str = str(inp.plot_id)
-        geom_hash_str = str(getattr(inp, "geometry_hash", "") or "")
-        target_crs_str = str(grid_spec.get("crs", ""))
 
         qualified_footprints = adapt_scenes_to_footprints(
             production_scenes,

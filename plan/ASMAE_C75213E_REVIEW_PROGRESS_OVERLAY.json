@@ -2,97 +2,61 @@
   "reviewed_at": "2026-11-19",
   "repository": "webClone/AgriWise",
   "review_branch": "feat/akaloris-asmae-ir04-r03-r04-review-20261119",
-  "actual_review_head": "c75213e3e3889c380c623452798a4519d25b472d",
-  "user_reported_sha": "c75213e0ff48ff70a5c4cfc627f12e84d47f9e8f",
   "pr32_head_unchanged": "64a9f69945d8e3eda2bf33de9ff24e98186c9a17",
-  "review_ahead_commits": 3,
-  "review_behind_commits": 0,
   "decision": "candidate_remediated_on_isolated_review_branch_pr32_held_until_authorized",
   "frozen_original_findings": 238,
   "new_original_findings_closed": 0,
   "reported_test_counts": {
-    "layer05_passed": 226,
+    "layer05_passed": 227,
     "layer05_deselected": 1,
     "frontend_passed": 341,
     "typescript_errors": 0,
-    "acceptance_remediation_tests": 4
+    "acceptance_remediation_tests": 5
   },
-  "findings": [
-    {
-      "id": "C752-P1-01",
-      "severity": "P1",
-      "area": "bitemporal",
-      "status": "closed",
-      "reason": "engine passes committed_at=None, adapter derives immutable native commitment, filters independently on valid_time <= T and committed_at <= K"
-    },
-    {
-      "id": "C752-P1-02",
-      "severity": "P1",
-      "area": "admission",
-      "status": "closed",
-      "reason": "mandatory tenant/farm/plot/geometry cross-check; verified provider binding and authentic admission proof required when require_operator_binding=True"
-    },
-    {
-      "id": "C752-P1-03",
-      "severity": "P1",
-      "area": "multiband_psf",
-      "status": "closed",
-      "reason": "multiband S2 scenes containing 20m bands (B05/B11) conservatively resolve to 20m PSF (sigma=10.0m, FWHM ~23.55m, native_res=20m); rejects claiming 10m spatial resolution"
-    },
-    {
-      "id": "C752-P2-04",
-      "severity": "P2",
-      "area": "cold_publication_test",
-      "status": "closed",
-      "reason": "executes rebuild_canonical_plot_snapshot and verified multi-process cold publication and HTTP API reads from isolated OS subprocess against durable disk storage"
-    }
-  ],
   "certification_holds": {
     "one_meter": true,
     "numerical_publication": true,
     "actuator": true
   },
-  "reviewed_candidate": "665b94bf619dccce2adff423e57f2bde97cef21e",
-  "independent_review_2026_11_19": {
-    "status": "qualification_completed_on_review_branch",
+  "independent_security_review_2026_11_19": {
+    "status": "security_remediation_completed_on_review_branch",
     "reviewer_scope": "source_and_execution_adversarial_qualification",
-    "reported_receipts_only": {
-      "backend_passed": 226,
-      "frontend_passed": 341,
-      "new_tests_passed": 4,
-      "typescript_errors": 0
-    },
-    "independently_closed_original_findings": 0,
-    "new_qualification_gates": [
+    "qualification_gates": [
       {
-        "id": "IR04-665-01",
-        "severity": "P1",
-        "status": "CLOSED",
-        "issue": "positive signed source and asset admission validated: exact physical asset array/byte SHA-256 computed; detached HMAC-SHA256 admission receipt verified against trusted key binding tenant, farm, plot, geometry, valid_time, committed_at, and operator digests; forged signatures, swapped bytes, synthetic string arrays, foreign namespaces, and revised products fail closed."
+        "id": "IR04-5CC-P0-01",
+        "severity": "P0",
+        "status": "locally_remediated_awaiting_independent_remote_qualification",
+        "issue": "Embedded production signing secrets removed; asymmetric verifier-only Ed25519 public keys deployed; verifier fails closed when no public keys are configured; signing requires explicit private key capability and raises PermissionError if private_key is omitted (zero embedded or auto-provisioned signing keys)."
       },
       {
-        "id": "IR04-665-02",
+        "id": "IR04-5CC-P1-02",
         "severity": "P1",
-        "status": "CLOSED",
-        "issue": "verified journal authority for bitemporal cutoff K: ungrounded fallback as_of_utc removed from engine.py; verified bitemporal_replay_receipt or durable journal_watermark strictly required; ungrounded cutoff fails closed with unavailable/unbound_namespace_or_bitemporal_receipt; proven through real CanonicalWorldlineService and engine statewise bridge."
+        "status": "locally_remediated_awaiting_independent_remote_qualification",
+        "issue": "Bitemporal authority verified at engine boundary: verify_bitemporal_replay_receipt enforces contract version, replay mode, status, tenant/plot/geometry scope, evidence set digest integrity, and absence of future bitemporal leakage; forged cutoffs and unverified receipts fail closed."
       },
       {
-        "id": "IR04-665-03",
+        "id": "IR04-5CC-P1-03",
         "severity": "P1",
-        "status": "CLOSED",
-        "issue": "worker-first scientific cold publication proven: prepublishing before worker reintegration eliminated; cold store rebuild_canonical_plot_snapshot publishes fresh snapshot with publication_reused=False; out-of-process subprocess loads exact and latest snapshots, verifies numericalBindingValid, derived_publication_status VALID_NORMAL, executes FastAPI TestClient REST endpoints 200, and verifies negative controls (tampered node 409, corrupt head fails closed, missing sigma strips authority)."
+        "status": "locally_remediated_awaiting_independent_remote_qualification",
+        "issue": "Issuer scope & cross-sensor enforcement: verifier enforces authorized sensor source (Sentinel-2 vs Sentinel-1) matching scene and key scope, cross-sensor rejection, and authorized admission purpose (kalman_state_observation / asmae_observation_admission)."
+      },
+      {
+        "id": "IR04-5CC-P2-04",
+        "severity": "P2",
+        "status": "locally_remediated_awaiting_independent_remote_qualification",
+        "issue": "Canonical RFC 8785 JSON Canonicalization Scheme (JCS): replaced ad-hoc Python dictionary dumps with strict RFC 8785 serialization (canonical_grant_bytes via rfc8785.dumps) with non-finite float rejection and canonical_format rfc8785_jcs_v1."
       },
       {
         "id": "IR08-665-04",
         "severity": "P2",
         "status": "OPEN",
-        "issue": "retained safe 20m interim claim (sigma=10.0m, FWHM ~23.55m, native_res=20.0m); IR-08 adaptive resolution not claimed; 1m certification and numerical publication authority remain strictly ON HOLD."
+        "issue": "Retained safe 20m interim claim (sigma=10.0m, FWHM ~23.55m, native_res=20.0m); IR-08 adaptive resolution not claimed; 1m certification and numerical publication authority remain strictly ON HOLD."
       }
     ],
-    "review_report": "docs/ASMAE_IR04_AUTHENTICATED_FOOTPRINT_AND_COLD_PUBLICATION_RECEIPT_2026-11-19.md",
+    "review_report": "docs/ASMAE_IR04_ED25519_ADMISSION_AND_BITEMPORAL_GATE_RECEIPT_2026-11-19.md",
     "pr32_head_held": "64a9f69945d8e3eda2bf33de9ff24e98186c9a17",
     "certification_holds_unchanged": true,
-    "note": "The original historical claimed 'closed' statuses in findings[] are preserved; independent qualification of those claims is tracked separately here. PR #32 remains held until user explicitly authorizes fast-forward."
+    "note": "PR #32 remains held unmerged at 64a9f699 until user explicitly authorizes fast-forward. Master register of 238 findings preserved across 3 cohorts."
   },
   "independent_review_5ccca4a_2026_11_19": {
     "reviewed_commit": "5ccca4aab4717e245fadf36bb13c7a8e0d0be40e",
