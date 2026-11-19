@@ -51,5 +51,47 @@
     "one_meter": true,
     "numerical_publication": true,
     "actuator": true
+  },
+  "reviewed_candidate": "665b94bf619dccce2adff423e57f2bde97cef21e",
+  "independent_review_2026_11_19": {
+    "status": "fast_forward_held_pending_authority_qualification",
+    "reviewer_scope": "source_level_only_not_executed_tests",
+    "reported_receipts_only": {
+      "backend_passed": 226,
+      "frontend_passed": 341,
+      "new_tests_passed": 4,
+      "typescript_errors": 0
+    },
+    "independently_closed_original_findings": 0,
+    "new_qualification_gates": [
+      {
+        "id": "IR04-665-01",
+        "severity": "P1",
+        "status": "OPEN",
+        "issue": "positive signed source and asset admission not validated: metadata flags/product-id and syntactic hashes accepted"
+      },
+      {
+        "id": "IR04-665-02",
+        "severity": "P1",
+        "status": "OPEN",
+        "issue": "per-scene commitment timestamp and K not verified against immutable journal at adapter/engine boundary"
+      },
+      {
+        "id": "IR04-665-03",
+        "severity": "P1",
+        "status": "OPEN",
+        "issue": "worker-first scientific cold publication not proven: snapshot published before reintegration with publication_reused=True"
+      },
+      {
+        "id": "IR08-665-04",
+        "severity": "P2",
+        "status": "OPEN",
+        "issue": "mixed-band scene 20m global conservative operator, not heterogeneous per-state adaptive resolution"
+      }
+    ],
+    "review_report": "docs/ASMAE_665B94B_INDEPENDENT_QUALIFICATION_REVIEW_2026-11-19.md",
+    "pr32_head_held": "64a9f69945d8e3eda2bf33de9ff24e98186c9a17",
+    "certification_holds_unchanged": true,
+    "note": "The original historical claimed 'closed' statuses in findings[] are preserved; independent qualification of those claims is tracked separately here."
   }
 }
