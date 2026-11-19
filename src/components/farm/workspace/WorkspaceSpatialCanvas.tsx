@@ -75,10 +75,10 @@ export default function WorkspaceSpatialCanvas({
       ? (l10.data?.surfaces.find((s) => s.type === "NDVI_DEVIATION") ?? null)
       : null;
 
-  const isScalarOrUnavailable =
+  const isSpatialWithheld =
     activeAsmaeAvailability && !activeAsmaeAvailability.canRenderPixels;
 
-  const effectiveSurface = isScalarOrUnavailable
+  const effectiveSurface = isSpatialWithheld
     ? null
     : (activeAsmaeAvailability?.rasterSurface as any) || l10.activeSurface;
 
@@ -121,8 +121,8 @@ export default function WorkspaceSpatialCanvas({
         />
       )}
 
-      {/* Truthfulness Gate HUD: Appears when a state has scalar values but no certified spatial raster */}
-      {isScalarOrUnavailable && activeAsmaeAvailability && (
+      {/* Truthfulness HUD: distinguish an admitted scalar from blocked/unavailable science. */}
+      {isSpatialWithheld && activeAsmaeAvailability && (
         <div
           className="pw-truthfulness-hud"
           data-testid="pw-truthfulness-hud"
@@ -148,9 +148,14 @@ export default function WorkspaceSpatialCanvas({
         >
           <span style={{ color: "#38bdf8", fontWeight: 800 }}>[TRUTHFULNESS GATE]</span>
           <span>
-            ASMAE State <strong>{activeAsmaeAvailability.state.name}</strong> is a scalar-only estimate
-            {activeAsmaeAvailability.mean !== null ? ` (${activeAsmaeAvailability.mean} ± ${activeAsmaeAvailability.sigma} ${activeAsmaeAvailability.state.unit})` : ""}.
-            Full-field spatial raster withheld.
+            ASMAE State <strong>{activeAsmaeAvailability.state.name}</strong>{" "}
+            {activeAsmaeAvailability.canonicalStatus === "PLOT_ESTIMATE" && activeAsmaeAvailability.mean !== null
+              ? `has an admitted plot-level scalar estimate (${activeAsmaeAvailability.mean}${activeAsmaeAvailability.sigma !== null ? ` ± ${activeAsmaeAvailability.sigma}` : " (uncertainty unavailable)"} ${activeAsmaeAvailability.state.unit}). Full-field spatial raster withheld.`
+              : activeAsmaeAvailability.canonicalStatus === "BLOCKED"
+                ? "has a blocked scientific publication or authority for this context. No scientific estimate or raster is authorized."
+                : activeAsmaeAvailability.canonicalStatus === "UNAVAILABLE"
+                  ? "has no admitted scientific estimate for this context. No scientific raster is available."
+                  : "has no renderable qualified spatial surface for this context. Scientific raster withheld."}
           </span>
         </div>
       )}
