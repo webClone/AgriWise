@@ -104,6 +104,7 @@ def _make_scene(sensor: str = "S2", band: str = "B08", **kwargs):
         scientific_surface_allowed=True,
         state_update_allowed=True,
         test_override=False,
+        committed_at=datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc),
     )
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
@@ -259,6 +260,20 @@ def test_h03_s2_cloud_mask_supports_only_unmasked_pixels():
         cloud_fraction=0.50,
         valid_support=mask,
     )
+    row, col = np.array([0, 1]), np.array([2, 3])
+    H = sp.csr_matrix(([1.0, 1.0], (row, col)), shape=(2, 4))
+    op = ObservationOperatorRuntime(
+        operator_id="op_h03",
+        scene_id=scene.scene_id,
+        sensor="S2",
+        source_resolution_m=10.0,
+        target_resolution_m=10,
+        source_crs=METRIC_CRS,
+        target_crs=METRIC_CRS,
+        source_transform=[500000.0, 10.0, 0.0, 4000000.0, 0.0, -10.0],
+        target_transform=[500000.0, 10.0, 0.0, 4000000.0, 0.0, -10.0],
+        H_matrix=H,
+    )
     fp = adapt_scene_to_footprint(
         scene,
         tenant_id=TENANT,
@@ -266,6 +281,7 @@ def test_h03_s2_cloud_mask_supports_only_unmasked_pixels():
         plot_id=PLOT,
         geometry_sha256=GEOM_HASH,
         target_crs=METRIC_CRS,
+        operator=op,
     )
     assert fp is not None
     assert fp.valid_cell_indices == (2, 3), "Only unmasked pixels (row 1, cols 0 and 1) should be in valid_cell_indices"

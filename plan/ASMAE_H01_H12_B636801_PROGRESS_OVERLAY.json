@@ -1,0 +1,83 @@
+{
+  "schema": "akaloris/asmae-progress-overlay/v1",
+  "as_of_utc": "2026-11-19T18:25:00Z",
+  "purpose": "Append-only progress overlay tracking candidate b636801 and remediation of findings HNEW-01 through HNEW-06 against the frozen master audit",
+  "frozen_audit": {
+    "repository": "webClone/AgriWise",
+    "source_revision": "a86effb364e46f0806613babcd1b1edfed018157",
+    "source_reviewed_files": 155,
+    "total_findings": 238,
+    "cohort_counts": {
+      "COHORT-1": 40,
+      "COHORT-2": 48,
+      "COHORT-3": 150
+    },
+    "closed_findings": 0,
+    "preserved_holds": [
+      "1m_spatial_certification_on_hold",
+      "numerical_publication_authority_on_hold",
+      "physical_actuator_interlocks_fail_closed"
+    ]
+  },
+  "branch_state": {
+    "protected_main": "6edd3721c0defa7eed94b44cf96601ba59a49696",
+    "pr_30_remote_head": "599c4f6 (reconciled branch record; draft/unmerged)",
+    "pr_32_remote_head": "64a9f69945d8e3eda2bf33de9ff24e98186c9a17 (draft/unmerged)",
+    "review_branch": "feat/akaloris-asmae-ir04-r03-r04-review-20261119",
+    "current_commit": "b6368010fdff16875b5049d1c53609cc1595be3f",
+    "ancestry_verified": "Clean direct descendant of PR #32 head 64a9f699"
+  },
+  "remediated_review_findings": {
+    "HNEW-01": {
+      "priority": "P1",
+      "issue": "Matched operator not mandatory in engine; operator-less footprints used static hashes and synthetic source-identity hashes",
+      "status": "REMEDIATED",
+      "implementation": "services/agribrain/layer05_asmae/engine.py:2781 requires operator_bundle binding; services/agribrain/layer05_asmae/resolution/observation_footprint_adapter.py fails closed on unmatched scene and rejects fabricated source hashes",
+      "verification": "test_hnew_01_mandatory_operator_binding_rejects_unmatched_scene PASSED"
+    },
+    "HNEW-02": {
+      "priority": "P1",
+      "issue": "committed_at defaulted to valid_time; engine assigned single knowledge cutoff; naive timestamp timezone inference",
+      "status": "REMEDIATED",
+      "implementation": "services/agribrain/layer05_asmae/resolution/observation_footprint_adapter.py: _ensure_utc_iso strictly prohibits naive timestamps; extracts per-scene committed_at without valid_time fallback",
+      "verification": "test_hnew_02_strict_commitment_and_naive_timezone_rejection PASSED"
+    },
+    "HNEW-03": {
+      "priority": "P1",
+      "issue": "Real selected H_t PSF construction omitted S2 band, defaulting to 10m sigma=5.0m for 20m bands",
+      "status": "REMEDIATED",
+      "implementation": "services/agribrain/layer05_asmae/geometry/operator_builder.py:286,508 passes band=scene.band to get_psf_model, yielding FWHM ~23.548m for S2 20m bands and ~11.774m for 10m bands",
+      "verification": "test_hnew_03_operator_builder_s2_band_dependent_gaussian_psf PASSED"
+    },
+    "HNEW-04": {
+      "priority": "P1",
+      "issue": "valid_cell_indices conflated raw scene-pixel coordinates with target graph cells when operator was omitted",
+      "status": "REMEDIATED",
+      "implementation": "services/agribrain/layer05_asmae/resolution/observation_footprint_adapter.py: valid_cell_indices is None without operator; derives strictly from H_t CSR column indices",
+      "verification": "test_hnew_04_target_graph_cell_index_grounding PASSED"
+    },
+    "HNEW-05": {
+      "priority": "P1",
+      "issue": "Weak production flags admitted diagnostic scenes; farm and geometry namespaces were not fully cross-checked",
+      "status": "REMEDIATED",
+      "implementation": "services/agribrain/layer05_asmae/resolution/observation_footprint_adapter.py rejects diagnostic_only=True and test_override=True; strictly validates tenant_id, farm_id, plot_id, and geometry_sha256",
+      "verification": "test_hnew_05_scene_admission_and_strict_namespace_cross_check PASSED"
+    },
+    "HNEW-06": {
+      "priority": "P1",
+      "issue": "Cold publication tests did not execute full worker reintegration or cross-process HTTP API cold reads",
+      "status": "REMEDIATED",
+      "implementation": "services/agribrain/layer05_asmae/tests/test_asmae_hnew01_hnew06_source_review_remediation.py: verified publish_canonical_plot_snapshot, FastAPI TestClient /v2/snapshots/{id} (200 OK + numericalBindingValid=True), /v2/plots/{plot_id}/snapshot, and 409 Conflict on tampered data",
+      "verification": "test_hnew_06_worker_reintegration_and_http_cold_publication_path PASSED"
+    }
+  },
+  "test_execution_receipts": {
+    "hnew01_hnew06_suite": "6 / 6 PASSED in 3.68s",
+    "h01_h12_adversarial_suite": "12 / 12 PASSED in 1.28s",
+    "ir04_ir08_suite": "62 / 62 PASSED in 2.40s",
+    "all_ir_suites": "113 / 113 PASSED (1 warning) in 17.42s",
+    "full_layer05_backend": "222 PASSED, 1 deselected, 1 warning, 3 subtests passed in 93.83s",
+    "full_frontend_suite": "341 / 341 PASSED (47 test files) in 4.34s",
+    "typescript_compiler": "0 errors (clean)"
+  }
+}

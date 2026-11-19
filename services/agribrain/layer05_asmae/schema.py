@@ -254,6 +254,13 @@ class ASMAESceneRuntime:
     provider_orbit_pass: Optional[str] = None
     product_binding: str = "unknown"
     binding_proof: Dict[str, Any] = field(default_factory=dict)
+    committed_at: Optional[Any] = None
+    content_hash: Optional[str] = None
+    band: Optional[str] = None
+    tenant_id: Optional[str] = None
+    farm_id: Optional[str] = None
+    plot_id: Optional[str] = None
+    geometry_sha256: Optional[str] = None
 
 
 @dataclass
@@ -290,6 +297,13 @@ class ASMAESceneManifest:
     provider_orbit_pass: Optional[str] = None
     product_binding: str = "unknown"
     binding_proof: Dict[str, Any] = field(default_factory=dict)
+    committed_at: Optional[Any] = None
+    content_hash: Optional[str] = None
+    band: Optional[str] = None
+    tenant_id: Optional[str] = None
+    farm_id: Optional[str] = None
+    plot_id: Optional[str] = None
+    geometry_sha256: Optional[str] = None
 
 
     transform_convention: str = 'gdal'

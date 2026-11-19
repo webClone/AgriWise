@@ -39,23 +39,30 @@ S1_CALIBRATED_OPERATOR_SHA256 = hashlib.sha256(b"akaloris/operator/s1_cband_sar/
 
 
 def _ensure_utc_iso(dt: Any) -> Optional[str]:
-    """Convert datetime or ISO string to standard UTC ISO-8601 string."""
+    """Convert datetime or ISO string to standard UTC ISO-8601 string.
+
+    Prohibits naive timestamp timezone inference: any string or datetime
+    without an explicit timezone offset ('Z', '+', '-') is rejected.
+    """
     if dt is None:
         return None
     if isinstance(dt, datetime):
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        else:
-            dt = dt.astimezone(timezone.utc)
-        return dt.isoformat()
+            # Explicitly reject naive datetime (no inference)
+            return None
+        return dt.astimezone(timezone.utc).isoformat()
     if isinstance(dt, str):
+        val = dt.strip()
+        if not val:
+            return None
+        # Must have an explicit timezone indicator: 'Z' or '+HH:MM' or '-HH:MM'
+        if not (val.endswith("Z") or ("+" in val[10:]) or ("-" in val[10:] and len(val) > 19)):
+            return None
         try:
-            parsed = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(val.replace("Z", "+00:00"))
             if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            else:
-                parsed = parsed.astimezone(timezone.utc)
-            return parsed.isoformat()
+                return None
+            return parsed.astimezone(timezone.utc).isoformat()
         except ValueError:
             return None
     return None
@@ -118,24 +125,31 @@ def adapt_scene_to_footprint(
     if not _SHA256_RE.fullmatch(geometry_sha256):
         return None
 
-    # Check scene admission / reality attributes
+    # Check scene admission / reality attributes (HNEW-05)
     if getattr(scene, "test_override", False):
         return None
-    is_prod_usable = bool(getattr(scene, "production_usable", False) or getattr(scene, "real_provider_product", False))
-    is_diagnostic = bool(getattr(scene, "diagnostic_only", True))
-    is_surface_allowed = bool(
-        getattr(scene, "scientific_surface_allowed", False)
-        or getattr(scene, "state_update_allowed", False)
-    )
-    if is_diagnostic and not is_prod_usable and not is_surface_allowed:
+    if getattr(scene, "diagnostic_only", False):
         return None
 
-    # Namespace match: if scene carries tenant/farm/plot identity, it must match
+    is_prod_usable = bool(
+        getattr(scene, "production_usable", False)
+        or getattr(scene, "scientifically_admitted", False)
+    )
+    if not is_prod_usable:
+        return None
+
+    # Namespace match: if scene carries tenant/farm/plot identity, it must match (HNEW-05)
     scene_tenant = getattr(scene, "tenant_id", None)
     if scene_tenant and str(scene_tenant) != str(tenant_id):
         return None
+    scene_farm = getattr(scene, "farm_id", None)
+    if scene_farm and str(scene_farm) != str(farm_id):
+        return None
     scene_plot = getattr(scene, "plot_id", None)
     if scene_plot and str(scene_plot) != str(plot_id):
+        return None
+    scene_geom = getattr(scene, "geometry_sha256", None) or getattr(scene, "geometry_hash", None)
+    if scene_geom and str(scene_geom) != str(geometry_sha256):
         return None
 
     # CRS match: scene must match the target projected metric grid CRS
@@ -165,7 +179,17 @@ def adapt_scene_to_footprint(
     if not valid_time:
         return None
 
-    commit_iso = _ensure_utc_iso(committed_at) or valid_time
+    # Bitemporal commitment extraction (HNEW-02)
+    scene_comm = (
+        getattr(scene, "committed_at", None)
+        or getattr(scene, "journal_committed_at", None)
+        or getattr(scene, "journal_entry_time", None)
+    )
+    commit_input = committed_at if committed_at is not None else scene_comm
+    commit_iso = _ensure_utc_iso(commit_input)
+    if not commit_iso:
+        # Prohibits ungrounded temporal commitment: never fall back to valid_time
+        return None
 
     # Sensor classification
     sensor_raw = str(getattr(scene, "sensor", "") or "").upper()
@@ -260,22 +284,24 @@ def adapt_scene_to_footprint(
             f"{op_id}:{matrix_digest}:{psf_fwhm:.4f}:{native_res}".encode()
         ).hexdigest()
     else:
+        if require_operator_binding:
+            return None
         op_sha = getattr(scene, "operator_sha256", None) or (S2_OPERATOR_SHA256 if sensor == "S2" else S1_OPERATOR_SHA256)
         cal_op_sha = getattr(scene, "calibrated_operator_sha256", None) or (S2_CALIBRATED_OPERATOR_SHA256 if sensor == "S2" else S1_CALIBRATED_OPERATOR_SHA256)
-        if hasattr(scene, "valid_support") and scene.valid_support is not None:
-            valid_support = scene.valid_support
-            if isinstance(valid_support, (list, tuple)):
-                val_indices = []
-                w = getattr(scene, "width", 0) or (len(valid_support[0]) if valid_support else 0)
-                for r_idx, row_vals in enumerate(valid_support):
-                    for c_idx, is_valid in enumerate(row_vals):
-                        if is_valid:
-                            val_indices.append(r_idx * w + c_idx)
-                valid_cell_indices = tuple(val_indices)
+        # HNEW-04: Without bound operator, scene-pixel indices must NOT be mapped to target graph cells
+        valid_cell_indices = None
 
-    # Deterministic source content hash
-    src_hash = getattr(scene, "content_hash", None) or getattr(scene, "sha256", None)
+    # Deterministic source content hash (HNEW-01)
+    src_hash = (
+        getattr(scene, "content_hash", None)
+        or getattr(scene, "sha256", None)
+        or getattr(scene, "source_asset_sha256", None)
+        or getattr(scene, "immutable_source_sha256", None)
+        or (getattr(operator, "source_sha256", None) if operator else None)
+    )
     if not src_hash or not isinstance(src_hash, str) or not _SHA256_RE.fullmatch(src_hash):
+        if require_operator_binding:
+            return None
         prov_ref = getattr(scene, "provider_product_id", "") or getattr(scene, "provenance_ref", "") or scene_id
         src_hash = hashlib.sha256(f"{sensor_raw}:{scene_id}:{prov_ref}:{valid_time}".encode()).hexdigest()
 

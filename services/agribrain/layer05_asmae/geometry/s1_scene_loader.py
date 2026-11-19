@@ -352,6 +352,13 @@ def _process_s1_package(
     runtime.holdout_proof = getattr(candidate, "holdout_proof", None) or runtime.binding_proof.get("holdout_proof")
     runtime.registration_proof = getattr(candidate, "registration_proof", None) or runtime.binding_proof.get("registration_proof")
     runtime.field_approval = getattr(candidate, "field_approval", None) or runtime.binding_proof.get("field_approval")
+    runtime.content_hash = getattr(candidate, "content_hash", None) or getattr(candidate, "sha256", None)
+    runtime.committed_at = getattr(candidate, "committed_at", None) or getattr(candidate, "journal_committed_at", None)
+    runtime.band = getattr(candidate, "band", None)
+    runtime.tenant_id = getattr(candidate, "tenant_id", None)
+    runtime.farm_id = getattr(candidate, "farm_id", None)
+    runtime.plot_id = getattr(candidate, "plot_id", None)
+    runtime.geometry_sha256 = getattr(candidate, "geometry_sha256", None) or getattr(candidate, "geometry_hash", None)
     if runtime.production_usable and runtime.product_binding != "exact_catalog_item":
         runtime.production_usable = False
         runtime.real_provider_product = False

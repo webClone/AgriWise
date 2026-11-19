@@ -2778,6 +2778,7 @@ class ASMAEEngine:
             target_crs=target_crs_str,
             committed_at=knowledge_cutoff if knowledge_cutoff else None,
             operator_bundle=self._selected_bundle,
+            require_operator_binding=True,
         )
 
         statewise_support = build_statewise_engine_support(

@@ -283,7 +283,8 @@ def build_observation_operator(
     """
     # Defaults
     if psf_model is None:
-        psf_model = get_psf_model(scene.sensor)
+        band = getattr(scene, "band", None)
+        psf_model = get_psf_model(scene.sensor, band=band)
 
     shift_x = 0.0
     shift_y = 0.0
@@ -504,7 +505,8 @@ def build_operators_for_stack(
         if cloud_masks and scene.scene_id in cloud_masks:
             mask = cloud_masks[scene.scene_id]
 
-        psf = get_psf_model(scene.sensor)
+        band = getattr(scene, "band", None)
+        psf = get_psf_model(scene.sensor, band=band)
 
         try:
             op = build_observation_operator(

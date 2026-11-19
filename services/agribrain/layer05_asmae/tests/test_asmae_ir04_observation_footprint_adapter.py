@@ -53,6 +53,7 @@ def _make_s2_scene(**kwargs):
         scientific_surface_allowed=True,
         state_update_allowed=True,
         test_override=False,
+        committed_at=datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc),
     )
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
@@ -75,6 +76,7 @@ def _make_s1_scene(**kwargs):
         scientific_surface_allowed=True,
         state_update_allowed=True,
         test_override=False,
+        committed_at=datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc),
     )
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
