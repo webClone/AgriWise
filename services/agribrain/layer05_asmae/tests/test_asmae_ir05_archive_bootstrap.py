@@ -295,5 +295,132 @@ class ASMAEIR05ArchiveBootstrapTests(unittest.TestCase):
         self.assertEqual(cp.total_events_committed, 2)
 
 
+    def test_ir05_t06_missing_real_archive_provider_never_completes(self):
+        service = ArchiveBootstrapService(worldline=self.worldline, bootstrap_root=self.bootstrap_root)
+        with self.assertRaisesRegex(RuntimeError, "archive_provider_not_configured"):
+            service.run_bootstrap(
+                plot_id=self.plot_id, geometry_hash=self.geometry_hash,
+                tenant_id=self.tenant_id, namespace=self.namespace,
+                target_end_date="2015-12-23T00:00:00Z",
+            )
+        checkpoint = service.load_checkpoint(self.plot_id, self.tenant_id, self.namespace)
+        self.assertEqual(checkpoint.status, "FAILED")
+        self.assertEqual(checkpoint.total_events_committed, 0)
+
+    def test_ir05_t07_checkpoint_corruption_must_not_restart_as_new(self):
+        service = ArchiveBootstrapService(
+            worldline=self.worldline, bootstrap_root=self.bootstrap_root,
+            fetcher_factory=self._mock_fetcher,
+        )
+        path = service._checkpoint_path(self.plot_id, self.tenant_id, self.namespace)
+        path.write_text("{bad_json", encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "corrupt_archive_bootstrap_checkpoint"):
+            service.run_bootstrap(
+                plot_id=self.plot_id, geometry_hash=self.geometry_hash,
+                tenant_id=self.tenant_id, namespace=self.namespace,
+                target_end_date="2015-12-23T00:00:00Z",
+            )
+        self.assertEqual(path.read_text(encoding="utf-8"), "{bad_json")
+
+    def test_ir05_t08_checkpoint_namespace_traversal_rejected(self):
+        service = ArchiveBootstrapService(worldline=self.worldline, bootstrap_root=self.bootstrap_root)
+        with self.assertRaisesRegex(ValueError, "invalid_archive_checkpoint_tenant_id"):
+            service.load_checkpoint(self.plot_id, "../foreign", self.namespace)
+        with self.assertRaisesRegex(ValueError, "invalid_archive_checkpoint_plot_id"):
+            service.load_checkpoint("../plot", self.tenant_id, self.namespace)
+
+    def test_ir05_t09_changed_geometry_cannot_reuse_prior_checkpoint(self):
+        service = ArchiveBootstrapService(
+            worldline=self.worldline, bootstrap_root=self.bootstrap_root,
+            fetcher_factory=self._mock_fetcher,
+        )
+        args = dict(
+            plot_id=self.plot_id, geometry_hash=self.geometry_hash,
+            tenant_id=self.tenant_id, namespace=self.namespace,
+            target_end_date="2015-12-23T00:00:00Z",
+        )
+        service.run_bootstrap(**args)
+        with self.assertRaisesRegex(RuntimeError, "archive_checkpoint_identity_or_version_mismatch"):
+            service.run_bootstrap(**dict(args, geometry_hash="b" * 64))
+
+    def test_ir05_t10_scene_beyond_window_must_fail_closed(self):
+        def malicious_fetcher(start, end):
+            scene = self._mock_fetcher(start, end)[0]
+            scene["acquisition_time"] = "2099-01-01T00:00:00Z"
+            return [scene]
+        service = ArchiveBootstrapService(
+            worldline=self.worldline, bootstrap_root=self.bootstrap_root,
+            fetcher_factory=malicious_fetcher,
+        )
+        with self.assertRaisesRegex(RuntimeError, "scene_outside_queried_archive_window"):
+            service.run_bootstrap(
+                plot_id=self.plot_id, geometry_hash=self.geometry_hash,
+                tenant_id=self.tenant_id, namespace=self.namespace,
+                target_end_date="2015-12-23T00:00:00Z",
+            )
+        self.assertEqual(
+            self.worldline.load_all_events(self.plot_id, self.tenant_id, self.namespace), []
+        )
+
+    def test_ir05_t11_crash_after_commit_does_not_duplicate_inventory(self):
+        service = ArchiveBootstrapService(
+            worldline=self.worldline, bootstrap_root=self.bootstrap_root,
+            fetcher_factory=self._mock_fetcher,
+        )
+        original = service._commit_scene_to_worldline
+        count = [0]
+        def crash_once(*args, **kwargs):
+            event_id = original(*args, **kwargs)
+            count[0] += 1
+            if count[0] == 1:
+                raise RuntimeError("simulated_postcommit_crash")
+            return event_id
+        service._commit_scene_to_worldline = crash_once
+        args = dict(
+            plot_id=self.plot_id, geometry_hash=self.geometry_hash,
+            tenant_id=self.tenant_id, namespace=self.namespace,
+            target_end_date="2015-12-23T00:00:00Z",
+        )
+        with self.assertRaisesRegex(RuntimeError, "simulated_postcommit_crash"):
+            service.run_bootstrap(**args)
+        events = self.worldline.load_all_events(self.plot_id, self.tenant_id, self.namespace)
+        self.assertEqual(len(events), 1)
+        service._commit_scene_to_worldline = original
+        result = service.run_bootstrap(**args)
+        self.assertEqual(result["status"], "COMPLETED")
+        events = self.worldline.load_all_events(self.plot_id, self.tenant_id, self.namespace)
+        self.assertEqual(len(events), 2)
+        self.assertTrue(all(event["event_type"] == "ARCHIVE_SCENE_INGESTED" for event in events))
+        self.assertTrue(all(
+            event["payload"]["archive_scene"]["posterior_validated"] is False
+            for event in events
+        ))
+
+    def test_ir05_t12_scene_revision_requires_selective_replay(self):
+        service = ArchiveBootstrapService(
+            worldline=self.worldline, bootstrap_root=self.bootstrap_root,
+            fetcher_factory=self._mock_fetcher,
+        )
+        args = dict(
+            plot_id=self.plot_id, geometry_hash=self.geometry_hash,
+            tenant_id=self.tenant_id, namespace=self.namespace,
+            target_end_date="2015-12-23T00:00:00Z",
+        )
+        service.run_bootstrap(**args)
+        def revised(start, end):
+            scenes = self._mock_fetcher(start, end)
+            scenes[0]["source_content_hash"] = "d" * 64
+            return scenes
+        service._fetcher_factory = revised
+        # Expanding the archive forces a new window; a repeated earlier window
+        # is explicitly checked below using the uncommitted-window replay path.
+        cp = service.load_checkpoint(self.plot_id, self.tenant_id, self.namespace)
+        cp.current_cursor = MISSION_START_DATE
+        cp.status = "FAILED"
+        service.save_checkpoint(cp)
+        with self.assertRaisesRegex(RuntimeError, "archive_scene_revision_requires_selective_replay"):
+            service.run_bootstrap(**args)
+
+
 if __name__ == "__main__":
     unittest.main()
