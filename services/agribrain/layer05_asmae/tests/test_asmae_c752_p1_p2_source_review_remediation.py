@@ -12,7 +12,8 @@ Covers the four open source review blockers from plan/ASMAE_C75213E_INDEPENDENT_
                    cold publication read proof via isolated OS subprocess against durable disk storage.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+import base64
 import hashlib
 import json
 import os
@@ -48,10 +49,7 @@ from services.agribrain.layer05_asmae.resolution.observation_footprint_adapter i
     adapt_scene_to_footprint,
     adapt_scenes_to_footprints,
     compute_scene_asset_sha256,
-    create_scene_admission_receipt,
     verify_scene_admission_receipt,
-    DEFAULT_ADMISSION_KEY_ID,
-    DEFAULT_ADMISSION_SECRET,
     S2_OPTICAL_STATES,
     S1_SAR_STATES,
 )
@@ -82,6 +80,78 @@ from services.agribrain.orchestrator_v2.schema import (
     LayerResult,
     LayerStatus,
 )
+
+# TEST-ONLY issuer. No private key or issuer signing capability is bundled
+# into production ASMAE. Ephemeral keys exist solely in the pytest process.
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
+from services.agribrain.layer05_asmae.resolution.admission_trust import (
+    ADMISSION_DOMAIN, ADMISSION_PURPOSE, CANONICALIZATION_VERSION,
+    ADMISSION_ALGORITHM, TRUST_ENV, canonical_grant_bytes,
+)
+
+_TEST_SIGNERS = {
+    "S2": Ed25519PrivateKey.generate(),
+    "S1": Ed25519PrivateKey.generate(),
+}
+
+
+@pytest.fixture(autouse=True)
+def _test_only_admission_verifiers(monkeypatch):
+    issuers = {}
+    for sensor, signer in _TEST_SIGNERS.items():
+        public_bytes = signer.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw,
+        )
+        issuers[f"test-layer0-{sensor.lower()}-issuer"] = {
+            "public_key_b64": base64.b64encode(public_bytes).decode("ascii"),
+            "source": sensor, "purpose": ADMISSION_PURPOSE,
+            "domain": ADMISSION_DOMAIN,
+        }
+    monkeypatch.setenv(TRUST_ENV, json.dumps(issuers))
+
+
+def create_scene_admission_receipt(
+    scene, *, tenant_id, farm_id, plot_id, geometry_sha256,
+    operator_sha256, calibrated_operator_sha256=None,
+    now=None, domain=ADMISSION_DOMAIN,
+):
+    """Fixture-only detached signature, modeling independent Layer 0 issuance."""
+    asset_sha = compute_scene_asset_sha256(scene)
+    if not asset_sha:
+        raise ValueError("test scene has no physical asset")
+    source = str(scene.sensor).upper()
+    if source in ("SENTINEL-2", "SENTINEL2"):
+        source = "S2"
+    if source in ("SENTINEL-1", "SENTINEL1"):
+        source = "S1"
+    issued = now or datetime.now(timezone.utc)
+    if issued.tzinfo is None:
+        raise ValueError("test issuer time must be aware")
+    valid = scene.acquisition_time.astimezone(timezone.utc).isoformat()
+    committed = scene.committed_at.astimezone(timezone.utc).isoformat()
+    grant = {
+        "algorithm": ADMISSION_ALGORITHM,
+        "canonicalization": CANONICALIZATION_VERSION,
+        "domain": domain,
+        "purpose": ADMISSION_PURPOSE,
+        "key_id": f"test-layer0-{source.lower()}-issuer",
+        "source": source,
+        "tenant_id": tenant_id,
+        "farm_id": farm_id,
+        "plot_id": plot_id,
+        "geometry_hash": geometry_sha256,
+        "asset_sha256": asset_sha,
+        "operator_sha256": operator_sha256,
+        "calibrated_operator_sha256": calibrated_operator_sha256 or operator_sha256,
+        "observation_valid_time": valid,
+        "committed_at": committed,
+        "issued_at": issued.isoformat(),
+        "expires_at": (issued + timedelta(days=365)).isoformat(),
+    }
+    signature = _TEST_SIGNERS[source].sign(canonical_grant_bytes(grant))
+    return {"grant": grant, "signature": base64.b64encode(signature).decode("ascii")}
+
 
 TENANT = "tenant-mitidja"
 FARM = "farm-afroun"
