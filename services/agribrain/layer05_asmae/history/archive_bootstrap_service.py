@@ -250,7 +250,37 @@ class ArchiveBootstrapService:
             checkpoint.status = "IN_PROGRESS"
             self.save_checkpoint(checkpoint)
 
-        cursor_dt = _parse_utc_iso(checkpoint.current_cursor)
+        if checkpoint.status not in ("IN_PROGRESS", "FAILED", "COMPLETED"):
+            raise RuntimeError("invalid_archive_checkpoint_status")
+        checkpoint.status = "IN_PROGRESS"
+        cursor_dt = _strict_utc(checkpoint.current_cursor, "checkpoint_cursor")
+        if not start_dt <= cursor_dt <= end_dt:
+            raise RuntimeError("archive_checkpoint_cursor_outside_range")
+
+        # Recover committed inventory before replaying any unfinished window.
+        existing = {}
+        by_scene_id = {}
+        recent_event_id = None
+        for event in self.worldline.load_all_events(
+            plot_id, tenant_id, namespace, fail_on_corrupt=True
+        ):
+            if event.get("event_type") != "ARCHIVE_SCENE_INGESTED":
+                continue
+            record = (event.get("payload") or {}).get("archive_scene") or {}
+            if record.get("geometry_hash") != geometry_hash:
+                raise RuntimeError("archive_journal_geometry_conflict")
+            key = (record.get("scene_id"), record.get("source_content_hash"))
+            if key in existing and existing[key] != event.get("event_id"):
+                raise RuntimeError("archive_duplicate_scene_identity_conflict")
+            if (record.get("scene_id") in by_scene_id
+                    and by_scene_id[record["scene_id"]] != record.get("source_content_hash")):
+                raise RuntimeError("archive_scene_revision_requires_selective_replay")
+            by_scene_id[record.get("scene_id")] = record.get("source_content_hash")
+            existing[key] = event.get("event_id")
+            recent_event_id = event.get("event_id")
+        checkpoint.total_events_committed = len(existing)
+        if recent_event_id:
+            checkpoint.last_committed_event_id = recent_event_id
         windows_processed = 0
 
         try:
@@ -278,18 +308,36 @@ class ArchiveBootstrapService:
                     win_end=win_end,
                 )
 
-                checkpoint.total_scenes_discovered += len(scenes)
-                events_in_win = 0
-
-                # Reconstruct events chronologically
+                if not isinstance(scenes, list):
+                    raise RuntimeError("archive_provider_failed_to_return_scene_list")
                 sorted_scenes = sorted(
                     scenes,
-                    key=lambda s: _parse_utc_iso(
-                        s.get("acquisition_time") or s.get("observation_time") or win_start
+                    key=lambda scene: _strict_utc(
+                        scene.get("acquisition_time") or scene.get("observation_time"),
+                        "scene_acquisition_time",
                     ),
                 )
-
+                win_left = _strict_utc(win_start, "window_start")
+                win_right = _strict_utc(win_end, "window_end")
+                events_in_win = 0
                 for scene in sorted_scenes:
+                    scene_time = _strict_utc(
+                        scene.get("acquisition_time") or scene.get("observation_time"),
+                        "scene_acquisition_time",
+                    )
+                    if not (win_left <= scene_time < win_right):
+                        raise RuntimeError("scene_outside_queried_archive_window")
+                    scene_id = scene.get("scene_id")
+                    source_hash = scene.get("source_content_hash")
+                    if (not isinstance(scene_id, str) or not scene_id
+                            or not isinstance(source_hash, str)
+                            or not _SHA256.fullmatch(source_hash)):
+                        raise RuntimeError("archive_scene_requires_id_and_real_sha256")
+                    if scene_id in by_scene_id and by_scene_id[scene_id] != source_hash:
+                        raise RuntimeError("archive_scene_revision_requires_selective_replay")
+                    key = (scene_id, source_hash)
+                    if key in existing:
+                        continue
                     event_id = self._commit_scene_to_worldline(
                         plot_id=plot_id,
                         geometry_hash=geometry_hash,
@@ -298,10 +346,15 @@ class ArchiveBootstrapService:
                         scene=scene,
                         parent_event_id=checkpoint.last_committed_event_id,
                     )
-                    if event_id:
-                        checkpoint.last_committed_event_id = event_id
-                        checkpoint.total_events_committed += 1
-                        events_in_win += 1
+                    if not event_id:
+                        raise RuntimeError("archive_scene_commit_produced_no_event_id")
+                    by_scene_id[scene_id] = source_hash
+                    existing[key] = event_id
+                    checkpoint.last_committed_event_id = event_id
+                    checkpoint.total_events_committed = len(existing)
+                    events_in_win += 1
+                    self.save_checkpoint(checkpoint)
+                checkpoint.total_scenes_discovered += len(scenes)
 
                 # Record completed window
                 win_record = BootstrapWindowRecord(
@@ -365,52 +418,52 @@ class ArchiveBootstrapService:
         scene: Dict[str, Any],
         parent_event_id: Optional[str],
     ) -> Optional[str]:
-        """Commit an admitted historical observation into the canonical worldline."""
-        acq_time = (
-            scene.get("acquisition_time")
-            or scene.get("observation_time")
-            or scene.get("datetime")
-        )
-        if not acq_time:
-            return None
-
-        # Build payload with full provenance and indices
+        """Persist discovered scene inventory, NOT a validated scientific posterior."""
+        acq_time = scene.get("acquisition_time") or scene.get("observation_time")
+        acquisition = _strict_utc(acq_time, "scene_acquisition_time").isoformat()
+        scene_id, content_hash = scene.get("scene_id"), scene.get("source_content_hash")
+        source = str(scene.get("source") or "").lower()
+        if source not in ("sentinel1", "sentinel2", "s1", "s2", "weather"):
+            raise ValueError("unsupported_archive_scene_source")
+        if not isinstance(scene_id, str) or not scene_id:
+            raise ValueError("missing_archive_scene_id")
+        if not isinstance(content_hash, str) or not _SHA256.fullmatch(content_hash):
+            raise ValueError("missing_authoritative_archive_asset_digest")
         payload = {
-            "archive_posterior": {
+            "archive_scene": {
                 "geometry_hash": geometry_hash,
-                "scene_id": scene.get("scene_id", f"scene_{acq_time}"),
-                "source": scene.get("source", "sentinel2"),
-                "product_level": scene.get("product_level", "L2A"),
-                "cloud_score": scene.get("cloud_score", 0.0),
-                "quality_score": scene.get("quality_score", 1.0),
-                "metrics": scene.get("metrics", {}),
-                "valid_pixel_fraction": scene.get("valid_pixel_fraction", 1.0),
-                "raw_resolution_m": scene.get("resolution_m", 10.0),
-                "source_content_hash": scene.get("source_content_hash", "hash_mock"),
+                "scene_id": scene_id,
+                "source": source,
+                "source_content_hash": content_hash,
+                "observation_time": acquisition,
+                "product_level": scene.get("product_level"),
+                "cloud_score": scene.get("cloud_score"),
+                "quality_score": scene.get("quality_score"),
+                "valid_pixel_fraction": scene.get("valid_pixel_fraction"),
+                "native_resolution_m": scene.get("resolution_m"),
+                "inventory_only": True,
+                "posterior_validated": False,
+                "scientific_authority": "none",
             }
         }
-
-        parents = [parent_event_id] if parent_event_id else []
-
         proposal = WorldlineEventProposal(
-            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            event_type="ARCHIVE_SCENE_INGESTED",
             geometry_version=geometry_hash[:16],
-            evidence_set_hash=scene.get("source_content_hash", "hash_mock"),
+            evidence_set_hash=content_hash,
             payload=payload,
-            model_version="asmae_archive_bootstrap_v1",
-            calibration_version="cal_archive_v1",
-            authority_contract_version="auth_copernicus_v1",
-            authority_ref=f"stac_{scene.get('source', 'sentinel2')}",
-            state_schema_version="state_v1",
-            observation_or_valid_time=acq_time,
-            parent_event_ids=parents,
+            model_version="asmae_archive_bootstrap_v2",
+            calibration_version="",
+            authority_contract_version="archive_inventory_not_assimilated_v1",
+            authority_ref="archive_inventory_unqualified",
+            state_schema_version="archive_scene_inventory_v1",
+            observation_or_valid_time=acquisition,
+            parent_event_ids=[parent_event_id] if parent_event_id else [],
         )
-
         committed = self.worldline.commit_proposal(
             plot_id=plot_id,
             proposal=proposal,
             namespace=namespace,
             tenant_id=tenant_id,
-            effective_at=acq_time,
+            effective_at=acquisition,
         )
         return committed.get("event_id")
