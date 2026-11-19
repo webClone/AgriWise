@@ -2776,7 +2776,7 @@ class ASMAEEngine:
             plot_id=plot_str,
             geometry_sha256=geom_hash_str,
             target_crs=target_crs_str,
-            committed_at=knowledge_cutoff if knowledge_cutoff else None,
+            committed_at=None,  # C752-P1-01: Never pass query K; rely strictly on each scene's genuine journal commitment
             operator_bundle=self._selected_bundle,
             require_operator_binding=True,
         )

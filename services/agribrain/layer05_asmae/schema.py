@@ -385,6 +385,7 @@ class ObservationOperatorRuntime:
     # PSF model
     psf_model: str = "gaussian"
     blur_sigma_m: float = 0.0
+    band: Optional[str] = None
 
     # Quality
     support_score: float = 0.0
@@ -426,6 +427,7 @@ class ObservationOperatorManifest:
     # PSF model
     psf_model: str = "gaussian"
     blur_sigma_m: float = 0.0
+    band: Optional[str] = None
 
     # Quality
     support_score: float = 0.0

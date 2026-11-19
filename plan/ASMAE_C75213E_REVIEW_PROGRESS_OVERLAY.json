@@ -1,0 +1,55 @@
+{
+  "reviewed_at": "2026-11-19",
+  "repository": "webClone/AgriWise",
+  "review_branch": "feat/akaloris-asmae-ir04-r03-r04-review-20261119",
+  "actual_review_head": "c75213e3e3889c380c623452798a4519d25b472d",
+  "user_reported_sha": "c75213e0ff48ff70a5c4cfc627f12e84d47f9e8f",
+  "pr32_head_unchanged": "64a9f69945d8e3eda2bf33de9ff24e98186c9a17",
+  "review_ahead_commits": 3,
+  "review_behind_commits": 0,
+  "decision": "candidate_remediated_on_isolated_review_branch_pr32_held_until_authorized",
+  "frozen_original_findings": 238,
+  "new_original_findings_closed": 0,
+  "reported_test_counts": {
+    "layer05_passed": 226,
+    "layer05_deselected": 1,
+    "frontend_passed": 341,
+    "typescript_errors": 0,
+    "acceptance_remediation_tests": 4
+  },
+  "findings": [
+    {
+      "id": "C752-P1-01",
+      "severity": "P1",
+      "area": "bitemporal",
+      "status": "closed",
+      "reason": "engine passes committed_at=None, adapter derives immutable native commitment, filters independently on valid_time <= T and committed_at <= K"
+    },
+    {
+      "id": "C752-P1-02",
+      "severity": "P1",
+      "area": "admission",
+      "status": "closed",
+      "reason": "mandatory tenant/farm/plot/geometry cross-check; verified provider binding and authentic admission proof required when require_operator_binding=True"
+    },
+    {
+      "id": "C752-P1-03",
+      "severity": "P1",
+      "area": "multiband_psf",
+      "status": "closed",
+      "reason": "multiband S2 scenes containing 20m bands (B05/B11) conservatively resolve to 20m PSF (sigma=10.0m, FWHM ~23.55m, native_res=20m); rejects claiming 10m spatial resolution"
+    },
+    {
+      "id": "C752-P2-04",
+      "severity": "P2",
+      "area": "cold_publication_test",
+      "status": "closed",
+      "reason": "executes rebuild_canonical_plot_snapshot and verified multi-process cold publication and HTTP API reads from isolated OS subprocess against durable disk storage"
+    }
+  ],
+  "certification_holds": {
+    "one_meter": true,
+    "numerical_publication": true,
+    "actuator": true
+  }
+}

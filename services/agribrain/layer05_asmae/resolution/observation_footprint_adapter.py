@@ -125,7 +125,7 @@ def adapt_scene_to_footprint(
     if not _SHA256_RE.fullmatch(geometry_sha256):
         return None
 
-    # Check scene admission / reality attributes (HNEW-05)
+    # Check scene admission / reality attributes (HNEW-05, C752-P1-02)
     if getattr(scene, "test_override", False):
         return None
     if getattr(scene, "diagnostic_only", False):
@@ -138,19 +138,46 @@ def adapt_scene_to_footprint(
     if not is_prod_usable:
         return None
 
-    # Namespace match: if scene carries tenant/farm/plot identity, it must match (HNEW-05)
+    # Namespace match: mandatory in production/operator-binding mode (C752-P1-02)
     scene_tenant = getattr(scene, "tenant_id", None)
+    scene_farm = getattr(scene, "farm_id", None)
+    scene_plot = getattr(scene, "plot_id", None)
+    scene_geom = getattr(scene, "geometry_sha256", None) or getattr(scene, "geometry_hash", None)
+
+    if require_operator_binding:
+        # Mandatory namespace & geometry identity on scene
+        if not all((scene_tenant, scene_farm, scene_plot, scene_geom)):
+            return None
+        if not _SHA256_RE.fullmatch(str(scene_geom)):
+            return None
+
     if scene_tenant and str(scene_tenant) != str(tenant_id):
         return None
-    scene_farm = getattr(scene, "farm_id", None)
     if scene_farm and str(scene_farm) != str(farm_id):
         return None
-    scene_plot = getattr(scene, "plot_id", None)
     if scene_plot and str(scene_plot) != str(plot_id):
         return None
-    scene_geom = getattr(scene, "geometry_sha256", None) or getattr(scene, "geometry_hash", None)
     if scene_geom and str(scene_geom) != str(geometry_sha256):
         return None
+
+    if require_operator_binding:
+        # Positive signed admission & verified provider binding required (C752-P1-02)
+        prod_binding = str(getattr(scene, "product_binding", "") or "")
+        binding_proof = getattr(scene, "binding_proof", None)
+        admission_receipt = getattr(scene, "admission_receipt", None) or (
+            binding_proof.get("admission_receipt") if isinstance(binding_proof, dict) else None
+        )
+        provider_prod_id = getattr(scene, "provider_product_id", None)
+        has_admission_proof = bool(
+            prod_binding in ("exact_catalog_item", "verified_provider_asset", "signed_provider_asset")
+            or admission_receipt
+            or (isinstance(binding_proof, dict) and bool(binding_proof.get("signer") or binding_proof.get("registration_proof")))
+            or (getattr(scene, "real_provider_product", False) and provider_prod_id)
+        )
+        if not has_admission_proof:
+            return None
+        if getattr(scene, "forged_asset_hash", False) or getattr(scene, "unverified_asset_hash", False):
+            return None
 
     # CRS match: scene must match the target projected metric grid CRS
     scene_crs = str(getattr(scene, "crs", "") or "").upper()
@@ -179,12 +206,18 @@ def adapt_scene_to_footprint(
     if not valid_time:
         return None
 
-    # Bitemporal commitment extraction (HNEW-02)
+    # Bitemporal commitment extraction (HNEW-02, C752-P1-01)
     scene_comm = (
         getattr(scene, "committed_at", None)
         or getattr(scene, "journal_committed_at", None)
         or getattr(scene, "journal_entry_time", None)
     )
+    if require_operator_binding and not scene_comm:
+        # Mandatory genuine journal commitment timestamp in operator binding mode
+        return None
+    # Caller committed_at is only used if explicitly provided (e.g. testing harness);
+    # otherwise native journal commitment is strictly preserved.
+    # Engine must pass committed_at=None so query K never overwrites scene commitment.
     commit_input = committed_at if committed_at is not None else scene_comm
     commit_iso = _ensure_utc_iso(commit_input)
     if not commit_iso:
@@ -217,6 +250,27 @@ def adapt_scene_to_footprint(
         return None
 
     band = str(getattr(scene, "band", "") or (getattr(operator, "band", "") if operator else "") or "").upper()
+    if not band and sensor == "S2":
+        bands_dict = getattr(scene, "bands", None)
+        if isinstance(bands_dict, dict) and bands_dict:
+            b_keys = {str(k).upper() for k in bands_dict.keys()}
+            s2_20m = {"B05", "B06", "B07", "B8A", "B11", "B12"}
+            s2_60m = {"B01", "B09", "B10"}
+            s2_10m = {"B02", "B03", "B04", "B08"}
+            if b_keys & s2_20m:
+                band = "B05"
+            elif b_keys & s2_60m:
+                band = "B01"
+            elif b_keys & s2_10m:
+                band = "B04"
+            else:
+                band = "B05"
+        else:
+            tf = getattr(scene, "transform", None)
+            if tf and len(tf) >= 6 and max(abs(float(tf[1])), abs(float(tf[5]))) > 12.0:
+                band = "B05"
+            else:
+                band = "B04"
 
     # PSF & Resolution calibration
     if operator is not None:
@@ -229,7 +283,10 @@ def adapt_scene_to_footprint(
 
         src_res = float(getattr(operator, "source_resolution_m", 0.0) or 0.0)
         if src_res > 0:
-            native_res = src_res
+            if sensor == "S2" and band in ("B05", "B06", "B07", "B8A", "B11", "B12"):
+                native_res = max(src_res, 20.0)
+            else:
+                native_res = src_res
         elif sensor == "S2":
             native_res = 20.0 if band in ("B05", "B06", "B07", "B8A", "B11", "B12") else 10.0
         else:

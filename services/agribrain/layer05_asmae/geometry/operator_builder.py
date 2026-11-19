@@ -283,8 +283,31 @@ def build_observation_operator(
     """
     # Defaults
     if psf_model is None:
-        band = getattr(scene, "band", None)
-        psf_model = get_psf_model(scene.sensor, band=band)
+        selected_band = getattr(scene, "band", None)
+        if not selected_band and str(getattr(scene, "sensor", "") or "").upper() in ("S2", "SENTINEL-2", "SENTINEL_2", "S2_MSI"):
+            bands_dict = getattr(scene, "bands", None)
+            if isinstance(bands_dict, dict) and bands_dict:
+                b_keys = {str(k).upper() for k in bands_dict.keys()}
+                s2_20m = {"B05", "B06", "B07", "B8A", "B11", "B12"}
+                s2_60m = {"B01", "B09", "B10"}
+                s2_10m = {"B02", "B03", "B04", "B08"}
+                if b_keys & s2_20m:
+                    selected_band = "B05"
+                elif b_keys & s2_60m:
+                    selected_band = "B01"
+                elif b_keys & s2_10m:
+                    selected_band = "B04"
+                else:
+                    selected_band = "B05"
+            else:
+                tf = getattr(scene, "transform", None)
+                if tf and len(tf) >= 6 and max(abs(float(tf[1])), abs(float(tf[5]))) > 12.0:
+                    selected_band = "B05"
+                else:
+                    selected_band = "B04"
+        psf_model = get_psf_model(scene.sensor, band=selected_band)
+    else:
+        selected_band = getattr(psf_model, "band", None) or getattr(scene, "band", None)
 
     shift_x = 0.0
     shift_y = 0.0
@@ -456,6 +479,7 @@ def build_observation_operator(
         H_matrix=H_matrix,
         psf_model=psf_model.sensor + "_gaussian",
         blur_sigma_m=psf_model.sigma_m,
+        band=selected_band,
         support_score=round(support_score, 4),
         condition_number_proxy=round(cond_proxy, 4),
         registration_uncertainty_m=round(reg_uncertainty, 4),
@@ -506,6 +530,27 @@ def build_operators_for_stack(
             mask = cloud_masks[scene.scene_id]
 
         band = getattr(scene, "band", None)
+        if not band and str(getattr(scene, "sensor", "") or "").upper() in ("S2", "SENTINEL-2", "SENTINEL_2", "S2_MSI"):
+            bands_dict = getattr(scene, "bands", None)
+            if isinstance(bands_dict, dict) and bands_dict:
+                b_keys = {str(k).upper() for k in bands_dict.keys()}
+                s2_20m = {"B05", "B06", "B07", "B8A", "B11", "B12"}
+                s2_60m = {"B01", "B09", "B10"}
+                s2_10m = {"B02", "B03", "B04", "B08"}
+                if b_keys & s2_20m:
+                    band = "B05"
+                elif b_keys & s2_60m:
+                    band = "B01"
+                elif b_keys & s2_10m:
+                    band = "B04"
+                else:
+                    band = "B05"
+            else:
+                tf = getattr(scene, "transform", None)
+                if tf and len(tf) >= 6 and max(abs(float(tf[1])), abs(float(tf[5]))) > 12.0:
+                    band = "B05"
+                else:
+                    band = "B04"
         psf = get_psf_model(scene.sensor, band=band)
 
         try:

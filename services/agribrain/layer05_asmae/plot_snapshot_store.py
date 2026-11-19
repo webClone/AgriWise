@@ -27,8 +27,9 @@ PLOT_SNAPSHOT_CONTRACT_VERSION = "canonical_plot_snapshot_v1"
 logger = logging.getLogger(__name__)
 PLOT_SNAPSHOT_RECEIPT_CONTRACT_VERSION = "canonical_plot_snapshot_publication_receipt_v1"
 PLOT_PUBLICATION_CONTRACT_VERSION = "canonical_plot_frontend_publication_v1"
-PLOT_SNAPSHOT_ROOT = (
-    Path(__file__).resolve().parents[1] / "artifacts" / "plot_snapshots"
+PLOT_SNAPSHOT_ROOT = Path(
+    os.environ.get("AGRIWISE_SNAPSHOT_STORE_ROOT")
+    or (Path(__file__).resolve().parents[1] / "artifacts" / "plot_snapshots")
 )
 
 _ASMAE_RUNTIME_FIELDS = frozenset({

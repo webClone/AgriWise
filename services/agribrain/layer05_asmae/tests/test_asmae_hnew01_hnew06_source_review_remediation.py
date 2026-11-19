@@ -96,6 +96,8 @@ def _make_scene(**kwargs):
         plot_id=PLOT,
         geometry_sha256=GEOM_HASH,
         content_hash="1" * 64,
+        product_binding="exact_catalog_item",
+        provider_product_id="S2A_MSIL2A_20260908T103021_N0500_R108_T31SDA_20260908T142512",
     )
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
