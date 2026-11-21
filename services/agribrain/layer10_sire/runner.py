@@ -5364,6 +5364,15 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                 return True, ""
 
             # Diagnostic / Non-latent-state surfaces
+            if t_upper.startswith("COMPOSITE_"):
+                # Admissible as a labeled advisory only, never as a 13-state
+                # posterior, signed action driver or certified resolution.
+                supported = bool(
+                    current_spatial_asmae
+                    and output.asmae_evidence_state.get("spatial_raster_available") is True
+                    and output.asmae_evidence_state.get("visualization_allowed") is True
+                )
+                return supported, "" if supported else "missing_composite_spatial_support"
             if t_upper == "ASMAE_POSTERIOR_CONCENTRATION":
                 # Confidence is a diagnostic support raster, not a latent
                 # 13-state posterior, 1m approval or prescription authority.
