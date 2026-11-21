@@ -247,12 +247,8 @@ class NutrientInferenceEngine:
             confounders.append(Confounder.MECHANICAL_DAMAGE)
 
         # ASMAE confounders
-        # Canopy water content is not a water-stress probability.
-        asmae_water = None
-        if asmae_water is not None and asmae_water > 0.4:
-            conf -= 0.20
-            if Confounder.WATER_STRESS not in confounders:
-                confounders.append(Confounder.WATER_STRESS)
+        # No canopy-water-derived water-stress penalty without a separate
+        # calibrated probability operator and independent provenance.
 
         asmae_salinity = evidence.get("inferred_salinity_pressure")
         if asmae_salinity is not None and asmae_salinity > 0.4:
@@ -267,7 +263,7 @@ class NutrientInferenceEngine:
                 confounders.append(Confounder.DISEASE_RISK)
 
         # Gate low chlorophyll when water stress is present (lower confidence)
-        has_water_stress = (eff_water > 0.4) or (asmae_water is not None and asmae_water > 0.4)
+        has_water_stress = eff_water > 0.4
         has_low_chlorophyll = (ndre_z < -1.0) or (asmae_chloro is not None and asmae_chloro > 0.5)
         if has_water_stress and has_low_chlorophyll:
             conf -= 0.15
@@ -392,12 +388,8 @@ class NutrientInferenceEngine:
             confounders.append(Confounder.SALINITY)
 
         # ASMAE confounders
-        # Canopy water content is not a water-stress probability.
-        asmae_water = None
-        if asmae_water is not None and asmae_water > 0.4:
-            conf -= 0.20
-            if Confounder.WATER_STRESS not in confounders:
-                confounders.append(Confounder.WATER_STRESS)
+        # No canopy-water-derived water-stress penalty without a separate
+        # calibrated probability operator and independent provenance.
 
         asmae_salinity = evidence.get("inferred_salinity_pressure")
         if asmae_salinity is not None and asmae_salinity > 0.4:
@@ -526,12 +518,8 @@ class NutrientInferenceEngine:
             confounders.append(Confounder.SALINITY)
 
         # ASMAE confounders
-        # Canopy water content is not a water-stress probability.
-        asmae_water = None
-        if asmae_water is not None and asmae_water > 0.4:
-            conf -= 0.20
-            if Confounder.WATER_STRESS not in confounders:
-                confounders.append(Confounder.WATER_STRESS)
+        # No canopy-water-derived water-stress penalty without a separate
+        # calibrated probability operator and independent provenance.
 
         asmae_salinity = evidence.get("inferred_salinity_pressure")
         if asmae_salinity is not None and asmae_salinity > 0.4:
