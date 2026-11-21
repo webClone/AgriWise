@@ -588,7 +588,7 @@ class TestScenarioEAgriBrainLayer0Bridge:
     """Validates MesiaAgriBrainBridge end-to-end admission, calibration gates, and P-10 revocation."""
 
     def test_bridge_admission_with_valid_and_invalid_calibration(self, tmp_path, monkeypatch):
-        """Bridge must invalidate uncalibrated packets and admit properly calibrated/epoch-active packets."""
+        """Distinguish invalid capture provenance from verified-capture observation absence."""
         bridge = MesiaAgriBrainBridge(plot_id="PLOT_TEST_BRIDGE")
 
         packet = RadioObservationPacket(
@@ -611,7 +611,7 @@ class TestScenarioEAgriBrainLayer0Bridge:
         assert l0_uncal.status == EvidenceAdmissionStatus.INVALIDATED
         assert l0_uncal.is_usable_for_assimilation is False
 
-        # 2. Fully calibrated and epoch active -> ADMITTED
+        # 2. Calibrated flags do NOT override fake native URI provenance.
         l0_adm, asmae_adm = bridge.process_and_admit_observation(
             packet=packet,
             is_calibration_valid=True,
