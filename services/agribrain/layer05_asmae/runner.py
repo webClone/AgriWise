@@ -39,6 +39,27 @@ from services.agribrain.common.plot_namespace import PlotNamespace, _coerce_name
 logger = logging.getLogger(__name__)
 
 
+_REQUEST_RESTRICTABLE_PERMISSIONS = (
+    "compute_allowed", "diagnostic_allowed", "advisory_allowed",
+    "plot_state_publication_allowed", "production_authority_allowed",
+    "visual_authority_allowed", "training_export_allowed",
+)
+
+
+def intersect_execution_permissions(registry: Dict[str, Any],
+                                    requested: Any, mode: str) -> Dict[str, Any]:
+    """Registry is authoritative; caller restrictions and mode can only narrow."""
+    effective = dict(registry)
+    if isinstance(requested, dict):
+        for flag in _REQUEST_RESTRICTABLE_PERMISSIONS:
+            if flag in requested:
+                effective[flag] = effective.get(flag) is True and requested[flag] is True
+    if mode in ("shadow", "quick_visual"):
+        effective["production_authority_allowed"] = False
+        effective["training_export_allowed"] = False
+    return effective
+
+
 class ASMAERunner:
     """ASMAE execution runner.
 
@@ -164,21 +185,13 @@ class ASMAERunner:
         # Registry authority is a ceiling: caller context can only remove
         # permissions, never grant them. In particular shadow and quick_visual
         # cannot acquire production, training or state-mutation privileges.
-        permissions = self.execution_permissions(plot_id)
+        registry_permissions = self.execution_permissions(plot_id)
         requested = context.get("_asmae_execution_permissions")
         if not isinstance(requested, dict):
             requested = context.get("execution_permissions")
-        if isinstance(requested, dict):
-            for flag in (
-                "compute_allowed", "diagnostic_allowed", "advisory_allowed",
-                "plot_state_publication_allowed", "production_authority_allowed",
-                "visual_authority_allowed", "training_export_allowed",
-            ):
-                if flag in requested:
-                    permissions[flag] = (permissions.get(flag) is True and requested[flag] is True)
-        if mode in ("shadow", "quick_visual"):
-            permissions["production_authority_allowed"] = False
-            permissions["training_export_allowed"] = False
+        permissions = intersect_execution_permissions(
+            registry_permissions, requested, mode
+        )
         context["_asmae_execution_permissions"] = permissions
         if not permissions["compute_allowed"]:
             logger.info("ASMAE disabled for plot %s by rollout policy", plot_id)
