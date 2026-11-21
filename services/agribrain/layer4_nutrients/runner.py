@@ -345,12 +345,34 @@ def run_layer4_standalone(
         user_soil_ph=soil_props.get("ph"),
     )
 
-    # v8.1: Feed ASMAE features into evidence dict
+    # W2-A: physical units are mandatory and crop calibration is distinct from
+    # evidence availability. Never turn water content into a stress probability.
     if asmae_features:
+        from services.agribrain.scientific_contracts.asmae_physical_semantics import (
+            require_tagged_state_quantity,
+        )
         if "ASMAE_CHLOROPHYLL" in asmae_features:
-            evidence["asmae_chlorophyll"] = asmae_features["ASMAE_CHLOROPHYLL"].value
+            feat = asmae_features["ASMAE_CHLOROPHYLL"]
+            try:
+                q = require_tagged_state_quantity(feat, "chlorophyll")
+                evidence["asmae_chlorophyll"] = {
+                    "value": q.value, "unit": q.unit,
+                    "state_update_allowed": getattr(feat, "state_update_allowed", False),
+                    "diagnostic_only": getattr(feat, "diagnostic_only", True),
+                }
+                evidence["asmae_chlorophyll_calibration"] = (
+                    (crop_params or {}).get("asmae_chlorophyll_calibration")
+                )
+                evidence["asmae_crop_type"] = crop_type
+            except ValueError:
+                evidence.setdefault("asmae_semantic_blocks", []).append("chlorophyll_missing_or_invalid_unit")
         if "ASMAE_CANOPY_WATER" in asmae_features:
-            evidence["asmae_water_stress"] = asmae_features["ASMAE_CANOPY_WATER"].value
+            feat = asmae_features["ASMAE_CANOPY_WATER"]
+            try:
+                q = require_tagged_state_quantity(feat, "canopy_water")
+                evidence["asmae_canopy_water_content"] = {"value": q.value, "unit": q.unit}
+            except ValueError:
+                evidence.setdefault("asmae_semantic_blocks", []).append("canopy_water_missing_or_invalid_unit")
         if "ASMAE_SALINITY_STRESS" in asmae_features:
             evidence["inferred_salinity_pressure"] = asmae_features["ASMAE_SALINITY_STRESS"].value
         if "ASMAE_BIOTIC_CONFOUNDER_RISK" in asmae_features:
