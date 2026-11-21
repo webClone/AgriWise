@@ -6,6 +6,7 @@ Supports manifest-only and offline mock run modes.
 """
 import os
 import hashlib
+import re
 import json
 import math
 from dataclasses import dataclass, field
@@ -225,6 +226,10 @@ class ArchiveFetcher:
         Executes query, schedules download plan, fetches data, calculates quality,
         and saves/updates scene_manifest.jsonl.
         """
+        if (not isinstance(plot_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", plot_id)
+                or plot_id in (".", "..")):
+            raise ValueError("archive_plot_id_path_component_invalid")
         if self.manifest_only_env:
             manifest_only = True
         if self.offline and os.environ.get("ASMAE_TEST_OVERRIDE", "false").lower() != "true":
@@ -281,6 +286,12 @@ class ArchiveFetcher:
         processed_records = list(existing_records)
         
         for scene in allowed_scenes:
+            if (not isinstance(scene.scene_id, str)
+                    or not re.fullmatch(
+                        r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}", scene.scene_id
+                    )
+                    or scene.scene_id in (".", "..")):
+                raise ValueError("archive_scene_id_path_component_invalid")
             # Quality assessment variables
             raw_valid_fraction = scene.metadata.get("valid_pixel_fraction")
             valid_frac = float(raw_valid_fraction) if isinstance(raw_valid_fraction, (int, float)) else 0.0
@@ -480,27 +491,104 @@ class ArchiveFetcher:
                 ))
         return results
 
-    def _download_real_assets(self, scene: ArchiveSearchResult, assets: List[str], dest_dir: str, cache_refs: Dict[str, str]):
-        """Downloads assets from remote provider and crops them."""
-        # Standard placeholder for real production download logic (calling stac/cdse clients)
-        # In this sandbox environment, we will mock if remote requests fail.
+    def _download_real_assets(
+        self, scene: ArchiveSearchResult, assets: List[str],
+        dest_dir: str, cache_refs: Dict[str, str],
+    ) -> None:
+        """Acquire real raster bytes atomically without leaking CDSE credentials.
+
+        STAC asset hrefs are untrusted data. Only HTTPS assets from explicitly
+        approved hosts are downloaded; authorization is only sent to the exact
+        CDSE authentication origin. Redirects, partial downloads and silently
+        missing mandatory bands fail closed.
+        """
+        import ipaddress
+        import tempfile
+        from urllib.parse import urlsplit
         import requests
-        headers = self.stac_client.cdse_client.get_auth_header()
-        
+
+        allowed_external = {
+            hostname.strip().lower()
+            for hostname in os.environ.get(
+                "AGRIWISE_ARCHIVE_ALLOWED_ASSET_HOSTS", ""
+            ).split(",") if hostname.strip()
+        }
+        default_domain = "dataspace.copernicus.eu"
+        auth_origin = urlsplit(getattr(self.stac_client, "stac_url", ""))
+        max_bytes = int(os.environ.get(
+            "AGRIWISE_ARCHIVE_MAX_ASSET_BYTES", str(1024 * 1024 * 1024)
+        ))
+        if max_bytes <= 0 or max_bytes > 16 * 1024 * 1024 * 1024:
+            raise ValueError("archive_asset_download_limit_invalid")
+
+        os.makedirs(dest_dir, exist_ok=True)
         for asset in assets:
+            if not isinstance(asset, str) or not re.fullmatch(
+                r"[A-Za-z0-9_-]{1,32}", asset
+            ):
+                raise ValueError("archive_asset_name_invalid")
             url = scene.asset_urls.get(asset)
-            if not url:
-                continue
+            if not isinstance(url, str) or not url:
+                raise RuntimeError(f"archive_required_asset_missing:{asset}")
+            parsed = urlsplit(url)
+            host = (parsed.hostname or "").lower()
+            if parsed.scheme != "https" or not host or parsed.username or parsed.password:
+                raise RuntimeError(f"archive_asset_untrusted_url:{asset}")
             try:
-                # Real implementation: stream request and save to temp file, then crop to AOI geometry
-                # For safety, if download fails or is unsupported, raise error or write stub
-                r = requests.get(url, headers=headers, timeout=60, stream=True)
-                r.raise_for_status()
-                path = os.path.join(dest_dir, f"{asset}.tif")
-                with open(path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                cache_refs[asset] = path
-            except Exception as e:
-                # Fail closed on download failure
-                raise RuntimeError(f"Failed to download asset {asset}: {str(e)}")
+                ipaddress.ip_address(host)
+            except ValueError:
+                pass
+            else:
+                raise RuntimeError(f"archive_asset_ip_literal_forbidden:{asset}")
+            if not (host == default_domain or host.endswith("." + default_domain)
+                    or host in allowed_external):
+                raise RuntimeError(f"archive_asset_host_not_allowlisted:{asset}")
+
+            # An HTTPS request to a trusted external CDN may be authorized by
+            # its signed query URL; never forward a CDSE bearer token to it.
+            headers: Dict[str, str] = {}
+            if (parsed.scheme == auth_origin.scheme
+                    and parsed.netloc.lower() == auth_origin.netloc.lower()):
+                headers = dict(self.stac_client.cdse_client.get_auth_header() or {})
+
+            final_path = os.path.join(dest_dir, f"{asset}.tif")
+            temp_path = None
+            try:
+                response = requests.get(
+                    url, headers=headers, timeout=60, stream=True,
+                    allow_redirects=False,
+                )
+                if 300 <= response.status_code < 400:
+                    raise RuntimeError("archive_asset_redirect_forbidden")
+                response.raise_for_status()
+                raw_length = (getattr(response, "headers", {}) or {}).get(
+                    "Content-Length"
+                )
+                if raw_length is not None and int(raw_length) > max_bytes:
+                    raise RuntimeError("archive_asset_exceeds_byte_limit")
+                fd, temp_path = tempfile.mkstemp(
+                    dir=dest_dir, prefix=f".{asset}.", suffix=".partial"
+                )
+                total_bytes = 0
+                with os.fdopen(fd, "wb") as handle:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
+                        total_bytes += len(chunk)
+                        if total_bytes > max_bytes:
+                            raise RuntimeError("archive_asset_exceeds_byte_limit")
+                        handle.write(chunk)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if total_bytes == 0:
+                    raise RuntimeError("archive_asset_empty_payload")
+                os.replace(temp_path, final_path)
+                temp_path = None
+                cache_refs[asset] = final_path
+            except Exception as exc:
+                raise RuntimeError(
+                    f"archive_asset_download_not_verified:{asset}:{type(exc).__name__}"
+                ) from exc
+            finally:
+                if temp_path is not None and os.path.exists(temp_path):
+                    os.unlink(temp_path)
