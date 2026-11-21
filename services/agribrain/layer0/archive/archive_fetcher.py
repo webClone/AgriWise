@@ -17,7 +17,7 @@ import numpy as np
 from .archive_policy import ARCHIVE_POLICY_VERSION
 from .archive_types import ArchiveSearchResult
 from .archive_config import CDSE_AUTH_MODE
-from .scene_manifest import HistoricalSceneRecord, save_scene_manifest
+from .scene_manifest import HistoricalSceneRecord, save_scene_manifest, load_scene_manifest
 from .scene_quality import compute_scene_quality_score
 from .scene_query import calculate_aoi_footprint, check_tile_overlap
 from .archive_query import ArchiveQueryManager
