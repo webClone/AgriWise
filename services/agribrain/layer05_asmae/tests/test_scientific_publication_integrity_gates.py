@@ -708,6 +708,7 @@ def test_ir_pub_diagnostic_asmae_means_without_sigma_remain_admitted_on_cold_exa
 
     # A later certified run must not destroy the immutable diagnostic ID.
     qualified_science = _base_asmae_result()
+    qualified_science["content_hash"] = "content-hash-qualified"
     frozen_qualified = snapshot_store.publish_latest_snapshot(
         qualified_science, context_hash="ctx-ir-pub-qualified", geometry_hash=geom,
     )
