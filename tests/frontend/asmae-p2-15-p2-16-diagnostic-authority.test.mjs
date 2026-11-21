@@ -29,27 +29,37 @@ test("P2-15 transect sampling, entry control and revocation use same authority",
 
 test("P2-16 null, undefined, zero, negative and NaN never report 1m available", () => {
   for (const bad of [null, undefined, 0, -1, NaN, Infinity, -Infinity, "50", 101]) {
-    assert.equal(hasQualifiedOneMeterApproval(bad, true), false, String(bad));
+    assert.equal(hasQualifiedOneMeterApproval(bad, true, false), false, String(bad));
+    assert.equal(hasQualifiedOneMeterApproval(bad, true, true), false, String(bad));
   }
 });
 
 test("P2-16 backend denial wins even if ladder states 100% approved", () => {
   for (const val of [0.01, 1, 33, 100]) {
-    assert.equal(hasQualifiedOneMeterApproval(val, false), false);
-    assert.equal(hasQualifiedOneMeterApproval(val, undefined), false);
-    assert.equal(hasQualifiedOneMeterApproval(val, null), false);
+    assert.equal(hasQualifiedOneMeterApproval(val, false, false), false);
+    assert.equal(hasQualifiedOneMeterApproval(val, false, true), false);
+    assert.equal(hasQualifiedOneMeterApproval(val, undefined, false), false);
+    assert.equal(hasQualifiedOneMeterApproval(val, undefined, true), false);
+    assert.equal(hasQualifiedOneMeterApproval(val, null, false), false);
+    assert.equal(hasQualifiedOneMeterApproval(val, null, true), false);
   }
 });
 
-test("P2-16 exact positive finite percentage plus separate backend gate required", () => {
-  assert.equal(hasQualifiedOneMeterApproval(0.01, true), true);
-  assert.equal(hasQualifiedOneMeterApproval(50, true), true);
-  assert.equal(hasQualifiedOneMeterApproval(100, true), true);
+test("P2-16 positive finite approval still withheld without an ASMAE raster receipt", () => {
+  for (const pct of [0.01, 1, 50, 100]) {
+    assert.equal(hasQualifiedOneMeterApproval(pct, true, false), false);
+    assert.equal(hasQualifiedOneMeterApproval(pct, true, undefined), false);
+    assert.equal(hasQualifiedOneMeterApproval(pct, true, null), false);
+    assert.equal(hasQualifiedOneMeterApproval(pct, true, true), true);
+  }
 });
 
 test("P2-16 every HUD 1m approval label follows the qualified predicate", () => {
   assert.match(hud, /const qualifiedOneMeterApproval = hasQualifiedOneMeterApproval\(/);
   assert.match(hud, /data\?\.asmae_evidence_state\?\.current_1m_approval_allowed/);
+  assert.match(hud, /const asmaeRasterMaterialized = baseRasterMaterialized/);
+  assert.match(hud, /data\?\.asmae_evidence_state\?\.current_1m_approval_allowed,\s*asmaeRasterMaterialized,/);
+  assert.ok(hud.indexOf("const asmaeRasterMaterialized") < hud.indexOf("const qualifiedOneMeterApproval"));
   assert.doesNotMatch(hud, /oneMeterAsmaeApprovalPct\s*!==\s*null\s*\?\s*"available"/);
   assert.match(hud, /qualifiedOneMeterApproval\s*\?\s*"available"/);
   assert.doesNotMatch(hud, /advisory_certified/);
