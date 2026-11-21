@@ -65,7 +65,10 @@ def is_file_exempt(rel_path_str: str, exemptions: List[Dict[str, Any]]) -> bool:
     substrings in a filename must never silence scientific claims.
     """
     norm_path = rel_path_str.replace("\\", "/")
-    if norm_path.endswith(("claim_exemptions.json", "claim_scanner.py")):
+    if norm_path in (
+        "services/agribrain/mesia/governance/claim_exemptions.json",
+        "services/agribrain/mesia/governance/claim_scanner.py",
+    ):
         return True
     if norm_path.startswith("src/components/farm/intelligence/"):
         return False
