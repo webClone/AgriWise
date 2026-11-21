@@ -259,8 +259,9 @@ class ArchiveFetcher:
             existing_records=existing_records
         )
         if not success:
-            # Return existing records if quotas prevent new downloads
-            return existing_records
+            # An incomplete provider query is NOT an empty historical interval.
+            # Never allow bootstrap to checkpoint it as a completed archive window.
+            raise RuntimeError(f"archive_download_plan_incomplete:{reason}")
 
         # 4. Ingest and create HistoricalSceneRecord for each allowed scene
         processed_records = list(existing_records)
