@@ -22,3 +22,8 @@ npx tsc --noEmit
 Also execute a real Layer10 Plot Workspace interaction showing a revoked diagnostic permission immediately disables ongoing cross-section sampling, and that a zero/undefined approval is visible as unavailable. This is display truthfulness, not a signed 1m approval proof.
 
 **Protected holds:** PR #32 untouched; 1m certified science, numerical publication and physical actuation held. Findings remain open until full testing and integration qualification.
+
+## 2026-11-21 additional missing-render boundary
+The original six source and helper tests checked the approval value and backend flag, but **did not require `asmaeRasterMaterialized`**. On this branch, the helper now demands all three: (1) positive finite `0 < pct <= 100`, (2) backend `current_1m_approval_allowed === true`, and (3) **current-view rendered ASMAE base raster receipt** (`asmaeRasterMaterialized === true`). The HUD calculates this predicate only after resolving the actual browser render receipt.
+
+All six tests remain in place, with expanded cases for `undefined`, `null`, `0`, `NaN`, negative/overflow percent, positive percent with absent raster, and positive percent with valid materialization. The source-wiring test checks the HUD passes `asmaeRasterMaterialized` into the predicate. **This remains a pure-helper + source-wiring suite, not a mounted React component render test**. Full Next.js TAP and browser/React integration remain required.
