@@ -33,3 +33,10 @@ npx tsc --noEmit
 - This branch has no executed CI suite receipt. Do not close any of the 238 register findings or advance PR #32 on source-only evidence.
 - **Queued, separate integration:** FastAPI `GET /v2/runs/{run_id}/result` persistent cold-result endpoint for W1-B; not silently bundled into MESIA remediation.
 - Signed irrigation, 1m science certification, and unqualified numerical publication remain disabled/held.
+
+## 2026-11-21 gate review: scanner and dependency
+- `mesia/service.py` imports `sgp4.api.Satrec` and `jday` at module import time. Main AgriBrain requirements already declare `sgp4>=2.23`; this branch now declares it in `mesia/requirements.txt` as well. **The developer's local venv was not inspected**.
+- The tightened claim scanner was source-dry-run against **all 48** eligible production files in `src/components/farm/intelligence/` and `src/app/api/agribrain/mesia/`: 10 matching claim lines, all with exact-line exemptions; **zero unexempted matches**. This is not execution of the Python CLI, and the scanner also traverses the separate 189-file MESIA subtree.
+- The local gate must still confirm `python -m services.agribrain.mesia.governance.claim_scanner` exits `0`, and `python -c "from sgp4.api import Satrec, jday; print('sgp4 import OK')"` succeeds.
+
+Do not convert this static inspection into a PASS receipt for the MESIA module import, scanner CLI, or runtime tests.
