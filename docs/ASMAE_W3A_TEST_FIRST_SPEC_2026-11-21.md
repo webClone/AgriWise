@@ -39,3 +39,15 @@ Source: `services/agribrain/layer10_sire/runner.py`, `asmae_state_gate` around l
 
 ## Gate
 Run the new Layer1 regression file, existing Layer1 tests, Layer10 invariant and runner tests, exact API/Plot Workspace contract checks, Layer05 regression, frontend unit tests and TypeScript. Keep PR #32 draft, all science/actuator holds in place.
+
+## Completion addendum — 2026-11-21 13:49
+**New executable Layer10 red tests:** `services/agribrain/layer10_sire/tests/test_asmae_w3a_runner_diagnostic_mapping.py`.
+- Calls the actual nested `asmae_state_gate` source body for `ASMAE_POSTERIOR_CONCENTRATION`, which currently reaches `surface_state_requirement_unmapped` despite a current diagnostic spatial posterior.
+- Exercises both `asmae_diagnostic` and `hybrid` base rendering branches with `COMPOSITE_*` surfaces. The unpatched classifier treats them as unrelated satellite fallbacks, causing incorrect `full_raster` authorization instead of `diagnostic_overlay`.
+- These extracted-helper tests do not replace genuine `Layer10Output` + pixel mask publication integration or the existing `INV-COMPOSITE` provenance mutation gates.
+
+**Run expected-RED gates:**
+```powershell
+python -m pytest services/agribrain/layer1_fusion/tests/test_asmae_w3a_confidence_composite_contract.py -q
+python -m pytest services/agribrain/layer10_sire/tests/test_asmae_w3a_runner_diagnostic_mapping.py -q
+```
