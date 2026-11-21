@@ -234,6 +234,15 @@ async function executeRun(
 ): Promise<RunOutcome> {
   const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   try {
+    // A run must have its authorized namespace persisted BEFORE backend work.
+    // If registration fails, execution fails closed; the read API cannot
+    // reconstruct ownership from a caller-supplied ID or backend payload.
+    await prisma.agriBrainRun.create({
+      data: {
+        runId, tenantId: requestUserId,
+        farmId: authorizedPlot.farmId, plotId: authorizedPlot.id,
+      },
+    });
     const { plotId, query, mode = "chat", history, experienceLevel, userMode = "farmer" } = body;
 
     // 1. Fetch real data from DB
