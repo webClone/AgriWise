@@ -238,7 +238,7 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
                     "product_level": "L2A",
                     "cloud_score": 10.0,
                     "quality_score": 0.94,
-                    "source_content_hash": f"hash_gate_b_{acq_iso}",
+                    "source_content_hash": hashlib.sha256(acq_iso.encode("utf-8")).hexdigest(),
                     "valid_pixel_fraction": 1.0,
                     "resolution_m": 10.0,
                     "metrics": {"ndvi_mean": 0.62, "ndre_mean": 0.41},
@@ -270,7 +270,7 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
         # 2. Select eligible historical events up to target_cutoff
         eligible = self.worldline.select_eligible_events(
             plot_id=self.plot_id,
-            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            event_type="ARCHIVE_SCENE_INGESTED",
             valid_time_T=target_cutoff,
             knowledge_cutoff_K=datetime.now(timezone.utc).isoformat(),
             tenant_id=self.tenant_id,
@@ -383,7 +383,7 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
                     "product_level": "L2A",
                     "cloud_score": 10.0,
                     "quality_score": 0.9,
-                    "source_content_hash": f"hash_{win_start}",
+                    "source_content_hash": hashlib.sha256(win_start.encode("utf-8")).hexdigest(),
                     "valid_pixel_fraction": 1.0,
                     "resolution_m": 10.0,
                 }

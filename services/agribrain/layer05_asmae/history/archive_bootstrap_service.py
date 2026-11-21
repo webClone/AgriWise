@@ -46,6 +46,7 @@ MISSION_START_DATE = "2015-06-23T00:00:00+00:00"
 DEFAULT_WINDOW_DAYS = 180  # Half-yearly partition slices
 BOOTSTRAP_STATE_VERSION = "archive_bootstrap_v2"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_GEOMETRY_HASH_RE = re.compile(r"^[0-9a-fA-F]{32}$|^[0-9a-fA-F]{64}$")
 
 
 def _strict_utc(value: Any, label: str) -> datetime:
@@ -201,7 +202,7 @@ class ArchiveBootstrapService:
             raise ValueError("invalid_or_future_archive_date_range")
         if type(window_days) is not int or not (1 <= window_days <= 366):
             raise ValueError("invalid_archive_window_days")
-        if not isinstance(geometry_hash, str) or not _SHA256.fullmatch(geometry_hash):
+        if not isinstance(geometry_hash, str) or not _GEOMETRY_HASH_RE.fullmatch(geometry_hash):
             raise ValueError("archive_geometry_requires_sha256")
 
         checkpoint = self.load_checkpoint(plot_id, tenant_id, namespace)
