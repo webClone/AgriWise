@@ -6,7 +6,7 @@
   Stops on first failed gate. Never promotes branches or certifies physical RF.
 #>
 param(
-  [string] $ExpectedHead = "a12b499d934326e55c7cee037229457254f104e4",
+  [Parameter(Mandatory=$true)] [string] $ExpectedHead,
   [string] $OutputDirectory = ""
 )
 
@@ -15,8 +15,11 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $repoRoot
 
 $actualHead = (& git rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0 -or $actualHead -ne $ExpectedHead) {
-  throw "Wrong checkout. Expected exact candidate HEAD $ExpectedHead; found $actualHead."
+$actualBranch = (& git branch --show-current).Trim()
+if ($LASTEXITCODE -ne 0 -or
+    $actualBranch -ne "feat/akaloris-asmae-unified-seven-wave-candidate-20261121" -or
+    $actualHead -ne $ExpectedHead) {
+  throw "Wrong checkout. Expected exact candidate branch/head $ExpectedHead; found $actualBranch at $actualHead."
 }
 
 if (-not $OutputDirectory) {
