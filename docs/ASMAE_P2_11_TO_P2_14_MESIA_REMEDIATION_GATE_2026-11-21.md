@@ -40,3 +40,23 @@ npx tsc --noEmit
 - The local gate must still confirm `python -m services.agribrain.mesia.governance.claim_scanner` exits `0`, and `python -c "from sgp4.api import Satrec, jday; print('sgp4 import OK')"` succeeds.
 
 Do not convert this static inspection into a PASS receipt for the MESIA module import, scanner CLI, or runtime tests.
+
+## Windows requalification fixes — 2026-11-21
+
+The local execution receipt at prior head `e11b7ae` reports **138 passed, 2 failed** in MESIA (plus independently reported claim-scanner exit 0 and `sgp4` import success). The two test-boundary failures were addressed in this branch:
+
+1. `integration.verify_native_capture_for_plot`: `file:///C:/...` is converted to a native path by `urllib.request.url2pathname(parsed.path)` before `Path.is_absolute()`. The parsed URL path is **not pre-unquoted** because the conversion function already decodes URI escapes; local-path confinement, plot scope, strict file existence and SHA-256 still apply.
+2. Scenario E in `test_mesia_pipeline_scenarios.py` now tests both independent outcomes. A spoofed `sigmf://` URI and missing innovation returns `INVALIDATED` before missingness is considered. A temporary `tenant/plot`-scoped, hash-verified **synthetic test SigMF data/metadata pair** (created by `ingest_sigmf_capture`) with missing SNR/innovation returns `ABSENT`. Synthetic test data is not asserted to be real field telemetry or a calibrated VWC observation.
+
+**Qualification still pending at the NEW head**:
+```powershell
+git fetch origin
+git switch feat/akaloris-p2-mesia-p08-truthfulness-20261121
+git rev-parse HEAD
+python -m pytest services/agribrain/mesia/tests/test_asmae_p2_11_14_mesia_truth_boundaries.py -q
+python -m pytest services/agribrain/mesia/tests/test_mesia_pipeline_scenarios.py -q
+python -m pytest services/agribrain/mesia/tests/ -q
+python -m services.agribrain.mesia.governance.claim_scanner
+```
+
+The submitted prior-head local results and source inspection are not a green full-suite receipt for this new head. Do not merge or close P2-13's physical provenance concern merely on the fixture pass.
