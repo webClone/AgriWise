@@ -2738,9 +2738,8 @@ class ASMAEEngine:
         from .resolution.statewise_engine_bridge import build_statewise_engine_support
         from .resolution.observation_footprint_adapter import (
             adapt_scenes_to_footprints,
-            verify_bitemporal_replay_receipt,
-            _ensure_utc_iso,
         )
+        from .resolution.journal_authority_gate import verify_replay_against_trusted_worldline
 
         replay_receipt = getattr(inp, "bitemporal_replay_receipt", None)
         valid_time = ""
@@ -2749,11 +2748,12 @@ class ASMAEEngine:
         # IR04-5CC-P1-02: Require verified journal authority at the engine boundary.
         # The engine must NEVER blindly read K from unverified receipt fields.
         if replay_receipt:
-            is_valid_rr, rr_reason, validated_k = verify_bitemporal_replay_receipt(
+            is_valid_rr, rr_reason, validated_k = verify_replay_against_trusted_worldline(
                 replay_receipt,
                 tenant_id=tenant_str,
                 plot_id=plot_str,
                 geometry_hash=geom_hash_str,
+                namespace=farm_str,
                 journal_watermark=getattr(inp, "journal_watermark", None),
             )
             diagnostics["bitemporal_receipt_validation"] = {
@@ -2767,9 +2767,12 @@ class ASMAEEngine:
             else:
                 knowledge_cutoff = ""
         elif getattr(inp, "journal_watermark", None):
-            wm_iso = _ensure_utc_iso(inp.journal_watermark)
-            if wm_iso:
-                knowledge_cutoff = wm_iso
+            # Unverified, caller-supplied watermark is diagnostic input only.
+            # Never promote it to authoritative historical knowledge K.
+            diagnostics["bitemporal_receipt_validation"] = {
+                "valid": False,
+                "reason": "journal_watermark_without_verified_receipt",
+            }
 
         # IR04-R04: Derive temporal boundary from scenes if valid_time was not set by validated receipt
         if not valid_time:
