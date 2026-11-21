@@ -706,6 +706,36 @@ def test_ir_pub_diagnostic_asmae_means_without_sigma_remain_admitted_on_cold_exa
     assert json.loads(latest_api.body)["available"] is True
     assert json.loads(exact_api.body)["contract_validation"]["numerical_authority_verified"] is False
 
+    # A later certified run must not destroy the immutable diagnostic ID.
+    qualified_science = _base_asmae_result()
+    frozen_qualified = snapshot_store.publish_latest_snapshot(
+        qualified_science, context_hash="ctx-ir-pub-qualified", geometry_hash=geom,
+    )
+    qualified_science["snapshot_ref"] = frozen_qualified
+    qualified_id = qualified_science["snapshot_id"]
+    qualified_frontend = _base_frontend_payload(qualified_id)
+    qualified_frontend["asmae_numerical_publication_contract"] = {
+        "version": plot_snapshot_store.ASMAE_NUMERICAL_PUBLICATION_CONTRACT,
+        "mode": "verified_numerical",
+    }
+    plot_snapshot_store.publish_canonical_plot_snapshot(
+        namespace=ns, geometry_hash=geom, snapshot_id=qualified_id,
+        asmae_result=qualified_science, frontend_payload=qualified_frontend,
+        job_id="job-ir-pub-qualified", manifest_hash="manifest-ir-pub-qualified",
+    )
+    with plot_snapshot_store._SNAPSHOT_CACHE_LOCK:
+        plot_snapshot_store._CANONICAL_SNAPSHOT_CACHE.clear()
+    historical = plot_snapshot_store.load_and_validate_plot_snapshot_by_id(
+        snapshot_id, namespace=ns,
+    )
+    assert historical is not None and historical["historical"] is True
+    assert historical["validation"]["numericalBindingValid"] is None
+    assert plot_snapshot_store.evaluate_snapshot_admission(historical, ns)["is_valid"] is True
+    old_exact_api = api_v2_exact_snapshot(snapshot_id, namespace=ns)
+    assert json.loads(old_exact_api.body)["available"] is True
+    certified_latest_api = api_v2_canonical_plot_snapshot(ns.plot_id, namespace=ns)
+    assert json.loads(certified_latest_api.body)["snapshot_id"] == qualified_id
+
 
 def test_ir_pub_diagnostic_contract_cannot_launder_a_numerical_claim():
     """A 'diagnostic' label does not waive cryptographic numerical validation."""
