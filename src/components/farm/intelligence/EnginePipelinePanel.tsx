@@ -10,7 +10,7 @@
  * Rich system status dashboard showing data pipeline health, assimilation,
  * sensor context, crop phenology, and quality indicators.
  *
- * All data from real engine statuses + L10 quality + PI context. Zero synthetic data.
+ * All data from real engine statuses + L10 quality + PI context. Source reality and model-derived outputs are qualified separately.
  */
 
 
