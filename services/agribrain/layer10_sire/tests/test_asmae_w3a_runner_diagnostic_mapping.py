@@ -29,7 +29,7 @@ _IDENTITIES = _extract(
 )
 
 
-def _call_state_gate(surface_type, *, spatial=True, anchor_present=True):
+def _call_state_gate(surface_type, *, spatial=True):
     scope = {
         "state_support_ledger": {},
         "current_spatial_asmae": spatial,
@@ -63,11 +63,11 @@ def test_w3a_missing_spatial_posterior_still_blocks_concentration_render():
     assert ok is False
 
 
-def _route_composite_base(surface_type):
+def _route_composite_base(surface_type, *, policy="asmae_diagnostic"):
     scope = {
         "stype": surface_type,
         "stype_upper": surface_type.upper(),
-        "p": "asmae_diagnostic",
+        "p": policy,
         "s": SimpleNamespace(provenance={
             "visual_only": True, "state_update_allowed": False,
             "prescription_driver_allowed": False,
@@ -84,10 +84,12 @@ def _route_composite_base(surface_type):
     }
     exec(_IDENTITIES, scope)
     section = _SOURCE.index('                    # 1. Base Role')
-    start = _SOURCE.index('                    elif p == "asmae_diagnostic":', section)
-    end = _SOURCE.index('                    elif p == "hybrid":', start)
+    predicate = f'elif p == "{policy}":'
+    start = _SOURCE.index('                    ' + predicate, section)
+    end_marker = '                    elif p == "hybrid":' if policy == "asmae_diagnostic" else '                    base_auth, base_kind, base_reason = _apply_grid_gate('
+    end = _SOURCE.index(end_marker, start + len(predicate))
     branch = textwrap.dedent(_SOURCE[start:end]).replace(
-        'elif p == "asmae_diagnostic":', 'if p == "asmae_diagnostic":', 1,
+        predicate, predicate.replace('elif ', 'if ', 1), 1,
     )
     exec(branch, scope)
     return scope
@@ -111,3 +113,17 @@ def test_w3a_composite_advisory_is_reachable_in_asmae_diagnostic_policy(composit
 def test_w3a_composite_cannot_gain_production_raster_from_non_asmae_fallback():
     scope = _route_composite_base("COMPOSITE_EFFECTIVE_RESOLUTION")
     assert scope["base_kind"] != "full_raster"
+
+
+
+@pytest.mark.parametrize("composite", [
+    "COMPOSITE_ADVISORY_CANOPY",
+    "COMPOSITE_CONFIDENCE",
+    "COMPOSITE_EFFECTIVE_RESOLUTION",
+])
+def test_w3a_composite_advisory_is_reachable_in_hybrid_policy(composite):
+    scope = _route_composite_base(composite, policy="hybrid")
+    assert scope["base_kind"] == "diagnostic_overlay", (
+        f"Hybrid policy lost composite advisory routing for {composite}"
+    )
+    assert scope["base_reason"] == "composite_advisory_diagnostic_only_no_global_full_raster"
