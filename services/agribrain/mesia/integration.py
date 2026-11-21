@@ -27,6 +27,69 @@ from .assimilation.layer0_spine import (
 from .assimilation.capability_governance import CapabilityGovernanceAuthority
 
 
+def verify_native_capture_for_plot(packet: RadioObservationPacket, plot_id: str, storage_root: Any = None) -> bool:
+    """Accept only actual, SHA-matched tenant/plot-scoped native capture bytes.
+
+    A plausible-looking file:// URI or a 64-character hash never constitutes
+    native physical evidence. No HTTP, remote, relative, or unscoped file reads.
+    """
+    import hashlib
+    from pathlib import Path
+    from urllib.parse import urlsplit
+    from urllib.request import url2pathname
+    from .ingestion.sigmf_ingest import DEFAULT_STORAGE_ROOT, verify_capture_integrity
+
+    uri = getattr(packet, "native_data_uri", "") or ""
+    expected_hash = getattr(packet, "native_data_hash", "") or ""
+    if (not isinstance(uri, str) or not isinstance(expected_hash, str)
+            or len(expected_hash) != 64
+            or any(c not in "0123456789abcdefABCDEF" for c in expected_hash)):
+        return False
+    try:
+        parsed = urlsplit(uri)
+        if (parsed.scheme != "file" or parsed.netloc
+                or parsed.query or parsed.fragment):
+            return False
+        # file:///C:/... must become an OS-native absolute path on Windows.
+        # url2pathname also decodes URI escapes; avoid double unquoting.
+        candidate = Path(url2pathname(parsed.path))
+        if not candidate.is_absolute():
+            return False
+        root = Path(storage_root or DEFAULT_STORAGE_ROOT).resolve(strict=True)
+        candidate = candidate.resolve(strict=True)
+        relative = candidate.relative_to(root)
+        if (len(relative.parts) < 3 or relative.parts[1] != plot_id
+                or not candidate.is_file()):
+            return False
+        sha = hashlib.sha256()
+        with candidate.open("rb") as handle:
+            for data in iter(lambda: handle.read(1024 * 1024), b""):
+                sha.update(data)
+        if sha.hexdigest().lower() != expected_hash.lower():
+            return False
+        if candidate.name.endswith((".sigmf-data", ".sigmf-meta")):
+            return verify_capture_integrity(candidate)
+        return True
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def resolve_mesia_evidence_role(packet: RadioObservationPacket) -> Tuple[str, bool]:
+    """Unknown radio families cannot claim state-sensing evidence role."""
+    from .radio_families.registry import RadioFamily, RADIO_FAMILY_REGISTRY
+    source = str(getattr(packet, "source_profile", "") or "").split("/")[0]
+    role_str = str(getattr(packet, "evidence_role", "") or "").strip().upper()
+    try:
+        profile_enum = RadioFamily(source)
+        known = profile_enum in RADIO_FAMILY_REGISTRY
+    except (ValueError, TypeError):
+        known = False
+    if not role_str:
+        role_str = (RADIO_FAMILY_REGISTRY[profile_enum].default_evidence_role.value
+                    if known else "UNKNOWN")
+    return role_str, known and role_str.split(".")[-1] == "SENSING"
+
+
 class MesiaAgriBrainBridge:
     """Full-system integration bridge between MESIA, Layer 0, and ASMAE."""
 
@@ -116,30 +179,15 @@ class MesiaAgriBrainBridge:
         - Capability match requires radio_family and target_variable alignment.
         - ASMAE state_update and diagnosis authority are BLOCKED pending Phase 1 acquisition.
         """
-        # 0. Verify native evidence exists and check capture integrity (Audit Finding #4 & Phase 3)
-        native_uri = getattr(packet, "native_data_uri", None) or ""
-        native_hash = getattr(packet, "native_data_hash", None) or ""
-        
-        # Verify 64-character hex SHA-256 hash formatting
-        is_hash_valid = (
-            bool(native_hash)
-            and len(native_hash) == 64
-            and all(c in "0123456789abcdefABCDEF" for c in native_hash)
-        )
-        
-        # If on-disk SigMF capture artifact is referenced, verify actual file integrity
-        if is_hash_valid and native_uri:
-            from .ingestion.sigmf_ingest import verify_capture_integrity
-            from pathlib import Path
-            clean_path = native_uri.replace("file://", "")
-            p = Path(clean_path)
-            if p.exists() or (p.parent / f"{p.name}.sigmf-data").exists() or p.with_suffix(".sigmf-data").exists():
-                try:
-                    if not verify_capture_integrity(p):
-                        is_hash_valid = False
-                except Exception:
-                    is_hash_valid = False
-        
+        # P2-11: MESIA's packet may propose evidence, never own state authority.
+        if getattr(packet, "authority_scope", None) != "evidence_proposal":
+            raise ValueError("Principle P-08 violation: packet authority_scope must be evidence_proposal")
+
+        # Recompute physical byte digest, confirm tenant/plot-scoped local path,
+        # and require SigMF metadata where applicable. Missing files always fail.
+        is_hash_valid = verify_native_capture_for_plot(packet, self.plot_id)
+        native_uri = getattr(packet, "native_data_uri", "") or ""
+
         if not native_uri.strip() or not is_hash_valid:
             if target_microzone_id:
                 cell = self.lattice.get_cell(target_microzone_id)
@@ -199,18 +247,9 @@ class MesiaAgriBrainBridge:
         )
 
         # 6. ASMAE ObservationEvent Adapter
-        # Enforce per-packet evidence role (F01-B07)
-        role_str = str(getattr(packet, "evidence_role", "") or "").strip().upper()
-        if not role_str:
-            profile_name = getattr(packet, "source_profile", "").split("/")[0]
-            try:
-                from .radio_families.registry import RadioFamily, RADIO_FAMILY_REGISTRY
-                rf_enum = RadioFamily(profile_name)
-                role_str = RADIO_FAMILY_REGISTRY[rf_enum].default_evidence_role.value
-            except Exception:
-                role_str = "SENSING"
-        role_norm = role_str.split(".")[-1]
-        is_sensing = (role_norm == "SENSING")
+        # Enforce per-packet evidence role (F01-B07), without treating an
+        # unfamiliar family or an arbitrary SENSING string as a valid sensor.
+        role_str, is_sensing = resolve_mesia_evidence_role(packet)
 
         # Phase 3: Conditionally enable state updates only if packet is SENSING and capability is QUALIFIED
         is_qualified = False

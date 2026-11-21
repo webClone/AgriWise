@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "2.0.0",
   "exemptions": [
     {
       "file_pattern": "services/agribrain/mesia/tests/",
@@ -24,39 +24,68 @@
     {
       "file_pattern": "services/agribrain/mesia/validation/teacher_comparison.py",
       "reason": "Reference to validated benchmark teacher comparison."
+    }
+  ],
+  "line_exemptions": [
+    {
+      "file": "src/components/farm/intelligence/ContextualAnalysisDrawer.tsx",
+      "rule": "GROUND_TRUTH",
+      "line_text": "label=\"Last Ground Truth\"",
+      "reason": "Farmer field survey ground truth registry UI. Exact source-line exemption only."
     },
     {
-      "file_pattern": "src/components/farm/intelligence/ContextualAnalysisDrawer.tsx",
-      "reason": "Farmer field survey ground truth registry UI."
+      "file": "src/components/farm/intelligence/EngineExpertView.tsx",
+      "rule": "GROUND_TRUTH",
+      "line_text": "onClick={() => onAskBrain(\"What data sources are missing or degraded? How would additional ground truth change the confidence levels?\")}",
+      "reason": "Layer 10 pipeline diagnostic view referring to engine status. Exact source-line exemption only."
     },
     {
-      "file_pattern": "src/components/farm/intelligence/EngineExpertView.tsx",
-      "reason": "Layer 10 pipeline diagnostic view referring to engine status."
+      "file": "src/components/farm/intelligence/FieldSnapshotHUD.tsx",
+      "rule": "GROUND_TRUTH",
+      "line_text": "// Fallback to ground truth summary if no surface values are present",
+      "reason": "Farmer field survey categorical ground truth registry. Exact source-line exemption only."
     },
     {
-      "file_pattern": "src/components/farm/intelligence/EngineFarmerView.tsx",
-      "reason": "Layer 10 pipeline status description."
+      "file": "src/components/farm/intelligence/FieldSnapshotHUD.tsx",
+      "rule": "GROUND_TRUTH",
+      "line_text": "if (!gts) return [{ label: \"Status\", value: \"No ground truth\" }];",
+      "reason": "Farmer field survey categorical ground truth registry. Exact source-line exemption only."
     },
     {
-      "file_pattern": "src/components/farm/intelligence/EnginePipelinePanel.tsx",
-      "reason": "Layer 10 pipeline status description."
+      "file": "src/components/farm/intelligence/FieldSnapshotHUD.tsx",
+      "rule": "GROUND_TRUTH",
+      "line_text": "return `Resolution class from ground truth registry · V61 categorical surface`;",
+      "reason": "Farmer field survey categorical ground truth registry. Exact source-line exemption only."
     },
     {
-      "file_pattern": "src/components/farm/intelligence/FieldSnapshotHUD.tsx",
-      "reason": "Farmer field survey categorical ground truth registry."
+      "file": "src/components/farm/intelligence/SensorNetworkWorkspace.tsx",
+      "rule": "GROUND_TRUTH",
+      "line_text": "IoT Ground Truth · Real-time Field Telemetry · Auto-refresh 15s",
+      "reason": "Physical IoT ground truth telemetry hub. Exact source-line exemption only."
     },
     {
-      "file_pattern": "src/components/farm/intelligence/SensorNetworkWorkspace.tsx",
-      "reason": "Physical IoT ground truth telemetry hub."
+      "file": "src/components/farm/intelligence/SubsystemLayerDashboard.tsx",
+      "rule": "GROUND_TRUTH",
+      "line_text": "🧪 Verified Field Lab Test (Ground Truth)",
+      "reason": "Physical laboratory test soil ground truth comparison dashboard. Exact source-line exemption only."
     },
     {
-      "file_pattern": "src/components/farm/intelligence/SidebarExpertView.tsx",
-      "reason": "Layer 10 diagnostic pipeline."
+      "file": "src/components/farm/intelligence/SubsystemLayerDashboard.tsx",
+      "rule": "GROUND_TRUTH",
+      "line_text": "🎯 Calibrated Crop Model (Ground Truth)",
+      "reason": "Physical laboratory test soil ground truth comparison dashboard. Exact source-line exemption only."
     },
     {
-      "file_pattern": "src/components/farm/intelligence/SubsystemLayerDashboard.tsx",
-      "reason": "Physical laboratory test soil ground truth comparison dashboard."
+      "file": "src/components/farm/intelligence/SubsystemLayerDashboard.tsx",
+      "rule": "GROUND_TRUTH",
+      "line_text": "AgriWise enforces strict separation between <strong>Empirical Ground Truth</strong>, <strong>Physical Remote Sensing</strong>, and <strong>Regional Generic Fallbacks</strong>.",
+      "reason": "Physical laboratory test soil ground truth comparison dashboard. Exact source-line exemption only."
+    },
+    {
+      "file": "src/components/farm/intelligence/SubsystemLayerDashboard.tsx",
+      "rule": "GROUND_TRUTH",
+      "line_text": "Regional Pedological Survey baseline — physical lab sample record required for field-calibrated ground truth.",
+      "reason": "Physical laboratory test soil ground truth comparison dashboard. Exact source-line exemption only."
     }
   ]
 }
-

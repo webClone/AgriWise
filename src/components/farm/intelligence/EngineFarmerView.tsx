@@ -4,7 +4,7 @@
  * EngineFarmerView — Farmer-friendly grouped engine status.
  * Groups L0-L10 engines into meaningful categories farmers understand.
  * Shows plain-language summaries, field health impact, and actionable insights.
- * All data from real engine statuses. Zero synthetic data.
+ * All data from real engine statuses. Source reality and model-derived outputs are qualified separately.
  */
 
 import { type EngineStatus, SUBSYSTEM_METADATA } from "@/hooks/usePlotIntelligence";

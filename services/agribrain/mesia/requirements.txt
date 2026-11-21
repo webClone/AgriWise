@@ -1,2 +1,4 @@
 torch>=2.0.0
 numpy>=1.24.0
+# Required by mesia/service.py at module import (Satrec, jday)
+sgp4>=2.23

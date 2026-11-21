@@ -135,6 +135,15 @@ class BehaviourLikelihood:
     native_observation_ref: str = ""
     """Reference to the RadioObservationPacket."""
 
+    # Radio-domain residuals never share units with an ASMAE agricultural state.
+    # No VWC innovation is declared until a separately calibrated inversion
+    # supplies observation value, variance and a valid state operator.
+    observed_radio_primitive: str = ""
+    radio_residual_db: Optional[float] = None
+    radio_residual_variance_db2: Optional[float] = None
+    target_unit: str = "UNQUALIFIED"
+
+
     def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {}
         for f in self.__dataclass_fields__:
