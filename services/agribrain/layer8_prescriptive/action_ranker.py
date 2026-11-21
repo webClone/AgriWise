@@ -43,7 +43,9 @@ MAX_SAFE_RATES = {
 }
 
 # Action types that are irreversible (should not be used under low trust)
-IRREVERSIBLE_ACTIONS = {ActionType.SPRAY, ActionType.FERTILIZE, ActionType.REPLANT}
+# Irrigation is a physical intervention too. Do not exempt it merely because
+# water can be applied repeatedly; actuator delivery has its own stricter gate.
+IRREVERSIBLE_ACTIONS = {ActionType.IRRIGATE, ActionType.SPRAY, ActionType.FERTILIZE, ActionType.REPLANT}
 
 # Safe fallback actions for low-trust scenarios
 SAFE_ACTIONS = {ActionType.SCOUT, ActionType.WAIT, ActionType.MONITOR}
