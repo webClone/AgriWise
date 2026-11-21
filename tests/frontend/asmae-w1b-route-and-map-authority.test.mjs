@@ -20,28 +20,29 @@ const json = (body, opts = {}) => ({
   body, status: opts.status ?? 200, headers: opts.headers ?? {},
 });
 
-function handler({ signedIn = false, ownsRun = false } = {}) {
+function handler({ signedIn = false, ownsRun = false, upstreamPlotId = "plot-1", upstreamRunId = "run-1" } = {}) {
   const calls = { sessions: 0, fetches: 0, plotAuthorization: 0, runLookups: 0 };
   const prisma = {
     agriBrainRun: { findFirst: async () => {
       calls.runLookups++;
-      return ownsRun ? { id: "run-1", plotId: "plot-1" } : null;
+      return ownsRun ? { runId: "run-1", plotId: "plot-1", farmId: "farm-1", tenantId: "tenant-owner" } : null;
     } },
   };
   const GET = new Function(
-    "NextResponse", "prisma", "getSession", "authorizePlot", "fetch",
+    "NextResponse", "prisma", "getSession", "authorizePlot", "fetch", "buildSignedInternalHeaders",
     routeJs + "\nreturn GET;"
   )(
     { json },
     prisma,
     async () => { calls.sessions++; return signedIn ? { userId: "tenant-owner" } : null; },
     async () => { calls.plotAuthorization++; return ownsRun
-      ? { status: 200, plot: { id: "plot-1" } }
+      ? { status: 200, plot: { id: "plot-1", farmId: "farm-1" }, userId: "tenant-owner" }
       : { status: 404, plot: null };
     },
     async () => { calls.fetches++; return {
-      ok: true, status: 200, json: async () => ({ run_id: "run-1", plot_id: "plot-1" }),
+      ok: true, status: 200, json: async () => ({ run_id: upstreamRunId, plot_id: upstreamPlotId }),
     }; },
+    () => ({ Authorization: "test-signed-internal-scope" }),
   );
   return { GET, calls };
 }
@@ -97,4 +98,28 @@ test("W1B no signed prescription driver proof means even partial raster is not a
   assert.notEqual(cap(0, "field_wide_surface", "partial_raster", {
     provenance: { prescription_driver_allowed: false, state_update_allowed: false }
   }), "prescription_allowed");
+});
+
+
+
+test("W1B authorized run uses exactly one upstream call with matching identity", async () => {
+  const h = handler({ signedIn: true, ownsRun: true });
+  const response = await h.GET({}, context);
+  assert.equal(response.status, 200);
+  assert.equal(h.calls.fetches, 1);
+  assert.equal(response.body.plot_id, "plot-1");
+  assert.equal(response.body.run_id, "run-1");
+});
+
+test("W1B upstream spoofed plot cannot become run authorization", async () => {
+  const h = handler({ signedIn: true, ownsRun: true, upstreamPlotId: "foreign-plot" });
+  const response = await h.GET({}, context);
+  assert.equal(response.status, 404);
+  assert.equal(h.calls.fetches, 1);
+});
+
+test("W1B upstream wrong run ID cannot be substituted for authorized result", async () => {
+  const h = handler({ signedIn: true, ownsRun: true, upstreamRunId: "foreign-run" });
+  const response = await h.GET({}, context);
+  assert.equal(response.status, 404);
 });
