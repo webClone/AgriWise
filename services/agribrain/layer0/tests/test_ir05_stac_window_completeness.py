@@ -268,3 +268,20 @@ def test_ir05_fetcher_rejects_successful_but_truncated_quota_plan(monkeypatch, t
                 end_date="2026-06-30T00:00:00Z",
                 sources=["sentinel2"], manifest_only=True,
             )
+
+
+
+def test_ir05_missing_product_processing_level_is_not_fabricated():
+    class _Catalog:
+        def search(self, **kwargs):
+            return [{"id": "S2_LEVEL_UNVERIFIED", "properties": {
+                "datetime": "2026-06-20T00:00:00Z",
+            }, "assets": {}}]
+    manager = ArchiveQueryManager(stac_client=_Catalog())
+    with pytest.raises(RuntimeError, match="stac_scene_metadata_invalid"):
+        manager.execute_partitioned_query(
+            geometry_geojson={"type": "Point", "coordinates": [3, 36]},
+            start_date="2026-06-16T12:45:00Z",
+            end_date="2026-06-30T00:00:00Z",
+            sources=["sentinel2"],
+        )
