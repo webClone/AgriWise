@@ -95,6 +95,41 @@ def verify_replay_against_trusted_worldline(
         for field in ("journal_generation", "durable_anchor_generation", "durable_anchor_bound"):
             if receipt.get(field) != expected.get(field):
                 return False, f"replay_generation_mismatch:{field}", None
+
+        # A valid generation digest is not enough to prove that an as-of K
+        # occurred while that generation was durably anchored. Bind K to an
+        # actual out-of-band checkpoint published at/after K.
+        from services.agribrain.world_model.canonical_worldline import (
+            compute_canonical_journal_digest,
+        )
+        events = trusted_worldline.load_all_events(
+            plot_id, tenant_id, namespace, fail_on_corrupt=True,
+            require_durable_anchor=True,
+        )
+        expected_digest = compute_canonical_journal_digest(events[:generation])
+        anchor_dir = (
+            trusted_worldline.durable_anchor_root
+            / tenant_id / namespace
+            / trusted_worldline._plot_key(plot_id)
+            / "checkpoints"
+        )
+        if not anchor_dir.is_dir():
+            return False, "durable_checkpoint_inventory_missing", None
+        covering_checkpoint_found = False
+        for anchor_path in anchor_dir.glob("*.json"):
+            anchor = trusted_worldline._read(anchor_path)
+            if type(anchor.get("sequence")) is not int:
+                continue
+            if (anchor["sequence"] != generation
+                    or anchor.get("journal_digest") != expected_digest):
+                continue
+            anchor_committed = _ensure_utc_iso(anchor.get("committed_at"))
+            if anchor_committed and datetime.fromisoformat(anchor_committed) >= datetime.fromisoformat(knowledge_k):
+                covering_checkpoint_found = True
+                break
+        if not covering_checkpoint_found:
+            return False, "knowledge_cutoff_not_covered_by_durable_checkpoint", None
+
         if receipt.get("selected_evidence_set") != expected.get("selected_evidence_set"):
             return False, "replay_evidence_not_from_trusted_journal", None
         if receipt.get("evidence_set_digest") != expected.get("evidence_set_digest"):
