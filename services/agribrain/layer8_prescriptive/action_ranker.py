@@ -441,8 +441,14 @@ class ActionRankingEngine:
                         diag_only = _attr("diagnostic_only", True)
                         state_allowed = _attr("state_update_allowed") is True
 
+                # W2-B contains no independently signed server-side action
+                # certificate verifier. Even a self-consistent high-confidence
+                # ASMAE feature cannot authorize irreversible prescriptions.
+                # Keep this false until a separate verified action gate is built.
+                signed_action_authority_verified = False
                 is_blocked = (
-                    not participating_authorized
+                    not signed_action_authority_verified
+                    or not participating_authorized
                     or conf_val is None or unc_val is None
                     or bma_disagreement is None or res_m is None
                     or diag_only or not state_allowed
