@@ -97,12 +97,6 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
     browserRenderReceipt,
     fetchLayer10,
   } = l10;
-  // A ladder percentage is not an authority receipt: require a positive,
-  // finite approval plus the separately granted backend 1m authorization.
-  const qualifiedOneMeterApproval = hasQualifiedOneMeterApproval(
-    asmaeApprovalLadder?.oneMeterAsmaeApprovalPct,
-    data?.asmae_evidence_state?.current_1m_approval_allowed,
-  );
   const experimentalRenderMaterialization =
     browserRenderReceipt?.viewIdentity === renderPlan.viewIdentity
       ? browserRenderReceipt.overlayMaterialization
@@ -172,6 +166,13 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
   );
   const asmaeRasterMaterialized = baseRasterMaterialized
     && isAsmaeSurfaceType(renderedBaseType);
+  // A backend ladder percentage is not browser-render availability:
+  // require current-view ASMAE raster materialization as well as authority.
+  const qualifiedOneMeterApproval = hasQualifiedOneMeterApproval(
+    asmaeApprovalLadder?.oneMeterAsmaeApprovalPct,
+    data?.asmae_evidence_state?.current_1m_approval_allowed,
+    asmaeRasterMaterialized,
+  );
   const providerFallbackMaterialized = baseRasterMaterialized
     && renderedBaseType === "NDVI_CLEAN";
   const compositeRasterMaterialized = baseRasterMaterialized
