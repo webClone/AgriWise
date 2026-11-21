@@ -157,12 +157,30 @@ def run_layer4_standalone(
     species_allowed = bool(semantic_lineage.get("species_specific_allowed"))
     stage_allowed = bool(semantic_lineage.get("stage_specific_allowed"))
 
-    # v8.1: Calibrate LAI from ASMAE if available
-    if asmae_features:
+    # W2-B: unqualified ASMAE cannot overwrite independent L2 LAI.
+    # A crop/phenology, BMA/retro, uncertainty and science-calibration grant
+    # is required; absence means retain independent biophysical evidence.
+    if asmae_features and semantic_gate_active and species_allowed and stage_allowed:
         lai_feat = asmae_features.get("ASMAE_LAI")
-        if lai_feat:
-            l2_biophysical = l2_biophysical or {}
-            l2_biophysical["lai_current"] = lai_feat.value
+        if lai_feat is not None:
+            from math import isfinite
+            def _lai_field(key, default=None):
+                return lai_feat.get(key, default) if isinstance(lai_feat, dict) else getattr(lai_feat, key, default)
+            v, sigma = _lai_field("value"), _lai_field("uncertainty")
+            allowed = (
+                _lai_field("state_update_allowed") is True
+                and _lai_field("diagnostic_only", True) is False
+                and _lai_field("asmae_channel") == "state_evidence"
+                and semantic_lineage.get("asmae_lai_scientific_calibration_authorized") is True
+                and semantic_lineage.get("asmae_lai_calibration_ref")
+                and isinstance(v, (float, int)) and not isinstance(v, bool)
+                and isfinite(v) and 0 <= v <= 15
+                and isinstance(sigma, (float, int)) and not isinstance(sigma, bool)
+                and isfinite(sigma) and 0 <= sigma
+            )
+            if allowed:
+                l2_biophysical = dict(l2_biophysical or {})
+                l2_biophysical["lai_current"] = float(v)
 
     # 1. SAR Tillage Detection
     tillage = detect_tillage(
@@ -345,12 +363,34 @@ def run_layer4_standalone(
         user_soil_ph=soil_props.get("ph"),
     )
 
-    # v8.1: Feed ASMAE features into evidence dict
+    # W2-A: physical units are mandatory and crop calibration is distinct from
+    # evidence availability. Never turn water content into a stress probability.
     if asmae_features:
+        from services.agribrain.scientific_contracts.asmae_physical_semantics import (
+            require_tagged_state_quantity,
+        )
         if "ASMAE_CHLOROPHYLL" in asmae_features:
-            evidence["asmae_chlorophyll"] = asmae_features["ASMAE_CHLOROPHYLL"].value
+            feat = asmae_features["ASMAE_CHLOROPHYLL"]
+            try:
+                q = require_tagged_state_quantity(feat, "chlorophyll")
+                evidence["asmae_chlorophyll"] = {
+                    "value": q.value, "unit": q.unit,
+                    "state_update_allowed": getattr(feat, "state_update_allowed", False),
+                    "diagnostic_only": getattr(feat, "diagnostic_only", True),
+                }
+                evidence["asmae_chlorophyll_calibration"] = (
+                    (crop_params or {}).get("asmae_chlorophyll_calibration")
+                )
+                evidence["asmae_crop_type"] = crop_type
+            except ValueError:
+                evidence.setdefault("asmae_semantic_blocks", []).append("chlorophyll_missing_or_invalid_unit")
         if "ASMAE_CANOPY_WATER" in asmae_features:
-            evidence["asmae_water_stress"] = asmae_features["ASMAE_CANOPY_WATER"].value
+            feat = asmae_features["ASMAE_CANOPY_WATER"]
+            try:
+                q = require_tagged_state_quantity(feat, "canopy_water")
+                evidence["asmae_canopy_water_content"] = {"value": q.value, "unit": q.unit}
+            except ValueError:
+                evidence.setdefault("asmae_semantic_blocks", []).append("canopy_water_missing_or_invalid_unit")
         if "ASMAE_SALINITY_STRESS" in asmae_features:
             evidence["inferred_salinity_pressure"] = asmae_features["ASMAE_SALINITY_STRESS"].value
         if "ASMAE_BIOTIC_CONFOUNDER_RISK" in asmae_features:

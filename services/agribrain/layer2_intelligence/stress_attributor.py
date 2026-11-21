@@ -587,6 +587,23 @@ def _assess_nutrient_stress(
     # ASMAE Chlorophyll check
     chlorophyll_confounded = False
     asmae_chloro = _get_usable_asmae_feature(context, "ASMAE_CHLOROPHYLL")
+    asmae_chloro_deficit = None
+    if asmae_chloro is not None:
+        from services.agribrain.scientific_contracts.asmae_physical_semantics import (
+            authorized_chlorophyll_deficit,
+        )
+        meta = context if isinstance(context, dict) else getattr(context, "__dict__", {})
+        try:
+            asmae_chloro_deficit = authorized_chlorophyll_deficit(
+                asmae_chloro,
+                crop_type=str(meta.get("crop_type") or ""),
+                calibration=meta.get("asmae_chlorophyll_calibration"),
+                trusted_calibration_verifier=meta.get("_trusted_crop_calibration_verifier"),
+            )
+        except ValueError:
+            asmae_chloro_deficit = None
+        if asmae_chloro_deficit is None:
+            asmae_chloro = None  # untagged or uncalibrated values cannot assert N stress
     if asmae_chloro is not None and (has_water_stress or has_biotic_confounder):
         chlorophyll_confounded = True
 
@@ -629,10 +646,10 @@ def _assess_nutrient_stress(
     lineage_ids.extend(_collect_lineage_source_ids(water_features, "veg_fit_ndmi", "ndmi_mean", "ndmi"))
 
     if asmae_chloro is not None:
-        if asmae_chloro.value < 0.45:
-            severity += 0.2 + max(0.0, (0.45 - asmae_chloro.value) * 1.5)
+        if asmae_chloro_deficit is not None and asmae_chloro_deficit > 0.0:
+            severity += 0.2 * asmae_chloro_deficit
             evidence_chain.append(
-                f"ASMAE chlorophyll={asmae_chloro.value:.2f} indicates low leaf nitrogen"
+                f"ASMAE crop-calibrated chlorophyll deficit={asmae_chloro_deficit:.2f} (not a direct leaf-N measurement)"
             )
             eid, did, force_diag = _asmae_evidence_id(asmae_chloro)
             if eid:

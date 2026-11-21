@@ -82,12 +82,22 @@ def test_trust_monitor_cross_layer_conflict():
     assert res_empty["conflict_score"] == 0.0
     assert res_empty["agreement"] is True
 
-    # 2. Water contradiction: high soil moisture with high ASMAE canopy water stress
-    asmae_water = {"ASMAE_CANOPY_WATER": SimpleNamespace(value=0.85)}
+    # 2. Water content is not a water-stress probability. High soil moisture
+    # and high correctly tagged canopy water are physically consistent.
+    asmae_water = {"ASMAE_CANOPY_WATER": SimpleNamespace(
+        value=0.85, unit="fraction_content"
+    )}
     sensor_moisture = {"soil_moisture_vwc": 0.35}
     res_water = mon.evaluate_cross_layer_conflict(asmae_water, sensor_moisture)
-    assert res_water["conflict_score"] >= 0.4
-    assert any("water_conflict" in r for r in res_water["reasons"])
+    assert res_water["conflict_score"] == 0.0
+    assert res_water["agreement"] is True
+    assert not any("water_conflict" in r for r in res_water["reasons"])
+
+    # Legacy untagged quantities remain unqualified without inventing stress.
+    untagged_water = {"ASMAE_CANOPY_WATER": SimpleNamespace(value=0.85)}
+    untagged_result = mon.evaluate_cross_layer_conflict(untagged_water, sensor_moisture)
+    assert untagged_result["conflict_score"] == 0.0
+    assert "canopy_water_semantic_unit_unqualified" in untagged_result["reasons"]
 
     # 3. Salinity contradiction: low EC with high ASMAE salinity
     asmae_sal = {"ASMAE_SALINITY_STRESS": SimpleNamespace(value=0.80)}

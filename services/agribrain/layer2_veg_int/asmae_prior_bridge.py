@@ -24,7 +24,8 @@ logger = logging.getLogger(__name__)
 
 # ── Crop group → biophysical bounds ───────────────────────────────────────────
 # These are broad but evidence-based ranges per crop group.
-# LAI: m²/m², Chlorophyll: relative units (0–1 normalised)
+# LAI: m²/m²; Chlorophyll: foliar mass per area (ug/cm2), NOT 0–1.
+# These are broad *prior bounds*, not crop-calibrated nutrient diagnoses.
 _CROP_GROUP_BOUNDS: Dict[str, Dict[str, Tuple[float, float]]] = {
     "cereal":      {"lai": (0.5, 8.0), "chlorophyll": (24.0, 72.0)},
     "legume":      {"lai": (0.3, 6.0), "chlorophyll": (24.0, 68.0)},

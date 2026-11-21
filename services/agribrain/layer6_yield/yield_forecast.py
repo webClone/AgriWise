@@ -63,33 +63,12 @@ class YieldForecastEngine:
         reduction_factor = 1.0 - total_loss
         y_final = y_potential * reduction_factor
 
-        # ASMAE Vigor and LAI integration
+        # Diagnostic or high-confidence ASMAE vigor/LAI is not a fitted yield
+        # response operator. Until a crop/phenology-specific, independently
+        # verified yield calibration exists, ASMAE does not alter the biomass
+        # baseline, yield uncertainty or forecast intervals.
         asmae_unc_contrib = 0.0
-        if asmae_features:
-            # 1. ASMAE Vigor Calibration
-            vigor_feat = asmae_features.get("ASMAE_VIGOR")
-            if vigor_feat:
-                if hasattr(vigor_feat, "confidence") and vigor_feat.confidence >= 0.6 and vigor_feat.uncertainty <= 0.4:
-                    vigor_adj = 1.0 + (vigor_feat.value - 0.7) * 0.3
-                    y_final *= max(0.5, min(1.5, vigor_adj))
-                    asmae_unc_contrib += vigor_feat.uncertainty * 0.1
-                elif isinstance(vigor_feat, dict) and vigor_feat.get("confidence", 0.5) >= 0.6 and vigor_feat.get("uncertainty", 0.1) <= 0.4:
-                    vigor_adj = 1.0 + (vigor_feat.get("value", 0.7) - 0.7) * 0.3
-                    y_final *= max(0.5, min(1.5, vigor_adj))
-                    asmae_unc_contrib += vigor_feat.get("uncertainty", 0.1) * 0.1
-            
-            # 2. ASMAE LAI Calibration
-            lai_feat = asmae_features.get("ASMAE_LAI")
-            if lai_feat:
-                if hasattr(lai_feat, "confidence") and lai_feat.confidence >= 0.6 and lai_feat.uncertainty <= 0.4:
-                    lai_adj = 1.0 + (lai_feat.value - 3.0) * 0.1
-                    y_final *= max(0.5, min(1.5, lai_adj))
-                    asmae_unc_contrib += lai_feat.uncertainty * 0.1
-                elif isinstance(lai_feat, dict) and lai_feat.get("confidence", 0.5) >= 0.6 and lai_feat.get("uncertainty", 0.1) <= 0.4:
-                    lai_adj = 1.0 + (lai_feat.get("value", 3.0) - 3.0) * 0.1
-                    y_final *= max(0.5, min(1.5, lai_adj))
-                    asmae_unc_contrib += lai_feat.get("uncertainty", 0.1) * 0.1
-        
+
         # 3. Attribution
         attribution = {
             "water": 0.0, "nutrient": 0.0, "disease": 0.0, "unknown": 0.1

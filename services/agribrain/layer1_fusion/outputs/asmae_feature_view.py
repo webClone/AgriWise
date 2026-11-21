@@ -30,6 +30,7 @@ class ASMAEFeature:
     source_basis: str = "asmae"
     bma_disagreement: float = 0.0
     cross_layer_conflict: float = 0.0
+    unit: Optional[str] = None  # explicit source metadata only; never inferred
 
 
 @dataclass
@@ -91,6 +92,7 @@ def _extract_feature_from_obj(obj: Any, variable: str) -> Optional[ASMAEFeature]
 
     # 1. Look up value, confidence, uncertainty from context/package feature groups
     val, conf, unc = None, None, None
+    source_unit = None
     diag_only, state_allowed = True, False
 
     # Check Layer 2 input contexts / outputs / dicts
@@ -104,6 +106,7 @@ def _extract_feature_from_obj(obj: Any, variable: str) -> Optional[ASMAEFeature]
             if v_upper in group:
                 f = group[v_upper]
                 val = f.get("value")
+                source_unit = f.get("unit", f.get("units"))
                 conf = f.get("confidence")
                 unc = f.get("uncertainty")
                 diag_only = f.get("diagnostic_only", True)
@@ -115,6 +118,7 @@ def _extract_feature_from_obj(obj: Any, variable: str) -> Optional[ASMAEFeature]
             if ev_name in group:
                 f = group[ev_name]
                 val = f.get("value")
+                source_unit = f.get("unit", f.get("units"))
                 conf = f.get("confidence")
                 unc = f.get("uncertainty")
                 diag_only = f.get("diagnostic_only", True)
@@ -133,6 +137,7 @@ def _extract_feature_from_obj(obj: Any, variable: str) -> Optional[ASMAEFeature]
         for ff in ffs:
             if ff.name in (v_upper, f"{v_upper}_evidence"):
                 val = ff.value
+                source_unit = getattr(ff, "unit", getattr(ff, "units", None))
                 conf = ff.confidence
                 unc = ff.uncertainty
                 diag_only = ff.diagnostic_only
@@ -159,6 +164,7 @@ def _extract_feature_from_obj(obj: Any, variable: str) -> Optional[ASMAEFeature]
                 return feat_val
             elif isinstance(feat_val, dict):
                 val = feat_val.get("value")
+                source_unit = feat_val.get("unit", feat_val.get("units"))
                 conf = feat_val.get("confidence")
                 unc = feat_val.get("uncertainty")
                 diag_only = feat_val.get("diagnostic_only", True)
@@ -208,6 +214,8 @@ def _extract_feature_from_obj(obj: Any, variable: str) -> Optional[ASMAEFeature]
         c_hash_val = getattr(main_ref, "content_hash", None)
         a_hash_val = getattr(main_ref, "artifact_instance_hash", None)
         src_basis = getattr(main_ref, "source_basis", src_basis)
+        ref_unit = getattr(main_ref, "unit", getattr(main_ref, "units", None))
+        source_unit = ref_unit if ref_unit is not None else source_unit
         retro_status = getattr(main_ref, "retro_status", retro_status)
         bma_status = getattr(main_ref, "bma_status", bma_status)
         bma_disagreement = getattr(main_ref, "bma_disagreement", bma_disagreement)
@@ -243,6 +251,7 @@ def _extract_feature_from_obj(obj: Any, variable: str) -> Optional[ASMAEFeature]
         retro_status=retro_status,
         bma_status=bma_status,
         source_basis=src_basis,
+        unit=source_unit,
         bma_disagreement=float(bma_disagreement or 0.0),
         cross_layer_conflict=float(cross_layer_conflict or 0.0),
     )

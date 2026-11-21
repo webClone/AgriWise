@@ -43,7 +43,9 @@ MAX_SAFE_RATES = {
 }
 
 # Action types that are irreversible (should not be used under low trust)
-IRREVERSIBLE_ACTIONS = {ActionType.SPRAY, ActionType.FERTILIZE, ActionType.REPLANT}
+# Irrigation is a physical intervention too. Do not exempt it merely because
+# water can be applied repeatedly; actuator delivery has its own stricter gate.
+IRREVERSIBLE_ACTIONS = {ActionType.IRRIGATE, ActionType.SPRAY, ActionType.FERTILIZE, ActionType.REPLANT}
 
 # Safe fallback actions for low-trust scenarios
 SAFE_ACTIONS = {ActionType.SCOUT, ActionType.WAIT, ActionType.MONITOR}
@@ -358,50 +360,47 @@ class ActionRankingEngine:
                 has_high_conflict = True
 
         for card in cards:
-            # 1. Populating driver provenance
-            is_asmae_driven = False
-            primary_var = None
-            for ev in card.evidence:
-                ref_id = getattr(ev, "reference_id", "")
-                if "ASMAE_" in ref_id:
-                    is_asmae_driven = True
-                    primary_var = ref_id
-                    break
-                desc = getattr(ev, "description", "")
-                if "ASMAE_" in desc:
-                    for v in ["ASMAE_SALINITY_STRESS", "ASMAE_CHLOROPHYLL", "ASMAE_LAI", "ASMAE_CANOPY_WATER", "ASMAE_BIOTIC_CONFOUNDER_RISK"]:
-                        if v in desc:
-                            is_asmae_driven = True
-                            primary_var = v
-                            break
-            
-            if not is_asmae_driven and "ASMAE" in card.explain:
-                for v in ["ASMAE_SALINITY_STRESS", "ASMAE_CHLOROPHYLL", "ASMAE_LAI", "ASMAE_CANOPY_WATER", "ASMAE_BIOTIC_CONFOUNDER_RISK"]:
-                    if v in card.explain or v.replace("ASMAE_", "").lower() in card.explain.lower():
-                        is_asmae_driven = True
-                        primary_var = v
-                        break
-
-            if is_asmae_driven and primary_var:
-                feat = l8_input.asmae_features.get(primary_var)
-                if feat:
-                    card.primary_driver = primary_var
-                    card.driver_source_family = "asmae"
-                    if isinstance(feat, dict):
-                        card.driver_confidence = float(feat.get("confidence", 0.5))
-                        card.driver_uncertainty = float(feat.get("uncertainty", 0.1))
-                        card.driver_channel = feat.get("asmae_channel", feat.get("channel", "diagnostic"))
-                    else:
-                        card.driver_confidence = float(getattr(feat, "confidence", 0.5))
-                        card.driver_uncertainty = float(getattr(feat, "uncertainty", 0.1))
-                        card.driver_channel = getattr(feat, "asmae_channel", None) or getattr(feat, "channel", "diagnostic")
-                    
-                    corrob = []
-                    for ev in card.evidence:
-                        ref_id = getattr(ev, "reference_id", "")
-                        if ref_id and "ASMAE" not in ref_id and ref_id != primary_var:
-                            corrob.append(ref_id)
-                    card.corroborating_sources = corrob
+            # 1. Populating driver provenance across all 13 canonical states.
+            from services.agribrain.scientific_contracts.state_schema_ref import STATE_ORDER
+            import re
+            participating_vars = []
+            evidence_texts = [
+                str(getattr(ev, "reference_id", "") or "") + " " + str(getattr(ev, "description", "") or "")
+                for ev in card.evidence
+            ]
+            evidence_texts.append(str(card.explain or ""))
+            for state in STATE_ORDER:
+                key = f"ASMAE_{state.upper()}"
+                expr = r"(?<![a-z0-9_])asmae_(?:" + re.escape(state.lower()) + r")(?![a-z0-9_])"
+                artifact = r"(?<![a-z0-9_])asmae_artifact:" + re.escape(state.lower()) + r"(?![a-z0-9_])"
+                if any(re.search(expr, text.lower()) or re.search(artifact, text.lower()) for text in evidence_texts):
+                    participating_vars.append(key)
+            if participating_vars:
+                card.primary_driver = participating_vars[0]
+                card.driver_source_family = "asmae"
+                feat = l8_input.asmae_features.get(card.primary_driver)
+                if feat is not None:
+                    def _read_fld(f, key, default=None):
+                        return f.get(key, default) if isinstance(f, dict) else getattr(f, key, default)
+                    def _finite_fld(f, key):
+                        import math
+                        v = _read_fld(f, key)
+                        try:
+                            return float(v) if v is not None and math.isfinite(float(v)) else None
+                        except (TypeError, ValueError, OverflowError):
+                            return None
+                    card.driver_confidence = _finite_fld(feat, "confidence")
+                    card.driver_uncertainty = _finite_fld(feat, "uncertainty")
+                    card.driver_channel = _read_fld(feat, "asmae_channel") or _read_fld(feat, "channel") or "diagnostic"
+                else:
+                    card.driver_confidence = None
+                    card.driver_uncertainty = None
+                    card.driver_channel = "diagnostic"
+                card.corroborating_sources = [
+                    str(getattr(ev, "reference_id", "")) for ev in card.evidence
+                    if str(getattr(ev, "reference_id", "") or "")
+                    and "asmae" not in str(getattr(ev, "reference_id", "")).lower()
+                ]
 
             # 2. Irreversible ASMAE-driven action safety gates
             if card.action_type in IRREVERSIBLE_ACTIONS and card.driver_source_family == "asmae":
@@ -409,39 +408,56 @@ class ActionRankingEngine:
                 unc_val = card.driver_uncertainty
                 channel = card.driver_channel
                 
-                bma_disagreement = 0.0
-                res_m = 10.0
+                # Missing physical uncertainty, disagreement or local resolution
+                # is NOT equivalent to 0 sigma, zero BMA disagreement or 10 m.
+                bma_disagreement = None
+                res_m = None
                 diag_only = True
                 state_allowed = False
-                
-                feat = l8_input.asmae_features.get(card.primary_driver)
-                if feat:
-                    if isinstance(feat, dict):
-                        bma_disagreement = feat.get("bma_disagreement", 0.0)
-                        res_m = feat.get("resolution_m", 10.0)
-                        diag_only = feat.get("diagnostic_only", True)
-                        state_allowed = feat.get("state_update_allowed", False)
-                    else:
-                        bma_disagreement = getattr(feat, "bma_disagreement", 0.0)
-                        res_m = getattr(feat, "resolution_m", 10.0)
-                        diag_only = getattr(feat, "diagnostic_only", True)
-                        state_allowed = getattr(feat, "state_update_allowed", False)
-                    
-                    if bma_disagreement is None:
-                        bma_disagreement = 0.0
+                participating_vars = locals().get("participating_vars", [])
+                participating_authorized = bool(participating_vars)
+                for var in participating_vars:
+                    candidate = l8_input.asmae_features.get(var)
+                    if candidate is None:
+                        participating_authorized = False
+                        continue
+                    def _attr(k, default=None):
+                        return candidate.get(k, default) if isinstance(candidate, dict) else getattr(candidate, k, default)
+                    import math
+                    try:
+                        bma = float(_attr("bma_disagreement"))
+                        res = float(_attr("resolution_m"))
+                        sig = float(_attr("uncertainty"))
+                        conf = float(_attr("confidence"))
+                        valid_numbers = all(math.isfinite(q) for q in (bma, res, sig, conf))
+                    except (ValueError, TypeError, OverflowError):
+                        valid_numbers = False
+                    if not valid_numbers or bma > 0.3 or res <= 1.0 or sig > 0.5 or conf < 0.45:
+                        participating_authorized = False
+                    if _attr("diagnostic_only", True) is not False or _attr("state_update_allowed") is not True:
+                        participating_authorized = False
+                    if (_attr("asmae_channel") or _attr("channel")) in ("diagnostic", "visual", None):
+                        participating_authorized = False
+                    if var == card.primary_driver and valid_numbers:
+                        bma_disagreement, res_m = bma, res
+                        diag_only = _attr("diagnostic_only", True)
+                        state_allowed = _attr("state_update_allowed") is True
 
-                # BLOCK Check
+                # W2-B contains no independently signed server-side action
+                # certificate verifier. Even a self-consistent high-confidence
+                # ASMAE feature cannot authorize irreversible prescriptions.
+                # Keep this false until a separate verified action gate is built.
+                signed_action_authority_verified = False
                 is_blocked = (
-                    conf_val < 0.45
-                    or unc_val > 0.50
-                    or bma_disagreement > 0.30
-                    or diag_only
-                    or channel in ("diagnostic", "visual")
-                    or res_m <= 1.0
-                    or not state_allowed
+                    not signed_action_authority_verified
+                    or not participating_authorized
+                    or conf_val is None or unc_val is None
+                    or bma_disagreement is None or res_m is None
+                    or diag_only or not state_allowed
+                    or channel in ("diagnostic", "visual", None)
                     or has_high_conflict
                 )
-                
+
                 if is_blocked:
                     card.is_allowed = False
                     card.blocked_reason.append("blocked_by_asmae_safety_gate")

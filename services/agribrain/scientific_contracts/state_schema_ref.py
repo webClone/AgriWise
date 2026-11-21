@@ -110,6 +110,7 @@ CANONICAL_13_STATE_CATALOG: dict[str, dict[str, Any]] = {
         "surface_type": "ASMAE_CHLOROPHYLL",
         "semantic_name": "Foliar chlorophyll content",
         "units": "ug/cm2",
+        "source_unit_tag": "ug/cm2",  # mandatory external ASMAE feature tag
         "render_range": (0.0, 80.0),
         "uncertainty_association": "posterior_uncertainty",
         "authority_ceiling": "DIAGNOSTIC",
@@ -119,7 +120,8 @@ CANONICAL_13_STATE_CATALOG: dict[str, dict[str, Any]] = {
         "state": "canopy_water",
         "surface_type": "ASMAE_CANOPY_WATER",
         "semantic_name": "Canopy water content",
-        "units": "fraction",
+        "units": "fraction",  # numeric dimensionless content; not water stress
+        "source_unit_tag": "fraction_content",
         "render_range": (0.0, 1.0),
         "uncertainty_association": "posterior_uncertainty",
         "authority_ceiling": "DIAGNOSTIC",
