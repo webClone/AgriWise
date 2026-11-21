@@ -3,6 +3,7 @@
 import { useMemo, useEffect, useCallback, useRef } from "react";
 import type { GroundTruthSummary } from "@/hooks/useLayer10";
 import { useLayer10 } from "@/hooks/useLayer10";
+import { hasQualifiedOneMeterApproval } from "@/lib/agribrain/diagnostic-display-authority.mjs";
 import {
   isRenderedMaterialization,
   RENDER_AUTHORIZATION_VERSION,
@@ -165,6 +166,13 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
   );
   const asmaeRasterMaterialized = baseRasterMaterialized
     && isAsmaeSurfaceType(renderedBaseType);
+  // A backend ladder percentage is not browser-render availability:
+  // require current-view ASMAE raster materialization as well as authority.
+  const qualifiedOneMeterApproval = hasQualifiedOneMeterApproval(
+    asmaeApprovalLadder?.oneMeterAsmaeApprovalPct,
+    data?.asmae_evidence_state?.current_1m_approval_allowed,
+    asmaeRasterMaterialized,
+  );
   const providerFallbackMaterialized = baseRasterMaterialized
     && renderedBaseType === "NDVI_CLEAN";
   const compositeRasterMaterialized = baseRasterMaterialized
@@ -592,8 +600,8 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
                   <div style={{ display: "flex", justifyContent: "space-between", paddingLeft: 6 }}>
                     <span style={{ color: "#94a3b8" }}>Detail ladder:</span>
                     <span style={{ fontWeight: "bold", color: "#f1f5f9" }}>
-                      {(asmaeApprovalLadder?.oneMeterAsmaeApprovalPct && asmaeApprovalLadder.oneMeterAsmaeApprovalPct > 0)
-                        ? `1m Advisory (${Math.round(asmaeApprovalLadder.oneMeterAsmaeApprovalPct * 10) / 10}% approved)`
+                      {qualifiedOneMeterApproval
+                        ? `1m Advisory (${Math.round(asmaeApprovalLadder!.oneMeterAsmaeApprovalPct! * 10) / 10}% backend-qualified)`
                         : (asmaeApprovalLadder?.modelAssisted2_5mPct && asmaeApprovalLadder.modelAssisted2_5mPct > 0)
                         ? `2.5m Model-Assisted (${Math.round(asmaeApprovalLadder.modelAssisted2_5mPct * 10) / 10}%)`
                         : "10m Advisory (No 1m Approval)"}
@@ -604,7 +612,7 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
                     <span style={{ fontWeight: "bold", color: "#34d399" }}>advisory only</span>
                   </div>
                 </div>
-              ) : (asmaeApprovalLadder?.oneMeterAsmaeApprovalPct !== null && asmaeApprovalLadder?.oneMeterAsmaeApprovalPct !== undefined) ? (
+              ) : qualifiedOneMeterApproval ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
                   <div style={{ fontWeight: 700, marginBottom: 4, display: "flex", alignItems: "center", gap: 3, color: "#34d399" }}>
                     <span>✓</span>
@@ -637,8 +645,8 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
                   <div style={{ display: "flex", justifyContent: "space-between", paddingLeft: 6, borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 3, marginTop: 2 }}>
                     <span style={{ color: "#34d399" }}>Authority:</span>
                     <span style={{ fontWeight: "bold", color: "#34d399" }}>
-                      {(asmaeApprovalLadder?.oneMeterAsmaeApprovalPct && asmaeApprovalLadder.oneMeterAsmaeApprovalPct > 0)
-                        ? "advisory_certified"
+                      {qualifiedOneMeterApproval
+                        ? "backend-authorized advisory only"
                         : "advisory (diagnostic basis)"}
                     </span>
                   </div>
@@ -729,7 +737,7 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
                 <div style={{ display: "flex", justifyContent: "space-between", paddingLeft: 6 }}>
                   <span style={{ color: "#94a3b8" }}>ASMAE 1m approval:</span>
                   <span style={{ color: "#fb7185", fontWeight: "bold" }}>
-                    {asmaeApprovalLadder?.oneMeterAsmaeApprovalPct !== null
+                    {qualifiedOneMeterApproval
                       ? "available"
                       : `unavailable — ${(asmaeApprovalLadder?.unavailableReason || asmae_evidence_state?.reason || "no full scene stack").replace(/_/g, " ")}`}
                   </span>
