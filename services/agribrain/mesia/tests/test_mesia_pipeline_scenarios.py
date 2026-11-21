@@ -587,7 +587,7 @@ class TestScenarioDDynamicWifiCsiAndMetrology:
 class TestScenarioEAgriBrainLayer0Bridge:
     """Validates MesiaAgriBrainBridge end-to-end admission, calibration gates, and P-10 revocation."""
 
-    def test_bridge_admission_with_valid_and_invalid_calibration(self):
+    def test_bridge_admission_with_valid_and_invalid_calibration(self, tmp_path, monkeypatch):
         """Bridge must invalidate uncalibrated packets and admit properly calibrated/epoch-active packets."""
         bridge = MesiaAgriBrainBridge(plot_id="PLOT_TEST_BRIDGE")
 
@@ -621,9 +621,10 @@ class TestScenarioEAgriBrainLayer0Bridge:
         assert l0_adm.status == EvidenceAdmissionStatus.INVALIDATED
         assert l0_adm.is_usable_for_assimilation is False
 
-        # 3. Missing observation / absent innovation -> ABSENT
-        packet_absent = RadioObservationPacket(
-            packet_id="pkt-test-absent",
+        # 3a. An absent innovation with an unverified URI is INVALIDATED:
+        # physical capture integrity is checked BEFORE innovation missingness.
+        packet_absent_unverified = RadioObservationPacket(
+            packet_id="pkt-test-absent-unverified",
             source_profile="WIFI_CSI/v2",
             receiver_id="RECV_TEST_01",
             utc_time=datetime.now(timezone.utc),
@@ -632,8 +633,51 @@ class TestScenarioEAgriBrainLayer0Bridge:
             native_data_type="cf32_le",
             snr_db=None,
         )
+        l0_unverified, _ = bridge.process_and_admit_observation(
+            packet=packet_absent_unverified,
+            is_calibration_valid=True,
+            is_epoch_active=True,
+        )
+        assert l0_unverified.status == EvidenceAdmissionStatus.INVALIDATED
+        assert l0_unverified.is_usable_for_assimilation is False
+
+        # 3b. Separately verify ABSENT with a real on-disk, SHA-bound SigMF
+        # fixture. These are synthetic TEST BYTES, not a measured RF receiver.
+        # The sample's missing innovation remains absent after integrity passes.
+        from services.agribrain.mesia.ingestion import sigmf_ingest
+
+        monkeypatch.setattr(sigmf_ingest, "DEFAULT_STORAGE_ROOT", tmp_path)
+        iq_bytes = np.asarray([0.25 + 0.50j] * 8, dtype=np.complex64).tobytes()
+        manifest = sigmf_ingest.ingest_sigmf_capture(
+            tenant_id="tenant_scenario_e",
+            plot_id="PLOT_TEST_BRIDGE",
+            raw_data_bytes=iq_bytes,
+            metadata_dict={
+                "global": {"core:sample_rate": 1000000.0, "core:hw": "wifi_csi_test_fixture"},
+                "captures": [{
+                    "core:datetime": datetime.now(timezone.utc).isoformat(),
+                    "core:frequency": 2.45e9,
+                }],
+                "annotations": [{"core:sample_count": 8}],
+            },
+            storage_root=tmp_path,
+        )
+        capture_file = Path(str(manifest.storage_prefix) + ".sigmf-data")
+        assert capture_file.is_file()
+        assert sigmf_ingest.verify_capture_integrity(manifest)
+
+        packet_absent_verified = RadioObservationPacket(
+            packet_id="pkt-test-absent-verified",
+            source_profile="WIFI_CSI/v2",
+            receiver_id="RECV_TEST_01",
+            utc_time=datetime.now(timezone.utc),
+            native_data_uri=capture_file.as_uri(),
+            native_data_hash=manifest.data_sha256,
+            native_data_type="cf32_le",
+            snr_db=None,
+        )
         l0_abs, _ = bridge.process_and_admit_observation(
-            packet=packet_absent,
+            packet=packet_absent_verified,
             is_calibration_valid=True,
             is_epoch_active=True,
         )
