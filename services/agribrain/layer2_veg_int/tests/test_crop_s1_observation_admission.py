@@ -342,12 +342,16 @@ def test_invalid_process_orbit_fields_fall_through_to_valid_catalog_metadata() -
 
 
 def test_process_binding_persists_orbit_metadata_and_legacy_cache_requires_refresh() -> None:
-    userdata = {"userData": {"tiles": [{
-        "sentinel1ProductId": PRODUCT_S1D,
-        "relativeOrbitNumber": 33,
-        "orbitDirection": "descending",
-        "orbitId": 123,
-    }]}}
+    userdata = {"userData": {
+        "expectedProductId": PRODUCT_S1D,
+        "unidentifiedTileCount": 0,
+        "tiles": [{
+            "sentinel1ProductId": PRODUCT_S1D,
+            "relativeOrbitNumber": 33,
+            "orbitDirection": "descending",
+            "orbitId": 123,
+        }],
+    }}
     binding = verify_exact_product_binding(PRODUCT_S1D, userdata, "S1")
 
     assert binding["is_exact"] is True
