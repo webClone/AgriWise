@@ -483,3 +483,48 @@ class ArchiveBootstrapService:
             effective_at=acquisition,
         )
         return committed.get("event_id")
+
+
+def create_copernicus_archive_provider(
+    fetcher: Any,
+    plot_id: str,
+    geometry_wkt: str,
+    sources: Optional[List[str]] = None,
+    manifest_only: bool = True,
+) -> Callable[[str, str], List[Dict[str, Any]]]:
+    """Binds ArchiveFetcher with STAC / CDSE query to ArchiveBootstrapService window slices.
+
+    Transforms HistoricalSceneRecord outputs into the scene inventory schema required
+    by ArchiveBootstrapService._commit_scene_to_worldline.
+    """
+    active_sources = sources or ["sentinel2", "sentinel1"]
+
+    def provider(win_start: str, win_end: str) -> List[Dict[str, Any]]:
+        records = fetcher.orchestrate_fetch(
+            plot_id=plot_id,
+            geometry_wkt=geometry_wkt,
+            start_date=win_start,
+            end_date=win_end,
+            sources=active_sources,
+            manifest_only=manifest_only,
+        )
+        scenes: List[Dict[str, Any]] = []
+        for r in records:
+            if getattr(r, "quality_status", "") == "rejected":
+                continue
+            scenes.append({
+                "scene_id": r.scene_id,
+                "source": r.source,
+                "acquisition_time": r.acquisition_time,
+                "product_level": r.product_level,
+                "cloud_score": r.cloud_score,
+                "quality_score": 1.0 - ((r.cloud_score or 0.0) / 100.0),
+                "source_content_hash": r.source_content_hash,
+                "valid_pixel_fraction": r.valid_pixel_fraction,
+                "resolution_m": r.native_resolution_m,
+                "bands_available": r.bands_available,
+                "masks_available": r.masks_available,
+            })
+        return scenes
+
+    return provider

@@ -22,6 +22,7 @@ from services.agribrain.layer05_asmae.history.archive_bootstrap_service import (
     ArchiveBootstrapService,
     BootstrapCheckpoint,
     MISSION_START_DATE,
+    create_copernicus_archive_provider,
 )
 from services.agribrain.world_model.canonical_worldline import (
     CanonicalWorldlineService,
@@ -454,6 +455,58 @@ class ASMAEIR05ArchiveBootstrapTests(unittest.TestCase):
             self.plot_id, "ARCHIVE_POSTERIOR_VALIDATED",
             self.tenant_id, self.namespace,
         ))
+
+    def test_ir05_t15_copernicus_archive_provider_bridge(self):
+        class MockFetcher:
+            def orchestrate_fetch(self, plot_id, geometry_wkt, start_date, end_date, sources, manifest_only):
+                if start_date.startswith("2015-06-23"):
+                    return [
+                        type("Record", (object,), {
+                            "scene_id": "S2A_MSIL2A_20150701_TEST",
+                            "source": "sentinel2",
+                            "acquisition_time": "2015-07-01T10:30:00Z",
+                            "product_level": "L2A",
+                            "cloud_score": 5.0,
+                            "source_content_hash": "c" * 64,
+                            "valid_pixel_fraction": 0.99,
+                            "native_resolution_m": 10.0,
+                            "quality_status": "accepted",
+                            "bands_available": ["B02", "B04", "B08"],
+                            "masks_available": ["SCL"],
+                        })(),
+                        type("Record", (object,), {
+                            "scene_id": "S2A_REJECTED",
+                            "quality_status": "rejected",
+                        })(),
+                    ]
+                return []
+
+        bridge = create_copernicus_archive_provider(
+            fetcher=MockFetcher(),
+            plot_id=self.plot_id,
+            geometry_wkt="POLYGON((3 36, 3.01 36, 3.01 36.01, 3 36.01, 3 36))",
+        )
+        service = ArchiveBootstrapService(
+            worldline=self.worldline,
+            bootstrap_root=self.bootstrap_root,
+            fetcher_factory=bridge,
+        )
+        res = service.run_bootstrap(
+            plot_id=self.plot_id,
+            geometry_hash=self.geometry_hash,
+            tenant_id=self.tenant_id,
+            namespace=self.namespace,
+            start_date="2015-06-23T00:00:00Z",
+            target_end_date="2015-12-23T00:00:00Z",
+        )
+        self.assertEqual(res["status"], "COMPLETED")
+        self.assertEqual(res["total_events_committed"], 1)
+        events = self.worldline.load_all_events(self.plot_id, self.tenant_id, self.namespace)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event_type"], "ARCHIVE_SCENE_INGESTED")
+        scene_rec = events[0]["payload"]["archive_scene"]
+        self.assertEqual(scene_rec["scene_id"], "S2A_MSIL2A_20150701_TEST")
+        self.assertEqual(scene_rec["source_content_hash"], "c" * 64)
 
 
 if __name__ == "__main__":
