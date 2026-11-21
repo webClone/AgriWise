@@ -142,6 +142,20 @@ model Plot {
   updatedAt DateTime @updatedAt
 }
 
+/// Immutable authorization binding established before a run is executed.
+/// Run-result reads require this tenant/plot/farm record; a backend response
+/// must never create or authorize its own run ownership.
+model AgriBrainRun {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  runId     String   @unique
+  tenantId  String   @db.ObjectId
+  farmId    String   @db.ObjectId
+  plotId    String   @db.ObjectId
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, farmId, plotId])
+}
+
 /// Tenant-scoped production rollout authority for ASMAE. Local JSON rollout
 /// files are reserved for development and tests.
 model AsmaeRollout {
