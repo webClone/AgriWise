@@ -263,6 +263,18 @@ class ArchiveFetcher:
             # Never allow bootstrap to checkpoint it as a completed archive window.
             raise RuntimeError(f"archive_download_plan_incomplete:{reason}")
 
+        # The planner can return success=True after silently dropping scenes
+        # to comply with its per-plot and per-job quotas. That is a valid
+        # *partial job*, NOT complete historical coverage for this interval.
+        discovered_ids = [(s.source, s.scene_id) for s in new_candidates]
+        planned_ids = [(s.source, s.scene_id) for s in allowed_scenes]
+        if (len(planned_ids) != len(discovered_ids)
+                or set(planned_ids) != set(discovered_ids)):
+            raise RuntimeError(
+                f"archive_download_plan_partial:discovered={len(discovered_ids)}"
+                f":planned={len(planned_ids)}"
+            )
+
         # 4. Ingest and create HistoricalSceneRecord for each allowed scene
         processed_records = list(existing_records)
         
