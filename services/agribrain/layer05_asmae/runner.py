@@ -57,6 +57,14 @@ def intersect_execution_permissions(registry: Dict[str, Any],
     if mode in ("shadow", "quick_visual"):
         effective["production_authority_allowed"] = False
         effective["training_export_allowed"] = False
+    if effective.get("compute_allowed") is not True:
+        for flag in _REQUEST_RESTRICTABLE_PERMISSIONS:
+            effective[flag] = False
+    if effective.get("diagnostic_allowed") is not True:
+        effective["advisory_allowed"] = False
+        effective["plot_state_publication_allowed"] = False
+    if effective.get("production_authority_allowed") is not True:
+        effective["training_export_allowed"] = False
     return effective
 
 
@@ -1258,20 +1266,27 @@ class ASMAERunner:
         diagnostic_allowed = bool(permissions.get("diagnostic_allowed", False))
         production_allowed = bool(permissions.get("production_authority_allowed", False))
         visual_allowed = bool(permissions.get("visual_authority_allowed", False))
-        training_allowed = bool(permissions.get("training_export_allowed", False))
+        # Training labels require BOTH registry training grant and current
+        # production authority; a narrowed cached read cannot leak old labels.
+        training_allowed = bool(
+            permissions.get("training_export_allowed", False) and production_allowed
+        )
 
         production_usable = bool(result.get("production_usable", False)) and production_allowed
         result["production_usable"] = production_usable
         result["layer1_export_allowed"] = bool(result.get("layer1_export_allowed", False)) and production_allowed
         result["state_update_allowed"] = bool(result.get("state_update_allowed", False)) and production_allowed
-        result["weak_label_export_allowed"] = bool(result.get("weak_label_export_allowed", False)) and training_allowed
+        result["weak_label_export_allowed"] = bool(
+            result.get("weak_label_export_allowed", False)
+            and training_allowed and production_usable
+        )
         result["visual_allowed"] = bool(result.get("visual_allowed", False)) and visual_allowed
         result["diagnostic_only"] = not production_usable
         result["advisory_allowed"] = diagnostic_allowed and bool(permissions.get("advisory_allowed", False))
         result["plot_state_publication_allowed"] = bool(
             permissions.get("plot_state_publication_allowed", False)
         )
-        if not training_allowed:
+        if not result["weak_label_export_allowed"]:
             result["weak_labels"] = []
 
         diagnostics = result.get("diagnostics")
