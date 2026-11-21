@@ -6,6 +6,7 @@ import pytest
 
 from services.agribrain.scientific_contracts.asmae_physical_semantics import (
     calibrated_chlorophyll_deficit,
+    authorized_chlorophyll_deficit,
     require_tagged_state_quantity,
     validate_canopy_water_content,
 )
@@ -130,4 +131,30 @@ def test_w2a_downstream_nutrient_adapter_refuses_bare_evidence():
     }
     assert _qualified_chlorophyll_deficit(data) is None
     data["asmae_chlorophyll"] = _chlorophyll(value=30.0)
+    # An untrusted JSON calibration cannot move Layer 4 science.
+    assert _qualified_chlorophyll_deficit(data) is None
+    data["_trusted_crop_calibration_verifier"] = lambda **kwargs: True
     assert _qualified_chlorophyll_deficit(data) == pytest.approx(0.75)
+
+
+
+def test_w2a_untrusted_calibration_status_cannot_grant_scientific_influence():
+    feature = _chlorophyll(18.0)
+    calibration = _calibration()
+    assert authorized_chlorophyll_deficit(
+        feature, crop_type="wheat", calibration=calibration,
+    ) is None
+    assert authorized_chlorophyll_deficit(
+        feature, crop_type="wheat", calibration=calibration,
+        trusted_calibration_verifier=lambda **kwargs: False,
+    ) is None
+
+
+def test_w2a_calibration_verifier_exception_fails_closed():
+    def unavailable_registry(**kwargs):
+        raise RuntimeError("calibration_registry_offline")
+    assert authorized_chlorophyll_deficit(
+        _chlorophyll(18.0), crop_type="wheat",
+        calibration=_calibration(),
+        trusted_calibration_verifier=unavailable_registry,
+    ) is None
