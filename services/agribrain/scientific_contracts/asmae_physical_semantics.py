@@ -82,6 +82,35 @@ def calibrated_chlorophyll_deficit(
     ))
 
 
+
+def authorized_chlorophyll_deficit(
+    feature: Any,
+    *,
+    crop_type: str,
+    calibration: Optional[Mapping[str, Any]],
+    trusted_calibration_verifier: Any = None,
+) -> Optional[float]:
+    """Require a deployment-controlled verifier in addition to tagged units.
+
+    Merely writing {"status": "qualified"} in client data never authorizes
+    a nutrient hypothesis. A trusted registry callback must explicitly
+    verify crop, calibration identity, revocation and applicability.
+    """
+    quantity = require_tagged_state_quantity(feature, "chlorophyll")
+    if not callable(trusted_calibration_verifier):
+        return None
+    try:
+        if trusted_calibration_verifier(
+            crop_type=crop_type, calibration=calibration, unit=quantity.unit
+        ) is not True:
+            return None
+    except Exception:
+        return None
+    return calibrated_chlorophyll_deficit(
+        feature, crop_type=crop_type, calibration=calibration
+    )
+
+
 def validate_canopy_water_content(feature: Any) -> TaggedStateQuantity:
     """Water *content*, not inverted water stress or irrigation demand."""
     return require_tagged_state_quantity(feature, "canopy_water")
