@@ -72,6 +72,14 @@ from .evidence_classifier import classify_asmae_evidence
 logger = logging.getLogger(__name__)
 
 
+def production_mode_allowed(mode: str, permissions: Dict[str, Any]) -> bool:
+    """State, L1 and prescription authority requires non-shadow registry grant."""
+    return bool(
+        mode not in ("shadow", "quick_visual")
+        and permissions.get("production_authority_allowed") is True
+    )
+
+
 class ASMAEEngine:
     """The central execution engine for the Adaptive Scientific MicroZone Assimilation Engine."""
 
@@ -3234,10 +3242,7 @@ class ASMAEEngine:
         permissions = dict(getattr(inp, "execution_permissions", {}) or {})
         # Shadow / quick visual may compute diagnostics but must never
         # acquire state, Layer1, prescription or weak-label export authority.
-        production_allowed = bool(
-            permissions.get("production_authority_allowed") is True
-            and inp.mode not in ("shadow", "quick_visual")
-        )
+        production_allowed = production_mode_allowed(inp.mode, permissions)
         current_spatial = bool(
             state_result_dict.get("status") == "success"
             and raster_maps
