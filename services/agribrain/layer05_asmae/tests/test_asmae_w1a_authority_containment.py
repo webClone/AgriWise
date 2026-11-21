@@ -81,7 +81,10 @@ def test_engine_output_uses_mode_gate_and_hardcoded_orchestrator_grant_is_gone()
     root = Path(__file__).resolve().parents[2]
     orch_path = root / "orchestrator_v2" / "runner.py"
     text = orch_path.read_text(encoding="utf-8")
-    segment = text[text.index('"orchestrator_reintegration": {'):][:500]
+    reintegration_pos = text.index('"orchestrator_reintegration": {')
+    submission_pos = text.index("# Execute ASMAERunner", reintegration_pos)
+    segment = text[reintegration_pos:submission_pos]
+    assert '"execution_permissions": {' in segment
     assert '"production_authority_allowed": False' in segment
     assert '"training_export_allowed": False' in segment
 
