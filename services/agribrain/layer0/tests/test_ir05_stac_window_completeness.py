@@ -237,3 +237,34 @@ def test_ir05_fetcher_rejects_quota_blockage_as_incomplete(monkeypatch, tmp_path
                 end_date="2026-06-30T00:00:00Z",
                 sources=["sentinel2"], manifest_only=True,
             )
+
+
+
+def test_ir05_fetcher_rejects_successful_but_truncated_quota_plan(monkeypatch, tmp_path):
+    """ArchiveDownloadPlanner can report success even after silently dropping scenes."""
+    from types import SimpleNamespace
+    monkeypatch.setenv("AGRIWISE_ARCHIVE_OFFLINE", "false")
+    fetcher = ArchiveFetcher(cache_dir=str(tmp_path), stac_client=_Auth())
+    catalog_scenes = [
+        SimpleNamespace(source="sentinel2", scene_id="S2_A"),
+        SimpleNamespace(source="sentinel2", scene_id="S2_B"),
+    ]
+    monkeypatch.setattr(
+        fetcher.query_manager, "execute_partitioned_query",
+        lambda **kwargs: catalog_scenes,
+    )
+    monkeypatch.setattr(
+        fetcher.download_planner, "plan_download",
+        lambda **kwargs: (True, "Success", catalog_scenes[:1]),
+    )
+    with patch(
+        "services.agribrain.layer0.archive.archive_fetcher.calculate_aoi_footprint",
+        return_value={"type": "Point", "coordinates": [3, 36]},
+    ):
+        with pytest.raises(RuntimeError, match="archive_download_plan_partial:discovered=2:planned=1"):
+            fetcher.orchestrate_fetch(
+                plot_id="plot", geometry_wkt="POINT(3 36)",
+                start_date="2026-06-16T12:45:00Z",
+                end_date="2026-06-30T00:00:00Z",
+                sources=["sentinel2"], manifest_only=True,
+            )
