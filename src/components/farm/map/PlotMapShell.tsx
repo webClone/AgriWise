@@ -27,6 +27,7 @@ import { getWorkspaceEntityGeometryLayers, getWorkspaceDraftGeometryLayers, type
 import {geometryBounds} from "@/lib/agribrain/workspace-geometry.mjs";
 import type { WorkspaceFeatureEnvelope } from "@/lib/agribrain/workspace-feature-envelope";
 import {sceneLayerForEntityKind,coincidentSceneEntities} from "@/components/farm/workspace/p06-scene-registry.mjs";
+import { isTransectDiagnosisAuthorized } from "@/lib/agribrain/diagnostic-display-authority.mjs";
 
 function hasStaleGatewayEvidence(rawData: Record<string, unknown> | undefined): boolean {
   for (const value of Object.values(rawData || {})) {
@@ -139,7 +140,8 @@ export default function PlotMapShell(props: PlotMapShellProps) {
   const canSamplePixel = l10.canSamplePixel ?? canShowPixelHint;
   const canInterpretForScouting = l10.canInterpretForScouting ?? canSamplePixel;
   const canInterpretDiagnostically = l10.canInterpretDiagnostically ?? canShowPixelDiagnosis;
-  const inspectorDiagnosisAllowed = canInterpretDiagnostically || (resolvedIsAsmae && canSamplePixel);
+  // Sampling or drawing an ASMAE raster cannot elevate an explicit denial of diagnosis.
+  const inspectorDiagnosisAllowed = isTransectDiagnosisAuthorized(canInterpretDiagnostically);
 
   // 1. Derive scene profile from map state (no stateful toggling)
   const sceneProfile: SceneProfile = useMemo(() => {
@@ -168,6 +170,16 @@ export default function PlotMapShell(props: PlotMapShellProps) {
       return next;
     });
   }, [inspectorDiagnosisAllowed, transectPoints.length]);
+
+  // Revoke an active transect immediately when diagnostic authority disappears.
+  // The drawing state and its sampled values must not outlive the authorization.
+  useEffect(() => {
+    if (!inspectorDiagnosisAllowed) {
+      setTransectMode(false);
+      setTransectPoints([]);
+      setHoveredSampleIndex(null);
+    }
+  }, [inspectorDiagnosisAllowed]);
 
   const { onAnalysisStateChange } = props;
   useEffect(() => {
