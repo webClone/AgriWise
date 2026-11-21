@@ -553,6 +553,7 @@ class ArchiveFetcher:
 
             final_path = os.path.join(dest_dir, f"{asset}.tif")
             temp_path = None
+            response = None
             try:
                 response = requests.get(
                     url, headers=headers, timeout=60, stream=True,
@@ -590,5 +591,7 @@ class ArchiveFetcher:
                     f"archive_asset_download_not_verified:{asset}:{type(exc).__name__}"
                 ) from exc
             finally:
+                if response is not None and callable(getattr(response, "close", None)):
+                    response.close()
                 if temp_path is not None and os.path.exists(temp_path):
                     os.unlink(temp_path)
