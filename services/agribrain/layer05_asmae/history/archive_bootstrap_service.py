@@ -22,6 +22,7 @@ Architectural Guarantees:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -460,6 +461,10 @@ class ArchiveBootstrapService:
                 "inventory_only": True,
                 "posterior_validated": False,
                 "scientific_authority": "none",
+                # An archival manifest digest is not proof of raw raster bytes,
+                # a calibrated H operator, or posterior scientific authority.
+                "asset_content_verified": False,
+                "source_hash_kind": scene.get("source_hash_kind", "unqualified_inventory_digest"),
             }
         }
         proposal = WorldlineEventProposal(
@@ -492,12 +497,22 @@ def create_copernicus_archive_provider(
     sources: Optional[List[str]] = None,
     manifest_only: bool = True,
 ) -> Callable[[str, str], List[Dict[str, Any]]]:
-    """Binds ArchiveFetcher with STAC / CDSE query to ArchiveBootstrapService window slices.
+    """Bind a real STAC archive fetcher to inventory-only bootstrap.
 
-    Transforms HistoricalSceneRecord outputs into the scene inventory schema required
-    by ArchiveBootstrapService._commit_scene_to_worldline.
+    This bridge MUST NOT confer raster-asset, scientific posterior or local
+    resolution authority. It explicitly distinguishes manifest metadata from
+    physically validated asset digests.
     """
-    active_sources = sources or ["sentinel2", "sentinel1"]
+    if not isinstance(plot_id, str) or not plot_id.strip():
+        raise ValueError("archive_provider_plot_id_required")
+    if not isinstance(geometry_wkt, str) or not geometry_wkt.strip():
+        raise ValueError("archive_provider_geometry_wkt_required")
+    requested_geom_hash = hashlib.sha256(geometry_wkt.encode("utf-8")).hexdigest()
+    active_sources = sources if sources is not None else ["sentinel2", "sentinel1"]
+    if not active_sources or any(source not in ("sentinel2", "sentinel1") for source in active_sources):
+        raise ValueError("archive_provider_sources_must_be_supported")
+    if not callable(getattr(fetcher, "orchestrate_fetch", None)):
+        raise TypeError("archive_provider_fetcher_interface_missing")
 
     def provider(win_start: str, win_end: str) -> List[Dict[str, Any]]:
         records = fetcher.orchestrate_fetch(
@@ -508,22 +523,44 @@ def create_copernicus_archive_provider(
             sources=active_sources,
             manifest_only=manifest_only,
         )
+        if not isinstance(records, list):
+            raise RuntimeError("archive_provider_returned_non_list")
         scenes: List[Dict[str, Any]] = []
-        for r in records:
-            if getattr(r, "quality_status", "") == "rejected":
+        for record in records:
+            quality = getattr(record, "quality_status", None)
+            if quality == "rejected":
                 continue
+            if quality != "accepted":
+                raise RuntimeError("archive_provider_unqualified_scene_status")
+            if getattr(record, "plot_id", None) != plot_id:
+                raise RuntimeError("archive_provider_cross_plot_record")
+            if getattr(record, "geometry_hash", None) != requested_geom_hash:
+                raise RuntimeError("archive_provider_geometry_mismatch")
+            if str(getattr(record, "source", "")).lower() not in active_sources:
+                raise RuntimeError("archive_provider_source_out_of_scope")
+            digest = getattr(record, "source_content_hash", None)
+            if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+                raise RuntimeError("archive_provider_invalid_record_digest")
+            # ArchiveFetcher provides a composite scene-record hash. With
+            # manifest_only, this may derive solely from metadata/remote hash.
+            # Neither mode makes it an authenticated asset byte SHA-256.
             scenes.append({
-                "scene_id": r.scene_id,
-                "source": r.source,
-                "acquisition_time": r.acquisition_time,
-                "product_level": r.product_level,
-                "cloud_score": r.cloud_score,
-                "quality_score": 1.0 - ((r.cloud_score or 0.0) / 100.0),
-                "source_content_hash": r.source_content_hash,
-                "valid_pixel_fraction": r.valid_pixel_fraction,
-                "resolution_m": r.native_resolution_m,
-                "bands_available": r.bands_available,
-                "masks_available": r.masks_available,
+                "scene_id": record.scene_id,
+                "source": record.source,
+                "acquisition_time": record.acquisition_time,
+                "product_level": record.product_level,
+                "cloud_score": record.cloud_score,
+                "quality_score": 1.0 - ((record.cloud_score or 0.0) / 100.0),
+                "source_content_hash": digest,
+                "source_hash_kind": (
+                    "manifest_metadata_digest"
+                    if manifest_only else "archive_fetcher_composite_digest"
+                ),
+                "asset_content_verified": False,
+                "valid_pixel_fraction": record.valid_pixel_fraction,
+                "resolution_m": record.native_resolution_m,
+                "bands_available": record.bands_available,
+                "masks_available": record.masks_available,
             })
         return scenes
 
