@@ -99,7 +99,7 @@ class ArchiveQueryManager:
                     if not isinstance(item, dict):
                         raise RuntimeError("stac_non_mapping_scene_item")
                     scene_id = item.get("id")
-                    if not scene_id:
+                    if not isinstance(scene_id, str) or not scene_id.strip():
                         raise RuntimeError("stac_scene_id_missing")
                     parsed = self._parse_stac_item(item, source)
                     if parsed is None:
@@ -109,13 +109,16 @@ class ArchiveQueryManager:
                         # STAC interval endpoints may be inclusive. Do not
                         # leak the next window's scenes into this checkpoint.
                         continue
-                    if scene_id in seen_scene_ids:
+                    scoped_id = (source, scene_id)
+                    if scoped_id in seen_scene_ids:
                         continue
                     all_results.append(parsed)
-                    seen_scene_ids.add(scene_id)
+                    seen_scene_ids.add(scoped_id)
                         
         # Sort chronologically by acquisition_time
-        all_results.sort(key=lambda x: x.acquisition_time)
+        all_results.sort(
+            key=lambda item: (self._utc_instant(item.acquisition_time), item.source, item.scene_id)
+        )
         return all_results
 
     def _parse_stac_item(self, item: Dict[str, Any], source: str) -> Optional[ArchiveSearchResult]:
@@ -129,10 +132,9 @@ class ArchiveQueryManager:
 
             product_level = properties.get("processing:level") or properties.get("product_level", "")
             if not product_level:
-                if source == "sentinel2":
-                    product_level = "L2A"
-                elif source == "sentinel1":
-                    product_level = "GRD"
+                # Collection identity alone cannot certify product processing level.
+                # Never invent L2A or GRD when STAC omits authoritative metadata.
+                return None
 
             tile_id = properties.get("s2:mgrs_tile")
             cloud_score = properties.get("eo:cloud_cover")
