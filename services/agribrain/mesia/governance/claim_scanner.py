@@ -52,19 +52,43 @@ def load_exemptions(exemptions_file: Optional[Path] = None) -> List[Dict[str, An
 
     try:
         data = json.loads(exemptions_file.read_text(encoding="utf-8"))
-        return data.get("exemptions", [])
+        # File-level and exact-line exemptions share a validated list.
+        return list(data.get("exemptions", [])) + list(data.get("line_exemptions", []))
     except Exception:
         return []
 
 
 def is_file_exempt(rel_path_str: str, exemptions: List[Dict[str, Any]]) -> bool:
-    """Checks if a file path is listed in exemptions."""
+    """Whole-file skips are forbidden for production farm UI components.
+
+    Only an exact path or explicit directory prefix can match: arbitrary
+    substrings in a filename must never silence scientific claims.
+    """
     norm_path = rel_path_str.replace("\\", "/")
-    if norm_path.endswith("claim_exemptions.json") or norm_path.endswith("claim_scanner.py"):
+    if norm_path.endswith(("claim_exemptions.json", "claim_scanner.py")):
         return True
+    if norm_path.startswith("src/components/farm/intelligence/"):
+        return False
     for ex in exemptions:
-        pat = ex.get("file_pattern", "").replace("\\", "/")
-        if pat and pat in norm_path:
+        if ex.get("rule") or ex.get("line_text"):
+            continue
+        pattern = str(ex.get("file_pattern") or "").replace("\\", "/")
+        if pattern and (norm_path == pattern or
+                        (pattern.endswith("/") and norm_path.startswith(pattern))):
+            return True
+    return False
+
+
+def is_line_exempt(rel_path_str: str, rule: str, line: str,
+                   exemptions: List[Dict[str, Any]]) -> bool:
+    """Strict matching of path, rule and entire reviewed line, never a substring."""
+    norm = rel_path_str.replace("\\", "/")
+    for ex in exemptions:
+        if (ex.get("file") == norm
+                and ex.get("rule") == rule
+                and ex.get("line_text") == line.strip()
+                and isinstance(ex.get("reason"), str)
+                and bool(ex["reason"].strip())):
             return True
     return False
 
@@ -113,6 +137,8 @@ def scan_repository_for_forbidden_claims(
                 for rule_name, pat in FORBIDDEN_PATTERNS:
                     match = pat.search(line)
                     if match:
+                        if is_line_exempt(rel_str, rule_name, line, exemptions):
+                            continue
                         violations.append({
                             "rule": rule_name,
                             "file": rel_str,
