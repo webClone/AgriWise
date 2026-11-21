@@ -5,7 +5,7 @@ Parses STAC items into ArchiveSearchResult dataclass.
 """
 import hashlib
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from .archive_types import ArchiveSearchResult
 from .stac_client import STACClient
@@ -14,27 +14,46 @@ class ArchiveQueryManager:
     def __init__(self, stac_client: Optional[STACClient] = None):
         self.stac_client = stac_client or STACClient()
 
-    def partition_date_range(self, start_date_str: str, end_date_str: str) -> List[tuple[str, str]]:
-        """Divides start_date to end_date into monthly intervals."""
-        start_dt = datetime.strptime(start_date_str.split("T")[0], "%Y-%m-%d")
-        end_dt = datetime.strptime(end_date_str.split("T")[0], "%Y-%m-%d")
-        
-        partitions = []
-        current_dt = start_dt
-        while current_dt <= end_dt:
-            # Next month start
-            if current_dt.month == 12:
-                next_month = datetime(current_dt.year + 1, 1, 1)
+    @staticmethod
+    def _utc_instant(value: str) -> datetime:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("archive_query_timestamp_required")
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("archive_query_invalid_timestamp") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            if len(value.strip()) == 10:
+                # Explicit date-only source input means UTC midnight.
+                parsed = parsed.replace(tzinfo=timezone.utc)
             else:
-                next_month = datetime(current_dt.year, current_dt.month + 1, 1)
-                
-            part_end = min(next_month - timedelta(days=1), end_dt)
-            # Format as ISO strings with times
-            part_start_str = current_dt.strftime("%Y-%m-%dT00:00:00Z")
-            part_end_str = part_end.strftime("%Y-%m-%dT23:59:59Z")
-            partitions.append((part_start_str, part_end_str))
-            current_dt = next_month
-            
+                raise ValueError("archive_query_requires_explicit_timezone")
+        return parsed.astimezone(timezone.utc)
+
+    @staticmethod
+    def _iso_utc(instant: datetime) -> str:
+        return instant.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def partition_date_range(self, start_date_str: str, end_date_str: str) -> List[tuple[str, str]]:
+        """Partition an exact [start,end) UTC interval at month boundaries.
+
+        Catalogs may treat the end as inclusive. The caller removes such
+        duplicates with exact UTC timestamp checks before admitting evidence.
+        """
+        start = self._utc_instant(start_date_str)
+        end = self._utc_instant(end_date_str)
+        if end <= start:
+            raise ValueError("archive_query_empty_or_reversed_interval")
+        partitions = []
+        cursor = start
+        while cursor < end:
+            if cursor.month == 12:
+                next_month = datetime(cursor.year + 1, 1, 1, tzinfo=timezone.utc)
+            else:
+                next_month = datetime(cursor.year, cursor.month + 1, 1, tzinfo=timezone.utc)
+            part_end = min(next_month, end)
+            partitions.append((self._iso_utc(cursor), self._iso_utc(part_end)))
+            cursor = part_end
         return partitions
 
     def map_source_to_collections(self, source: str) -> List[str]:
@@ -62,7 +81,7 @@ class ArchiveQueryManager:
         for source in sources:
             collections = self.map_source_to_collections(source)
             if not collections:
-                continue
+                raise ValueError(f"unsupported_archive_source:{source}")
 
             for part_start, part_end in partitions:
                 items = self.stac_client.search(
@@ -72,15 +91,28 @@ class ArchiveQueryManager:
                     collections=collections
                 )
                 
+                if not isinstance(items, list):
+                    raise RuntimeError("stac_incomplete_partition_result")
+                left = self._utc_instant(part_start)
+                right = self._utc_instant(part_end)
                 for item in items:
+                    if not isinstance(item, dict):
+                        raise RuntimeError("stac_non_mapping_scene_item")
                     scene_id = item.get("id")
-                    if not scene_id or scene_id in seen_scene_ids:
-                        continue
-                        
+                    if not scene_id:
+                        raise RuntimeError("stac_scene_id_missing")
                     parsed = self._parse_stac_item(item, source)
-                    if parsed:
-                        all_results.append(parsed)
-                        seen_scene_ids.add(scene_id)
+                    if parsed is None:
+                        raise RuntimeError("stac_scene_metadata_invalid")
+                    acquisition = self._utc_instant(parsed.acquisition_time)
+                    if not (left <= acquisition < right):
+                        # STAC interval endpoints may be inclusive. Do not
+                        # leak the next window's scenes into this checkpoint.
+                        continue
+                    if scene_id in seen_scene_ids:
+                        continue
+                    all_results.append(parsed)
+                    seen_scene_ids.add(scene_id)
                         
         # Sort chronologically by acquisition_time
         all_results.sort(key=lambda x: x.acquisition_time)
