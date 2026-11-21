@@ -123,6 +123,8 @@ def test_l3_l4_information_barrier_encapsulation():
         "theta_wp_root",
         "theta_sat_root",
         "supported_root_depth_cm",
+        "requested_root_depth_cm",
+        "root_support_coverage_fraction",
         "deep_drainage_mm",
         "mass_conserved",
         "water_closure_error_mm",
