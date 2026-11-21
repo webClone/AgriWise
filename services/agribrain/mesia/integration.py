@@ -71,6 +71,22 @@ def verify_native_capture_for_plot(packet: RadioObservationPacket, plot_id: str,
         return False
 
 
+def resolve_mesia_evidence_role(packet: RadioObservationPacket) -> Tuple[str, bool]:
+    """Unknown radio families cannot claim state-sensing evidence role."""
+    from .radio_families.registry import RadioFamily, RADIO_FAMILY_REGISTRY
+    source = str(getattr(packet, "source_profile", "") or "").split("/")[0]
+    role_str = str(getattr(packet, "evidence_role", "") or "").strip().upper()
+    try:
+        profile_enum = RadioFamily(source)
+        known = profile_enum in RADIO_FAMILY_REGISTRY
+    except (ValueError, TypeError):
+        known = False
+    if not role_str:
+        role_str = (RADIO_FAMILY_REGISTRY[profile_enum].default_evidence_role.value
+                    if known else "UNKNOWN")
+    return role_str, known and role_str.split(".")[-1] == "SENSING"
+
+
 class MesiaAgriBrainBridge:
     """Full-system integration bridge between MESIA, Layer 0, and ASMAE."""
 
@@ -228,19 +244,9 @@ class MesiaAgriBrainBridge:
         )
 
         # 6. ASMAE ObservationEvent Adapter
-        # Enforce per-packet evidence role (F01-B07)
-        role_str = str(getattr(packet, "evidence_role", "") or "").strip().upper()
-        profile_name = str(getattr(packet, "source_profile", "") or "").split("/")[0]
-        try:
-            from .radio_families.registry import RadioFamily, RADIO_FAMILY_REGISTRY
-            profile_enum = RadioFamily(profile_name)
-            known_profile = profile_enum in RADIO_FAMILY_REGISTRY
-        except (ValueError, KeyError, TypeError):
-            known_profile = False
-        if not role_str:
-            role_str = RADIO_FAMILY_REGISTRY[profile_enum].default_evidence_role.value if known_profile else "UNKNOWN"
-        role_norm = role_str.split(".")[-1]
-        is_sensing = known_profile and role_norm == "SENSING"
+        # Enforce per-packet evidence role (F01-B07), without treating an
+        # unfamiliar family or an arbitrary SENSING string as a valid sensor.
+        role_str, is_sensing = resolve_mesia_evidence_role(packet)
 
         # Phase 3: Conditionally enable state updates only if packet is SENSING and capability is QUALIFIED
         is_qualified = False
