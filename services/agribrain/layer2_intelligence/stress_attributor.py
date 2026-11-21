@@ -590,14 +590,15 @@ def _assess_nutrient_stress(
     asmae_chloro_deficit = None
     if asmae_chloro is not None:
         from services.agribrain.scientific_contracts.asmae_physical_semantics import (
-            calibrated_chlorophyll_deficit,
+            authorized_chlorophyll_deficit,
         )
         meta = context if isinstance(context, dict) else getattr(context, "__dict__", {})
         try:
-            asmae_chloro_deficit = calibrated_chlorophyll_deficit(
+            asmae_chloro_deficit = authorized_chlorophyll_deficit(
                 asmae_chloro,
                 crop_type=str(meta.get("crop_type") or ""),
                 calibration=meta.get("asmae_chlorophyll_calibration"),
+                trusted_calibration_verifier=meta.get("_trusted_crop_calibration_verifier"),
             )
         except ValueError:
             asmae_chloro_deficit = None
