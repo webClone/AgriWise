@@ -28,15 +28,16 @@ from layer4_nutrients.schema import (
 
 def _qualified_chlorophyll_deficit(evidence: Dict[str, Any]) -> Optional[float]:
     """Unit-tagged chlorophyll with crop-qualified calibration only."""
-    from services.agribrain.scientific_contracts.asmae_physical_semantics import calibrated_chlorophyll_deficit
+    from services.agribrain.scientific_contracts.asmae_physical_semantics import authorized_chlorophyll_deficit
     feature = evidence.get("asmae_chlorophyll")
     if feature is None:
         return None
     try:
-        return calibrated_chlorophyll_deficit(
+        return authorized_chlorophyll_deficit(
             feature,
             crop_type=str(evidence.get("asmae_crop_type") or ""),
             calibration=evidence.get("asmae_chlorophyll_calibration"),
+            trusted_calibration_verifier=evidence.get("_trusted_crop_calibration_verifier"),
         )
     except ValueError:
         return None  # reject untagged/invalid physical evidence
