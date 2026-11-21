@@ -109,15 +109,25 @@ class STACClient:
             results.extend(page["features"])
 
             links = page.get("links") or []
-            if not isinstance(links, list):
+            if not isinstance(links, list) or any(not isinstance(link, dict) for link in links):
                 raise RuntimeError("stac_invalid_links")
-            next_links = [
-                link for link in links
-                if isinstance(link, dict) and link.get("rel") == "next"
-            ]
+            next_links = [link for link in links if link.get("rel") == "next"]
             if len(next_links) > 1:
                 raise RuntimeError("stac_ambiguous_next_page")
             if not next_links:
+                context = page.get("context") or {}
+                if not isinstance(context, dict):
+                    raise RuntimeError("stac_invalid_search_context")
+                matched = page.get("numberMatched", context.get("matched"))
+                if matched is not None:
+                    if type(matched) is not int or matched < 0:
+                        raise RuntimeError("stac_invalid_matched_count")
+                    if len(results) < matched:
+                        raise RuntimeError("stac_missing_continuation_link")
+                elif len(page["features"]) >= limit:
+                    # Without a next link or matched count, a full page could
+                    # be truncated by the provider. Never certify completion.
+                    raise RuntimeError("stac_full_page_without_completion_proof")
                 return results
             next_link = next_links[0]
             href = next_link.get("href")
