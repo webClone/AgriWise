@@ -2129,9 +2129,11 @@ def run_orchestrator(
                         "input": _freeze_reintegration_input(inputs),
                         "intent": "UNKNOWN",
                     },
+                    # Quick visual never grants authority; the ASMAE runner
+                    # must still intersect this with the rollout registry.
                     "execution_permissions": {
-                        "production_authority_allowed": True,
-                        "training_export_allowed": True,
+                        "production_authority_allowed": False,
+                        "training_export_allowed": False,
                     },
                 }
                 
