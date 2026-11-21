@@ -252,28 +252,30 @@ class ArchiveFetcher:
         # Filter out already existing scenes
         new_candidates = [c for c in candidates if c.scene_id not in existing_ids]
 
-        # 3. Plan download and check quotas
-        success, reason, allowed_scenes = self.download_planner.plan_download(
-            plot_id=plot_id,
-            candidates=new_candidates,
-            existing_records=existing_records
-        )
-        if not success:
-            # An incomplete provider query is NOT an empty historical interval.
-            # Never allow bootstrap to checkpoint it as a completed archive window.
-            raise RuntimeError(f"archive_download_plan_incomplete:{reason}")
-
-        # The planner can return success=True after silently dropping scenes
-        # to comply with its per-plot and per-job quotas. That is a valid
-        # *partial job*, NOT complete historical coverage for this interval.
-        discovered_ids = [(s.source, s.scene_id) for s in new_candidates]
-        planned_ids = [(s.source, s.scene_id) for s in allowed_scenes]
-        if (len(planned_ids) != len(discovered_ids)
-                or set(planned_ids) != set(discovered_ids)):
-            raise RuntimeError(
-                f"archive_download_plan_partial:discovered={len(discovered_ids)}"
-                f":planned={len(planned_ids)}"
+        # 3. Inventory and asset acquisition have DIFFERENT quotas.
+        # A manifest-only scan must enumerate every available catalog item;
+        # 500-scene or per-job raster download caps must not truncate the
+        # historical inventory. Actual asset downloads remain fully quota-bound.
+        if manifest_only:
+            allowed_scenes = list(new_candidates)
+        else:
+            success, reason, allowed_scenes = self.download_planner.plan_download(
+                plot_id=plot_id,
+                candidates=new_candidates,
+                existing_records=existing_records,
             )
+            if not success:
+                raise RuntimeError(f"archive_download_plan_incomplete:{reason}")
+            discovered_ids = [(candidate.source, candidate.scene_id)
+                              for candidate in new_candidates]
+            planned_ids = [(candidate.source, candidate.scene_id)
+                           for candidate in allowed_scenes]
+            if (len(discovered_ids) != len(planned_ids)
+                    or set(discovered_ids) != set(planned_ids)):
+                raise RuntimeError(
+                    f"archive_download_plan_partial:discovered={len(discovered_ids)}"
+                    f":planned={len(planned_ids)}"
+                )
 
         # 4. Ingest and create HistoricalSceneRecord for each allowed scene
         processed_records = list(existing_records)
