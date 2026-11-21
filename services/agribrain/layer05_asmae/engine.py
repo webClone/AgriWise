@@ -3232,8 +3232,11 @@ class ASMAEEngine:
         )
         scientific_production_usable = bool(diagnostics.get("production_usable", False))
         permissions = dict(getattr(inp, "execution_permissions", {}) or {})
+        # Shadow / quick visual may compute diagnostics but must never
+        # acquire state, Layer1, prescription or weak-label export authority.
         production_allowed = bool(
-            permissions.get("production_authority_allowed", False)
+            permissions.get("production_authority_allowed") is True
+            and inp.mode not in ("shadow", "quick_visual")
         )
         current_spatial = bool(
             state_result_dict.get("status") == "success"
@@ -3298,7 +3301,8 @@ class ASMAEEngine:
         diagnostics["layer1_export_allowed"] = final_production_usable
         diagnostics["weak_label_export_allowed"] = bool(
             final_production_usable
-            and permissions.get("training_export_allowed", False)
+            and permissions.get("training_export_allowed") is True
+            and inp.mode not in ("shadow", "quick_visual")
         )
         if not diagnostics["weak_label_export_allowed"]:
             out_obj.weak_labels = []
