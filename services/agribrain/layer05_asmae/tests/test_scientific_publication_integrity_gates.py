@@ -649,3 +649,108 @@ def test_phase1b_held_out_ground_truth_reordering_invariance():
     assert gt_forward == gt_reversed, "Ground truth extraction must be invariant to reversed row order"
     assert gt_forward == gt_shuffled, "Ground truth extraction must be invariant to hash-shuffled row order"
 
+
+
+
+# IR-PUB-DIAG: diagnostic publication must survive immutable cold reads.
+def test_ir_pub_diagnostic_asmae_means_without_sigma_remain_admitted_on_cold_exact_and_latest():
+    """ASMAE identity does not transform diagnostic means into certified sigma."""
+    from services.agribrain.app.main import api_v2_exact_snapshot, api_v2_canonical_plot_snapshot
+
+    ns = PlotNamespace("tenant-a", "farm-a", "plot-a")
+    geom = "geometry-ir-pub-diagnostic"
+    science = _base_asmae_result()
+    science.pop("asmae_posterior_numerical_record", None)
+    science.pop("asmae_numerical_digest", None)
+    science["claims_numerical_authority"] = False
+    science["state_means"] = {"vigor": 0.55}
+    science["sigmas"] = {}  # lack of physical uncertainty is honest
+    frozen = snapshot_store.publish_latest_snapshot(
+        science, context_hash="ctx-ir-pub-diag", geometry_hash=geom,
+    )
+    science["snapshot_ref"] = frozen
+    snapshot_id = science["snapshot_id"]
+
+    frontend = _base_frontend_payload(snapshot_id)
+    frontend.pop("asmae_posterior_numerical_record", None)
+    frontend["claims_numerical_authority"] = False
+    frontend["asmae_proof"].pop("numerical_vector_hash", None)
+    frontend["scientific_evidence_lineage"].pop("asmae_posterior_vector_hash", None)
+    frontend["asmae_numerical_publication_contract"] = {
+        "version": plot_snapshot_store.ASMAE_NUMERICAL_PUBLICATION_CONTRACT,
+        "mode": "diagnostic",
+    }
+    frontend["mode_display_state"]["canopy"]["canRenderPixels"] = False
+
+    plot_snapshot_store.publish_canonical_plot_snapshot(
+        namespace=ns, geometry_hash=geom, snapshot_id=snapshot_id,
+        asmae_result=science, frontend_payload=frontend,
+        job_id="job-ir-pub-diagnostic", manifest_hash="manifest-ir-pub-diagnostic",
+    )
+    with plot_snapshot_store._SNAPSHOT_CACHE_LOCK:
+        plot_snapshot_store._CANONICAL_SNAPSHOT_CACHE.clear()
+
+    latest = plot_snapshot_store.load_latest_plot_snapshot(ns, geom, force_verify=True)
+    assert latest is not None
+    assert latest["validation"]["numericalBindingValid"] is None
+    assert latest["validation"]["nodeAgreementValid"] is True
+    assert plot_snapshot_store.evaluate_snapshot_admission(latest, ns)["is_valid"] is True
+
+    exact = plot_snapshot_store.load_and_validate_plot_snapshot_by_id(snapshot_id, namespace=ns)
+    assert exact is not None
+    assert plot_snapshot_store.evaluate_snapshot_admission(exact, ns)["is_valid"] is True
+
+    exact_api = api_v2_exact_snapshot(snapshot_id, namespace=ns)
+    latest_api = api_v2_canonical_plot_snapshot(ns.plot_id, namespace=ns)
+    assert json.loads(exact_api.body)["available"] is True
+    assert json.loads(latest_api.body)["available"] is True
+    assert json.loads(exact_api.body)["contract_validation"]["numerical_authority_verified"] is False
+
+
+def test_ir_pub_diagnostic_contract_cannot_launder_a_numerical_claim():
+    """A 'diagnostic' label does not waive cryptographic numerical validation."""
+    snapshot = {
+        "snapshot_kind": "asmae",
+        "snapshot_id": "ASMAE-SNAPSHOT-FAKE-CERT",
+        "frontend_payload": {
+            "claims_numerical_authority": True,
+            "asmae_numerical_publication_contract": {
+                "version": plot_snapshot_store.ASMAE_NUMERICAL_PUBLICATION_CONTRACT,
+                "mode": "diagnostic",
+            },
+        },
+        "validation": {
+            "nodeValid": True, "publicationValid": True, "receiptValid": True,
+            "inventoryValid": True, "bindingValid": True, "lineageValid": True,
+            "temporalBindingValid": True, "schemaValid": True, "contractValid": True,
+            "publicationStatusValid": True, "numericalBindingValid": None,
+            "nodeAgreementValid": True,
+        },
+    }
+    assert plot_snapshot_store.requires_verified_numerical_binding(snapshot)
+    assert not plot_snapshot_store.validate_numerical_publication_mode(snapshot)
+    admission = plot_snapshot_store.evaluate_snapshot_admission(snapshot)
+    assert admission["is_valid"] is False
+    assert admission["quarantined"] is True
+
+    snapshot["frontend_payload"]["asmae_numerical_publication_contract"]["mode"] = "verified_numerical"
+    admission = plot_snapshot_store.evaluate_snapshot_admission(snapshot)
+    assert admission["is_valid"] is False
+    assert "numericalBindingValid" in admission["invalid_integrity_flags"]
+
+
+def test_ir_pub_diagnostic_snapshot_prefix_is_not_a_claim():
+    snapshot = {
+        "snapshot_kind": "asmae",
+        "snapshot_id": "ASMAE-SNAPSHOT-MEANS-ONLY",
+        "asmae": {"state_means": {"vigor": 0.4}, "sigmas": {}},
+        "frontend_payload": {
+            "claims_numerical_authority": False,
+            "asmae_numerical_publication_contract": {
+                "version": plot_snapshot_store.ASMAE_NUMERICAL_PUBLICATION_CONTRACT,
+                "mode": "diagnostic",
+            },
+        },
+    }
+    assert not plot_snapshot_store.requires_verified_numerical_binding(snapshot)
+    assert plot_snapshot_store.validate_numerical_publication_mode(snapshot)
