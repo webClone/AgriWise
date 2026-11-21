@@ -161,11 +161,24 @@ class ASMAERunner:
         """Execute ASMAE pipeline with caching, budgets, and observability."""
         # Rollout permission is resolved before reading, adapting, generating,
         # or persisting any real/proxy scene products.
+        # Registry authority is a ceiling: caller context can only remove
+        # permissions, never grant them. In particular shadow and quick_visual
+        # cannot acquire production, training or state-mutation privileges.
         permissions = self.execution_permissions(plot_id)
-        if isinstance(context.get("_asmae_execution_permissions"), dict):
-            permissions.update(context["_asmae_execution_permissions"])
-        elif isinstance(context.get("execution_permissions"), dict):
-            permissions.update(context["execution_permissions"])
+        requested = context.get("_asmae_execution_permissions")
+        if not isinstance(requested, dict):
+            requested = context.get("execution_permissions")
+        if isinstance(requested, dict):
+            for flag in (
+                "compute_allowed", "diagnostic_allowed", "advisory_allowed",
+                "plot_state_publication_allowed", "production_authority_allowed",
+                "visual_authority_allowed", "training_export_allowed",
+            ):
+                if flag in requested:
+                    permissions[flag] = (permissions.get(flag) is True and requested[flag] is True)
+        if mode in ("shadow", "quick_visual"):
+            permissions["production_authority_allowed"] = False
+            permissions["training_export_allowed"] = False
         context["_asmae_execution_permissions"] = permissions
         if not permissions["compute_allowed"]:
             logger.info("ASMAE disabled for plot %s by rollout policy", plot_id)
