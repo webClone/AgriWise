@@ -201,7 +201,7 @@ def test_asmae_proposals_advisory_only():
     proposals = res.get("asmae_p08_proposals", [])
     assert len(proposals) > 0
     for p in proposals:
-        assert p["authority_scope"] in ("RESEARCH_ONLY", "unqualified_research_proposal")
+        assert p["authority_scope"] == "evidence_proposal"
         assert p["decision_eligible"] is False
         assert p["truth_envelope"]["authority_state"] == "RESEARCH_ONLY"
         assert p["truth_envelope"]["decision_eligible"] is False

@@ -2465,12 +2465,12 @@ class MesiaProductionService:
                 "innovation_value": round(vwc_subsurface - prior_ref, 4),
                 "variance": 0.0008 if has_real_gnss else 0.0018,
                 "confidence_support": 0.94 if has_real_gnss else round(1.0 / (1.0 + 0.0018 / 0.015), 3),
-                "authority_scope": "unqualified_research_proposal",
+                "authority_scope": "evidence_proposal",
                 "authority_state": "RESEARCH_ONLY",
                 "presentation_state": "LIVE" if has_real_gnss else "SIMULATION",
                 "decision_eligible": False,
-                "evidence_class": "MEASURED_NATIVE" if has_real_gnss else "SIMULATED",
-                "truth_classification": "MEASURED_NATIVE" if has_real_gnss else "SIMULATED",
+                "evidence_class": "DERIVED_MODEL_INFERRED" if has_real_gnss else "SIMULATED",
+                "truth_classification": "DERIVED_MODEL_INFERRED" if has_real_gnss else "SIMULATED",
                 "truth_tier": "BIOLOGICAL_INFERENCE" if has_real_gnss else "ASMAE_INNOVATION_PROPOSAL",
                 "truth_class": "DERIVED_MODEL_INFERRED" if has_real_gnss else "SIMULATED",
                 "native_observation_truth_class": "MEASURED_NATIVE" if has_real_gnss else "SIMULATED",
@@ -2491,7 +2491,7 @@ class MesiaProductionService:
                 "innovation_value": round(mean_cwi - baseline_cwi, 4) if real_masts else 0.0,
                 "variance": round(max(0.001, (0.025 * mean_cell_loss / 10.0) ** 2), 6) if real_masts else 0.05,
                 "confidence_support": 0.82 if real_masts else 0.0,
-                "authority_scope": "unqualified_research_proposal",
+                "authority_scope": "evidence_proposal",
                 "authority_state": "RESEARCH_ONLY",
                 "presentation_state": "SIMULATION" if real_masts else "UNOBSERVED",
                 "decision_eligible": False,
@@ -2512,7 +2512,7 @@ class MesiaProductionService:
                 "innovation_value": round(uhf_vwc - prior_ref, 4),
                 "variance": round(uhf_var, 6),
                 "confidence_support": round(1.0 / (1.0 + uhf_var / 0.015), 3),
-                "authority_scope": "unqualified_research_proposal",
+                "authority_scope": "evidence_proposal",
                 "authority_state": "RESEARCH_ONLY",
                 "presentation_state": "SIMULATION",
                 "decision_eligible": False,
@@ -2532,7 +2532,7 @@ class MesiaProductionService:
                 "innovation_value": round(cygnss_vwc - prior_ref, 4),
                 "variance": round(cygnss_var, 6),
                 "confidence_support": round(1.0 / (1.0 + cygnss_var / 0.015), 3),
-                "authority_scope": "unqualified_research_proposal",
+                "authority_scope": "evidence_proposal",
                 "authority_state": "RESEARCH_ONLY",
                 "presentation_state": "SIMULATION",
                 "decision_eligible": False,
@@ -2579,12 +2579,12 @@ class MesiaProductionService:
                 "innovation_value": round(wifi_cwi - baseline_cwi, 4),
                 "variance": 0.0005,
                 "confidence_support": 0.95,
-                "authority_scope": "unqualified_research_proposal",
+                "authority_scope": "evidence_proposal",
                 "authority_state": "RESEARCH_ONLY",
                 "presentation_state": "LIVE",
                 "decision_eligible": False,
-                "evidence_class": "MEASURED_NATIVE",
-                "truth_classification": "MEASURED_NATIVE",
+                "evidence_class": "DERIVED_MODEL_INFERRED",
+                "truth_classification": "DERIVED_MODEL_INFERRED",
                 "truth_tier": "BIOLOGICAL_INFERENCE",
                 "truth_class": "DERIVED_MODEL_INFERRED",
                 "native_observation_truth_class": "MEASURED_NATIVE",
@@ -2646,6 +2646,9 @@ class MesiaProductionService:
             p["admission_status"] = l0_rec.status.value
             p["admission_notes"] = l0_rec.admission_notes
             p["is_usable_for_assimilation"] = l0_rec.is_usable_for_assimilation
+            # A hash or a plausible file:// URI is not a native capture.
+            from services.agribrain.mesia.integration import verify_native_capture_for_plot
+            p["native_capture_present"] = verify_native_capture_for_plot(packet, plot_id)
             p["asmae_observation_event"] = asmae_event.to_dict() if asmae_event and hasattr(asmae_event, "to_dict") else None
 
             # Route observation event via ASMAEObservationDispatcher (WP07 / Finding #14)
@@ -2710,11 +2713,15 @@ class MesiaProductionService:
                 value=p["innovation_value"],
                 unit="innovation_delta",
                 source_class=SourceClass.PHYSICAL_RECEIVER if is_p_live else SourceClass.SIMULATOR,
-                processing_level=ProcessingLevel.FEATURE,
+                processing_level=ProcessingLevel.DERIVED,
                 identity_state=IdentityState.PROTOCOL_CONFIRMED if is_p_live else IdentityState.UNKNOWN,
                 authority_state=AuthorityState.RESEARCH_ONLY,
                 presentation_state=PresentationState.LIVE if is_p_live else PresentationState.SIMULATION,
                 native_artifact_ref=packet.native_data_uri if is_p_live else None,
+                # The Tier-2 biological inference depends on the actual Layer0
+                # evaluation receipt (including rejection), not an invented
+                # physically measured biological truth.
+                parent_envelope_refs=(l0_rec.record_id,),
                 source_receipt_ref=f"rcpt-packet-{packet.packet_id}" if is_p_live else None,
                 calibration_state_ref="CALIB-UNVERIFIED-DEMONSTRATOR" if is_p_live else None,
                 software_epoch_ref="mesia-r6.1",

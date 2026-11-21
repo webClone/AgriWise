@@ -91,12 +91,13 @@ class BehaviourLikelihoodEngine:
             "software_model_epoch_id": packet.software_model_epoch_id,
         }
 
-        # Audit Finding #7: target_variable must come from the behaviour contract,
-        # not be unconditionally assigned. If the contract does not define a
-        # physical_primitive or target, the evidence must not be emitted.
-        target_var = (contract.physical_primitive if contract else "")
-        if not target_var:
-            target_var = "UNSPECIFIED_PENDING_CONTRACT"
+        # P2-12: SNR residual is in dB, with covariance in dB squared.
+        # A radio contract's physical_primitive is NOT an ASMAE state name.
+        # Until a qualified physical inversion converts to the agricultural
+        # state and its variance, *no* ASMAE-state innovation exists.
+        radio_residual_db = innovation
+        radio_variance_db2 = cov if radio_residual_db is not None else None
+        target_var = "UNSPECIFIED_PENDING_CALIBRATED_OPERATOR"
 
         return BehaviourLikelihood(
             likelihood_id=f"lik-{packet.packet_id}",
@@ -104,9 +105,13 @@ class BehaviourLikelihoodEngine:
             contract_ref=contract_ref,
             target_variable=target_var,
             likelihood_value=likelihood_val,
-            innovation=innovation,
-            support=support,
-            covariance=cov,
+            innovation=None,  # No conversion from dB into m³/m³ has been qualified
+            support=0.0,
+            covariance=None,  # dB² must never masquerade as VWC²
+            observed_radio_primitive=contract.physical_primitive if contract else "",
+            radio_residual_db=radio_residual_db,
+            radio_residual_variance_db2=radio_variance_db2,
+            target_unit="UNQUALIFIED",
             authority_scope="evidence_proposal",  # Invariant: Principle P-08
             alternative_causes=alternatives,
             epoch_refs=epochs,
