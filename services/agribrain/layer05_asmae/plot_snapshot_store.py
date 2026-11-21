@@ -706,6 +706,65 @@ def publish_canonical_plot_snapshot(
     return head
 
 
+
+ASMAE_NUMERICAL_PUBLICATION_CONTRACT = "asmae_numerical_publication_v1"
+
+
+def requires_verified_numerical_binding(snapshot: Optional[Dict[str, Any]]) -> bool:
+    """Classify signed snapshot *claims*, never infer science from ASMAE identity.
+
+    ASMAE-SNAPSHOT-* is a routing identity; it is not a certificate. A diagnostic
+    ASMAE snapshot can carry observational means without qualified sigma. Any
+    numerical record, proof/vector digest, or explicit positive claim must still
+    go through mandatory numerical and node-agreement verification.
+    """
+    if not isinstance(snapshot, dict):
+        return False
+    frontend = snapshot.get("frontend_payload") or {}
+    if not isinstance(frontend, dict):
+        return True  # malformed payload is rejected by the independent reader
+    sci = snapshot.get("asmae") or snapshot.get("scientific_result") or {}
+    lineage = frontend.get("scientific_evidence_lineage") or {}
+    proof = frontend.get("asmae_proof") or {}
+    contract = frontend.get("asmae_numerical_publication_contract") or {}
+    return bool(
+        frontend.get("claims_numerical_authority") is True
+        or frontend.get("numerical_authority_claimed") is True
+        or snapshot.get("claims_numerical_authority") is True
+        or (snapshot.get("contract_validation") or {}).get("numerical_authority_verified") is True
+        or frontend.get("asmae_posterior_numerical_record") is not None
+        or frontend.get("asmae_numerical_digest")
+        or (isinstance(lineage, dict) and lineage.get("asmae_posterior_vector_hash"))
+        or (isinstance(proof, dict) and proof.get("numerical_vector_hash"))
+        or (isinstance(sci, dict) and (sci.get("asmae_numerical_digest")
+            or sci.get("asmae_posterior_numerical_record")))
+        or (isinstance(contract, dict) and contract.get("mode") == "verified_numerical")
+    )
+
+
+def validate_numerical_publication_mode(snapshot: Optional[Dict[str, Any]]) -> bool:
+    """A hash-bound diagnostic contract must not conceal numerical evidence."""
+    if not isinstance(snapshot, dict):
+        return False
+    frontend = snapshot.get("frontend_payload") or {}
+    if not isinstance(frontend, dict):
+        return False
+    contract = frontend.get("asmae_numerical_publication_contract")
+    if contract is None:
+        # Read compatibility: previously published immutable snapshots cannot
+        # be rewritten to retroactively introduce the contract.
+        return True
+    if not isinstance(contract, dict):
+        return False
+    if contract.get("version") != ASMAE_NUMERICAL_PUBLICATION_CONTRACT:
+        return False
+    mode = contract.get("mode")
+    if mode not in ("diagnostic", "verified_numerical"):
+        return False
+    expected = "verified_numerical" if requires_verified_numerical_binding(snapshot) else "diagnostic"
+    return mode == expected
+
+
 def evaluate_snapshot_admission(
     snapshot: Optional[Dict[str, Any]],
     namespace: Optional[PlotNamespace] = None,
@@ -746,13 +805,19 @@ def evaluate_snapshot_admission(
 
     invalid_integrity = [k for k in integrity_keys if validation.get(k) is not True]
 
-    claims_num = bool(
-        snapshot.get("snapshot_kind") == "asmae"
-        or str(snapshot.get("snapshot_id") or "").startswith("ASMAE-SNAPSHOT-")
-        or (snapshot.get("contract_validation") or {}).get("numerical_authority_verified") is True
-        or (snapshot.get("frontend_payload") or {}).get("claims_numerical_authority") is True
-        or (snapshot.get("scientific_result") or {}).get("asmae_numerical_digest")
-    )
+    # Diagnostic ASMAE identity is not a numerical-authority claim.
+    if not validate_numerical_publication_mode(snapshot):
+        return {
+            "is_valid": False,
+            "status": "quarantined",
+            "reason": "numerical_publication_contract_invalid",
+            "invalid_integrity_flags": ["numericalPublicationContractValid"],
+            "invalid_contract_flags": [],
+            "quarantined": True,
+            "refresh_required": True,
+        }
+
+    claims_num = requires_verified_numerical_binding(snapshot)
     if claims_num:
         if validation.get("numericalBindingValid") is not True:
             invalid_integrity.append("numericalBindingValid")
