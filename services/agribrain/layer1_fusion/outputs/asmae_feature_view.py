@@ -28,9 +28,9 @@ class ASMAEFeature:
     retro_status: Optional[str] = None
     bma_status: Optional[str] = None
     source_basis: str = "asmae"
-    unit: Optional[str] = None  # explicit source metadata only; never inferred
     bma_disagreement: float = 0.0
     cross_layer_conflict: float = 0.0
+    unit: Optional[str] = None  # explicit source metadata only; never inferred
 
 
 @dataclass
