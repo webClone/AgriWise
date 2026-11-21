@@ -99,6 +99,11 @@ try {
     "services/agribrain/tests/test_w01_w02_water_conservation_and_l4_boundary.py",
     "-q"
   )
+  # Include all 65 cross-layer service test files, not only their targeted W1B/W2A tests.
+  Run-Gate "AgriBrain service and rollout suite" "python" @(
+    "-m", "pytest", "services/agribrain/tests/",
+    "services/agribrain/rollout/tests/", "-q"
+  )
   Run-Gate "W1B and P2 frontend authority contracts" "node" @(
     "--test",
     "tests/frontend/asmae-w1b-route-and-map-authority.test.mjs",
