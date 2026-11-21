@@ -277,6 +277,17 @@ class DecisionIntelligenceEngine:
                 r.confidence = ceiling
 
         # Phase 3 Guard: ASMAE decision guarding
+        from services.agribrain.scientific_contracts.state_schema_ref import (
+            STATE_ORDER, canonical_state_key,
+        )
+        def _is_asmae_evidence_token(token):
+            raw = str(token or "").strip().lower()
+            if not raw:
+                return False
+            if raw.startswith(("asmae_", "asmae_artifact:", "asmae:")):
+                return True
+            return any(raw == k or raw.endswith(":" + k) for k in STATE_ORDER)
+
         from layer1_fusion.outputs.asmae_feature_view import (
             get_asmae_diagnostic_feature,
             evaluate_asmae_state_usability,
@@ -303,12 +314,14 @@ class DecisionIntelligenceEngine:
             if linked_stresses:
                 for s_data in linked_stresses:
                     p_driver = s_data.get("primary_driver", "")
-                    is_driver_asmae = any(x in p_driver for x in ("asmae", "biotic_confounder", "biotic_scout", "biotic_pattern"))
+                    is_driver_asmae = any(x in str(p_driver).lower() for x in ("asmae", "biotic_confounder", "biotic_scout", "biotic_pattern"))
                     ev_list = s_data.get("contributing_evidence_ids") or s_data.get("evidence_ids") or []
-                    if is_driver_asmae or (ev_list and all("ASMAE" in str(eid) for eid in ev_list)):
+                    if is_driver_asmae or (ev_list and all(_is_asmae_evidence_token(eid) for eid in ev_list)):
                         is_asmae_only_rec = True
             
-            is_asmae_driven = is_asmae_only_rec or is_driver_asmae or any("ASMAE" in str(d_id) for d_id in r.linked_diagnosis_ids) or "ASMAE" in getattr(r, "explain", "")
+            is_asmae_driven = (is_asmae_only_rec or is_driver_asmae
+                or any(_is_asmae_evidence_token(d_id) for d_id in r.linked_diagnosis_ids)
+                or "asmae" in str(getattr(r, "explain", "")).lower())
             
             if is_asmae_driven:
                 if has_quarantined_or_1m_asmae:
