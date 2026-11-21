@@ -157,14 +157,16 @@ class TestFullPipelineMultiRadioExecution:
         assert len(proposals) == 5
 
         gnss_prop = next(p for p in proposals if p["feature"] == "mesia_gnssr_in_situ_vwc")
-        assert gnss_prop["truth_classification"] == "MEASURED_NATIVE"
+        assert gnss_prop["truth_classification"] == "DERIVED_MODEL_INFERRED"
+        assert gnss_prop["native_observation_truth_class"] == "MEASURED_NATIVE"
         assert gnss_prop["presentation_state"] == "LIVE"
         assert gnss_prop["physical_waves_measured"] is True
         assert gnss_prop["decision_eligible"] is False
         assert gnss_prop["authority_state"] == "RESEARCH_ONLY"
 
         wifi_prop = next(p for p in proposals if p["feature"] == "mesia_wifi_csi_canopy_foliar")
-        assert wifi_prop["truth_classification"] == "MEASURED_NATIVE"
+        assert wifi_prop["truth_classification"] == "DERIVED_MODEL_INFERRED"
+        assert wifi_prop["native_observation_truth_class"] == "MEASURED_NATIVE"
         assert wifi_prop["presentation_state"] == "LIVE"
         assert wifi_prop["physical_waves_measured"] is True
         assert wifi_prop["target_classification"] == "BACKGROUND"
