@@ -41,3 +41,13 @@
 
 ## Gate
 Run exact-HEAD targeted tests, route API unit tests and full rollout/Layer05/backend/frontend regressions. Require a real cold run-result request under two test tenants plus replay of the completed ledger after builder failure. Report passed counts and exact SHA. No PR #32 fast-forward, no 1m or irrigation enablement.
+
+## Completion addendum — 2026-11-21 13:49
+**New executable Node red tests:** `tests/frontend/asmae-w1b-route-and-map-authority.test.mjs` (5 tests). Executes the existing run-result route GET through TypeScript transpilation with independently injected session, plot authorization, and network spies; expects zero upstream requests for unsigned/foreign runs. Exercises the exact map action-cap body and requires raster-only/diagnostic evidence not to grant `prescription_allowed`. These are bounded source-body tests; a live Next.js request/tenant database gate is still required.
+
+**Run expected-RED gates:**
+```powershell
+node --test tests/frontend/asmae-w1b-route-and-map-authority.test.mjs
+python -m pytest services/agribrain/rollout/tests/test_asmae_w1b_learning_eligibility_contract.py -q
+```
+Do not interpret expected red tests as a failed candidate implementation: these are specification-only test branches. 
