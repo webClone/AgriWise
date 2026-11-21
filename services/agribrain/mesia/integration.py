@@ -35,7 +35,8 @@ def verify_native_capture_for_plot(packet: RadioObservationPacket, plot_id: str,
     """
     import hashlib
     from pathlib import Path
-    from urllib.parse import urlsplit, unquote
+    from urllib.parse import urlsplit
+    from urllib.request import url2pathname
     from .ingestion.sigmf_ingest import DEFAULT_STORAGE_ROOT, verify_capture_integrity
 
     uri = getattr(packet, "native_data_uri", "") or ""
@@ -49,7 +50,9 @@ def verify_native_capture_for_plot(packet: RadioObservationPacket, plot_id: str,
         if (parsed.scheme != "file" or parsed.netloc
                 or parsed.query or parsed.fragment):
             return False
-        candidate = Path(unquote(parsed.path))
+        # file:///C:/... must become an OS-native absolute path on Windows.
+        # url2pathname also decodes URI escapes; avoid double unquoting.
+        candidate = Path(url2pathname(parsed.path))
         if not candidate.is_absolute():
             return False
         root = Path(storage_root or DEFAULT_STORAGE_ROOT).resolve(strict=True)
