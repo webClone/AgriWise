@@ -617,8 +617,9 @@ class TestScenarioEAgriBrainLayer0Bridge:
             is_calibration_valid=True,
             is_epoch_active=True,
         )
-        assert l0_adm.status == EvidenceAdmissionStatus.ADMITTED
-        assert l0_adm.is_usable_for_assimilation is True
+        # Fake sigmf:// paths and arbitrary SHA text cannot be physical evidence.
+        assert l0_adm.status == EvidenceAdmissionStatus.INVALIDATED
+        assert l0_adm.is_usable_for_assimilation is False
 
         # 3. Missing observation / absent innovation -> ABSENT
         packet_absent = RadioObservationPacket(
@@ -1008,7 +1009,8 @@ class TestScenarioKPhysicalInSituGnssLaneIntegration:
         # 1. GNSS-R proposal must be marked MEASURED_NATIVE and LIVE
         proposals = res["asmae_p08_proposals"]
         gnssr_prop = next(p for p in proposals if p["feature"] == "mesia_gnssr_in_situ_vwc")
-        assert gnssr_prop["evidence_class"] == "MEASURED_NATIVE"
+        assert gnssr_prop["evidence_class"] == "DERIVED_MODEL_INFERRED"
+        assert gnssr_prop["native_observation_truth_class"] == "MEASURED_NATIVE"
         assert gnssr_prop["presentation_state"] == "LIVE"
         assert gnssr_prop["physical_waves_measured"] is True
         assert gnssr_prop["variance"] == 0.0008
@@ -1193,7 +1195,8 @@ class TestScenarioMMultiLaneWifiCsiAndTargetClassification:
         # 1. Wi-Fi CSI Proposal verification
         proposals = res["asmae_p08_proposals"]
         wifi_prop = next(p for p in proposals if p["feature"] == "mesia_wifi_csi_canopy_foliar")
-        assert wifi_prop["evidence_class"] == "MEASURED_NATIVE"
+        assert wifi_prop["evidence_class"] == "DERIVED_MODEL_INFERRED"
+        assert wifi_prop["native_observation_truth_class"] == "MEASURED_NATIVE"
         assert wifi_prop["presentation_state"] == "LIVE"
         assert wifi_prop["physical_waves_measured"] is True
         assert wifi_prop["target_classification"] == "BACKGROUND"
