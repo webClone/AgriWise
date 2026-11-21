@@ -353,6 +353,9 @@ class NutrientInferenceEngine:
         # ASMAE chlorophyll alone is not a nutrient-P diagnosis.
         # Await separately qualified multi-factor nutrient calibration.
 
+        # Transform accumulated P evidence logits into deficiency probability.
+        prob = _sigmoid(logit)
+
         # Confidence
         conf = 0.70  # P inference is inherently less precise without tissue test
         if soil_p_status is not None:
