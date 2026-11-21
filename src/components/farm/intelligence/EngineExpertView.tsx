@@ -4,7 +4,7 @@
  * EngineExpertView — Scientific engine pipeline analysis console.
  * Shows per-engine detailed metrics, confidence breakdown, data flow,
  * inter-engine dependencies, and zone-level relevance.
- * All data from real engine statuses + L10 quality. Zero synthetic data.
+ * All data from real engine statuses + L10 quality. Source reality and model-derived outputs are qualified separately.
  */
 
 import { type EngineStatus, SUBSYSTEM_METADATA } from "@/hooks/usePlotIntelligence";
