@@ -619,8 +619,8 @@ def ingest_asmae_raster_refs(output: Dict[str, Any], plot_id: str) -> List[Raste
         if post_conc_mean is None:
             post_conc_mean = finite_support_mean("confidence_maps", "ASMAE_CONFIDENCE")
         uncertainty_mean = finite_support_mean("uncertainty_maps", "ASMAE_UNCERTAINTY")
-        post_conc_val = float(post_conc_mean) if post_conc_mean is not None else 0.0
-        unc_val = float(uncertainty_mean) if uncertainty_mean is not None else 1.0
+        # Absent uncertainty is unknown, never sigma=1.0 by convention.
+        unc_val = float(uncertainty_mean) if uncertainty_mean is not None else None
 
         archive_used = prov.get("sentinel_archive_used") or diag.get("sentinel_archive_used") or False
         archive_count = prov.get("archive_scene_count") or diag.get("archive_scene_count") or 0
