@@ -79,11 +79,12 @@ def record_asmae_run(record: Dict[str, Any], ledger_path: Optional[Path] = None)
         }
         record["eligible_for_asmae_learn"] = False
     elif validation_status == "approved":
+        # Manual validation is feedback, not scientific learning authority.
         record["training_use"] = {
-            "eligible_for_asmae_learn": True,
-            "reason": "manually_validated_by_agronomist"
+            "eligible_for_asmae_learn": False,
+            "reason": "approved_feedback_awaits_qualified_learning_candidate",
         }
-        record["eligible_for_asmae_learn"] = True
+        record["eligible_for_asmae_learn"] = False
     else:
         record["training_use"] = {
             "eligible_for_asmae_learn": False,
@@ -177,22 +178,23 @@ def promote_ledger_run_validation(
             "uncertainty": built_cand.get("uncertainty")
         }
     except Exception:
+        # A missing scientific candidate is never an approved learning label.
         candidate_dict = {
             "candidate_id": f"cand_{run_id}",
             "candidate_type": "validated_state_candidate",
-            "eligible": validation_status == "approved",
-            "blocked_reasons": [] if validation_status == "approved" else [f"validation_{validation_status}"],
+            "eligible": False,
+            "blocked_reasons": ["learning_candidate_builder_unavailable"],
             "validation_event_ids": [],
             "disagreement_report_hash": "",
             "evidence_count": 0,
-            "validation_trust_score": 1.0 if validation_status == "approved" else 0.0,
-            "agreement_score": 1.0 if validation_status == "approved" else 0.0,
-            "bma_status": view.get("bma_status"),
-            "retro_status": view.get("retro_status"),
-            "retro_score": view.get("retro_mean_score"),
-            "uncertainty": view.get("uncertainty")
+            "validation_trust_score": 0.0,
+            "agreement_score": 0.0,
+            "bma_status": None,
+            "retro_status": None,
+            "retro_score": None,
+            "uncertainty": None,
         }
-        
+
     record = {
         "record_type": "candidate_update",
         "ledger_version": "v86_validation_ledger_v2",
@@ -200,8 +202,12 @@ def promote_ledger_run_validation(
         "plot_id": view.get("plot_id"),
         "learning_candidate_status": "approved" if validation_status == "approved" else "rejected",
         "learning_candidate_reasons": ["manually_validated_by_agronomist"] if validation_status == "approved" else [f"validation_{validation_status}"],
-        "eligible_for_asmae_learn": validation_status == "approved",
+        "eligible_for_asmae_learn": (validation_status == "approved" and candidate_dict.get("eligible") is True),
         "candidate": candidate_dict,
+        "training_use": {
+            "eligible_for_asmae_learn": (validation_status == "approved" and candidate_dict.get("eligible") is True),
+            "reason": "candidate_and_manual_approval" if (validation_status == "approved" and candidate_dict.get("eligible") is True) else "scientific_candidate_or_manual_approval_missing",
+        },
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
     
