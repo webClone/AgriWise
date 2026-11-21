@@ -42,11 +42,11 @@ def anchored_replay(tmp_path):
         authority="qualified_test_authority",
         tenant_id=TENANT, namespace=FARM,
     )
-    service.save_durable_checkpoint(
+    durable_checkpoint = service.save_durable_checkpoint(
         plot_id=PLOT, checkpoint_id="anchor-ir04-01",
         tenant_id=TENANT, namespace=FARM,
     )
-    knowledge_k = datetime.now(timezone.utc).isoformat()
+    knowledge_k = durable_checkpoint["committed_at"]
     receipt = service.hydrate_context(
         PLOT,
         {"tenant_id": TENANT, "worldline_namespace": FARM, "geometry_hash": GEOM},
@@ -134,3 +134,15 @@ def test_ir04_future_cutoff_is_not_authority(anchored_replay):
     ok, reason, _ = _check(future, service)
     assert ok is False
     assert reason == "future_replay_knowledge_cutoff"
+
+
+
+def test_ir04_cutoff_after_anchor_is_not_authoritative(anchored_replay):
+    service, receipt = anchored_replay
+    unanchored_cutoff = copy.deepcopy(receipt)
+    unanchored_cutoff["query_parameters"]["knowledge_cutoff_time"] = (
+        datetime.now(timezone.utc).isoformat()
+    )
+    ok, reason, _ = _check(unanchored_cutoff, service)
+    assert ok is False
+    assert reason == "knowledge_cutoff_not_covered_by_durable_checkpoint"
