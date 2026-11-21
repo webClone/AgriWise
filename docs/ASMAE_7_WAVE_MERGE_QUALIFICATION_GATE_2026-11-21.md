@@ -20,7 +20,7 @@ Protected original unified branch remains unchanged at b6338fd. PR #32 remains d
 
 ## Full-stack regression runner
 
-Use scripts/verify-asmae-seven-wave.ps1. It checks exact branch and expected SHA, runs 11 separately logged gates, stops on first failure, and produces seven_wave_receipt.json under a timestamped temporary folder (or a caller-provided folder). It does not upload results to GitHub, submit scientific claims or enable physical controls.
+Use scripts/verify-asmae-seven-wave.ps1. It checks exact branch and expected SHA, runs 12 separately logged gates, stops on first failure, and produces seven_wave_receipt.json under a timestamped temporary folder (or a caller-provided folder). It does not upload results to GitHub, submit scientific claims or enable physical controls.
 
 From PowerShell on the Windows checkout:
 
@@ -30,7 +30,7 @@ From PowerShell on the Windows checkout:
     $expected = (git rev-parse origin/feat/akaloris-asmae-unified-seven-wave-candidate-20261121).Trim()
     .\scripts\verify-asmae-seven-wave.ps1 -ExpectedHead $expected
 
-The runner covers: sgp4 import, full MESIA scanner, entire MESIA suite, all Layer0 tests, all Layer05 tests, full intermediate layer-scoped suites (including Layer3 Water), W1-B/W2-A service contract files, targeted frontend W1-B/P2-15/16 authority tests, Prisma client generation, all frontend TAP files, and strict TypeScript compilation.
+The runner covers: sgp4 import, full MESIA scanner, entire MESIA suite, all Layer0 tests, all Layer05 tests, full intermediate layer-scoped suites (including Layer3 Water), W1-B/W2-A service contract files, all 65 AgriBrain cross-layer test files plus rollout tests, targeted frontend W1-B/P2-15/16 authority tests, Prisma client generation, all frontend TAP files, and strict TypeScript compilation.
 
 **Acceptance:** Every command exits zero at the same exact candidate SHA, with all full output logs retained and independently reviewed. Check registration and two-tenant cold run-result behavior separately; the missing Python GET /v2/runs/{run_id}/result endpoint is NOT fixed by this merge.
 
