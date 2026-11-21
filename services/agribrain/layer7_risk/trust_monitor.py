@@ -80,14 +80,15 @@ class TrustMonitor:
                 "agreement": True
             }
 
-        # 1. Water Contradiction Check
-        # ASMAE Canopy Water (stress) vs Measured Soil Moisture
+        # Canopy water is content, not a stress probability. High soil water
+        # and high canopy water are not evidence of contradiction.
         water_feat = asmae_features.get("ASMAE_CANOPY_WATER")
-        soil_moisture = non_asmae_data.get("soil_moisture_vwc")
-        if water_feat and soil_moisture is not None:
-            if soil_moisture > 0.30 and getattr(water_feat, "value", 0.0) > 0.7:
-                conflict_score += 0.4
-                reasons.append("water_conflict_high_moisture_with_high_canopy_stress")
+        if water_feat is not None:
+            from services.agribrain.scientific_contracts.asmae_physical_semantics import validate_canopy_water_content
+            try:
+                validate_canopy_water_content(water_feat)
+            except ValueError:
+                reasons.append("canopy_water_semantic_unit_unqualified")
 
         # 2. Salinity Contradiction Check
         # ASMAE Salinity Stress vs Measured EC
@@ -107,14 +108,16 @@ class TrustMonitor:
                 conflict_score += 0.3
                 reasons.append("biotic_conflict_high_risk_explained_by_mechanical_damage")
 
-        # 4. Nutrient Contradiction Check
-        # ASMAE Chlorophyll vs Soil Lab Nitrogen
+        # Leaf chlorophyll content cannot be compared to soil N ppm as if
+        # they were the same physical variable. A crop-calibrated response
+        # operator and uncertainty-aware model are needed for contradiction.
         chloro_feat = asmae_features.get("ASMAE_CHLOROPHYLL")
-        soil_n = non_asmae_data.get("nitrogen_ppm")
-        if chloro_feat and soil_n is not None:
-            if getattr(chloro_feat, "value", 0.0) < 0.3 and soil_n > 50.0:
-                conflict_score += 0.3
-                reasons.append("nutrient_conflict_low_chlorophyll_with_high_soil_n")
+        if chloro_feat is not None:
+            from services.agribrain.scientific_contracts.asmae_physical_semantics import require_tagged_state_quantity
+            try:
+                require_tagged_state_quantity(chloro_feat, "chlorophyll")
+            except ValueError:
+                reasons.append("chlorophyll_semantic_unit_unqualified")
 
         # BMA disagreement check
         for feat in asmae_features.values():
