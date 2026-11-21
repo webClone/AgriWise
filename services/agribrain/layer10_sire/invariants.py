@@ -292,9 +292,6 @@ def enforce_layer10_invariants(output: Layer10Output, grid_h: int, grid_w: int) 
     
     for s in output.surface_pack:
         is_asmae = s.semantic_type.value.startswith("ASMAE_")
-        if not is_asmae:
-            continue
-            
         is_composite = s.semantic_type.value.startswith("COMPOSITE_")
         if is_composite:
             prov = s.provenance or {}
@@ -319,6 +316,9 @@ def enforce_layer10_invariants(output: Layer10Output, grid_h: int, grid_w: int) 
                 violations.append(f"INV-COMPOSITE: Surface {s.surface_id} height {len(s.values)} != grid {grid_h}")
             elif any(len(row) != grid_w for row in s.values):
                 violations.append(f"INV-COMPOSITE: Surface {s.surface_id} has rows with wrong width (expected {grid_w})")
+            continue
+
+        if not is_asmae:
             continue
 
         prov = s.provenance or {}

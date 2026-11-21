@@ -619,8 +619,8 @@ def ingest_asmae_raster_refs(output: Dict[str, Any], plot_id: str) -> List[Raste
         if post_conc_mean is None:
             post_conc_mean = finite_support_mean("confidence_maps", "ASMAE_CONFIDENCE")
         uncertainty_mean = finite_support_mean("uncertainty_maps", "ASMAE_UNCERTAINTY")
-        post_conc_val = float(post_conc_mean) if post_conc_mean is not None else 0.0
-        unc_val = float(uncertainty_mean) if uncertainty_mean is not None else 1.0
+        # Absent uncertainty is unknown, never sigma=1.0 by convention.
+        unc_val = float(uncertainty_mean) if uncertainty_mean is not None else None
 
         archive_used = prov.get("sentinel_archive_used") or diag.get("sentinel_archive_used") or False
         archive_count = prov.get("archive_scene_count") or diag.get("archive_scene_count") or 0
@@ -678,25 +678,25 @@ def ingest_asmae_raster_refs(output: Dict[str, Any], plot_id: str) -> List[Raste
         if ref:
             raster_refs.append(ref)
 
-    # Ingest confidence maps (deduplicated to single canonical asmae_posterior_concentration raster)
-    ingested_confidence_vars = set()
-    for var, grid in output.get("confidence_maps", {}).items():
-        if var in ("ASMAE_CONFIDENCE", "CONFIDENCE_ASMAE", "ASMAE_POSTERIOR_CONCENTRATION"):
-            canonical_key = "asmae_posterior_concentration"
-            if canonical_key in ingested_confidence_vars:
-                continue
-            ingested_confidence_vars.add(canonical_key)
-            var_name = canonical_key
-            ref = build_ref(var_name, grid, "diagnostic", is_state=False)
-            if ref and isinstance(ref, dict):
-                ref.setdefault("metadata", {})["legacy_aliases"] = ["ASMAE_CONFIDENCE", "CONFIDENCE_ASMAE"]
-                ref["metadata"]["canonical_name"] = "ASMAE_POSTERIOR_CONCENTRATION"
+    # A RasterRef is a typed dataclass, not a dict. Canonical confidence
+    # takes priority over legacy aliases irrespective of mapping insertion order.
+    confidence_maps = output.get("confidence_maps") or {}
+    if not isinstance(confidence_maps, dict):
+        confidence_maps = {}
+    aliases = ("ASMAE_POSTERIOR_CONCENTRATION", "ASMAE_CONFIDENCE", "CONFIDENCE_ASMAE")
+    for canonical in aliases:
+        if canonical in confidence_maps:
+            ref = build_ref("asmae_posterior_concentration", confidence_maps[canonical], "diagnostic", is_state=False)
+            if ref is not None:
                 raster_refs.append(ref)
-        else:
-            var_name = var if var.lower().startswith("asmae_") else f"asmae_{var}_confidence"
-            ref = build_ref(var_name, grid, "diagnostic", is_state=False)
-            if ref:
-                raster_refs.append(ref)
+                break
+    for var, grid in confidence_maps.items():
+        if var in aliases:
+            continue
+        var_name = var if var.lower().startswith("asmae_") else f"asmae_{var}_confidence"
+        ref = build_ref(var_name, grid, "diagnostic", is_state=False)
+        if ref is not None:
+            raster_refs.append(ref)
 
 
     # Ingest retrovalidation maps
