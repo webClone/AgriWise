@@ -26,6 +26,22 @@ from layer4_nutrients.schema import (
 )
 
 
+def _qualified_chlorophyll_deficit(evidence: Dict[str, Any]) -> Optional[float]:
+    """Unit-tagged chlorophyll with crop-qualified calibration only."""
+    from services.agribrain.scientific_contracts.asmae_physical_semantics import calibrated_chlorophyll_deficit
+    feature = evidence.get("asmae_chlorophyll")
+    if feature is None:
+        return None
+    try:
+        return calibrated_chlorophyll_deficit(
+            feature,
+            crop_type=str(evidence.get("asmae_crop_type") or ""),
+            calibration=evidence.get("asmae_chlorophyll_calibration"),
+        )
+    except ValueError:
+        return None  # reject untagged/invalid physical evidence
+
+
 def _sigmoid(logit: float) -> float:
     logit = max(-20.0, min(20.0, logit))
     return 1.0 / (1.0 + math.exp(-logit))
@@ -109,20 +125,18 @@ class NutrientInferenceEngine:
                     Driver.NDVI, Nutrient.N, f"NDRE Z={ndre_z:.2f}", delta, 2.0,
                     {"feature": "ndre_z", "value": ndre_z}))
 
-        # ASMAE Chlorophyll log-odds adjustment for N deficiency
-        asmae_chloro = evidence.get("asmae_chlorophyll")
-        if asmae_chloro is not None:
-            if asmae_chloro < 0.45:
-                delta = 3.0 + max(0.0, (0.45 - asmae_chloro) * 1.5)
-            elif asmae_chloro > 0.65:
-                delta = -1.5
-            else:
-                delta = 0.0
-            if delta != 0.0:
-                logit += delta
-                trace.append(EvidenceLogit(
-                    Driver.NDVI, Nutrient.N, f"ASMAE Chlorophyll={asmae_chloro:.2f}", delta, 1.8,
-                    {"feature": "asmae_chlorophyll", "value": asmae_chloro}))
+        # N receives no ASMAE chlorophyll influence without crop-qualified
+        # physical units and independent calibration; never use 0.45/0.65.
+        asmae_chloro = _qualified_chlorophyll_deficit(evidence)
+        if asmae_chloro is not None and asmae_chloro > 0.0:
+            delta = 3.0 * asmae_chloro
+            logit += delta
+            trace.append(EvidenceLogit(
+                Driver.NDVI, Nutrient.N,
+                f"Calibrated chlorophyll deficit index={asmae_chloro:.2f}",
+                delta, 1.8, {"feature": "asmae_chlorophyll_deficit_index",
+                             "value": asmae_chloro,
+                             "calibration": evidence.get("asmae_chlorophyll_calibration")}))
 
         # Evidence 3: Growth stall
         growth = evidence.get("growth_adequacy", 1.0)
@@ -232,7 +246,8 @@ class NutrientInferenceEngine:
             confounders.append(Confounder.MECHANICAL_DAMAGE)
 
         # ASMAE confounders
-        asmae_water = evidence.get("asmae_water_stress")
+        # Canopy water content is not a water-stress probability.
+        asmae_water = None
         if asmae_water is not None and asmae_water > 0.4:
             conf -= 0.20
             if Confounder.WATER_STRESS not in confounders:
@@ -252,7 +267,7 @@ class NutrientInferenceEngine:
 
         # Gate low chlorophyll when water stress is present (lower confidence)
         has_water_stress = (eff_water > 0.4) or (asmae_water is not None and asmae_water > 0.4)
-        has_low_chlorophyll = (ndre_z < -1.0) or (asmae_chloro is not None and asmae_chloro < 0.45)
+        has_low_chlorophyll = (ndre_z < -1.0) or (asmae_chloro is not None and asmae_chloro > 0.5)
         if has_water_stress and has_low_chlorophyll:
             conf -= 0.15
             if Confounder.WATER_STRESS not in confounders:
@@ -338,16 +353,8 @@ class NutrientInferenceEngine:
                 delta, 1.0, {"feature": "ph_p_availability", "value": ph_avail}))
             confounders.append(Confounder.PH_LOCKOUT)
 
-        # ASMAE Chlorophyll integration (smaller effect than N)
-        asmae_chloro = evidence.get("asmae_chlorophyll")
-        if asmae_chloro is not None and asmae_chloro < 0.45:
-            delta = 0.5
-            logit += delta
-            trace.append(EvidenceLogit(
-                Driver.NDVI, Nutrient.P, f"ASMAE Chlorophyll={asmae_chloro:.2f} (P-related chlorosis)",
-                delta, 0.5, {"feature": "asmae_chlorophyll", "value": asmae_chloro}))
-
-        prob = _sigmoid(logit)
+        # ASMAE chlorophyll alone is not a nutrient-P diagnosis.
+        # Await separately qualified multi-factor nutrient calibration.
 
         # Confidence
         conf = 0.70  # P inference is inherently less precise without tissue test
@@ -384,7 +391,8 @@ class NutrientInferenceEngine:
             confounders.append(Confounder.SALINITY)
 
         # ASMAE confounders
-        asmae_water = evidence.get("asmae_water_stress")
+        # Canopy water content is not a water-stress probability.
+        asmae_water = None
         if asmae_water is not None and asmae_water > 0.4:
             conf -= 0.20
             if Confounder.WATER_STRESS not in confounders:
@@ -454,25 +462,8 @@ class NutrientInferenceEngine:
                 f"Soil lab K={soil_k_ppm}ppm ({soil_k_status})",
                 delta, 3.0, {"feature": "soil_k_ppm", "value": soil_k_ppm}))
 
-        # ASMAE Chlorophyll integration (smaller effect than N)
-        asmae_chloro = evidence.get("asmae_chlorophyll")
-        if asmae_chloro is not None and asmae_chloro < 0.45:
-            delta = 0.5
-            logit += delta
-            trace.append(EvidenceLogit(
-                Driver.NDVI, Nutrient.K, f"ASMAE Chlorophyll={asmae_chloro:.2f} (K-related chlorosis)",
-                delta, 0.5, {"feature": "asmae_chlorophyll", "value": asmae_chloro}))
-
-        # Evidence 3: Growth stall + no N deficiency → maybe K
-        growth = evidence.get("growth_adequacy", 1.0)
-        ndvi_z = evidence.get("ndvi_z", 0.0)
-        if growth < 0.6 and ndvi_z > -1.0:
-            delta = 0.8
-            logit += delta
-            trace.append(EvidenceLogit(
-                Driver.NDVI, Nutrient.K,
-                f"Growth stall ({growth:.2f}) without NDVI drop (possible K limitation)",
-                delta, 0.6, {"feature": "growth_adequacy", "value": growth}))
+        # ASMAE chlorophyll alone is not a nutrient-K diagnosis.
+        # Await separately qualified multi-factor nutrient calibration.
 
         # LOGIC-3 FIX: Expanded K evidence channels
         # Evidence 4: NDRE relationship to K
@@ -534,7 +525,8 @@ class NutrientInferenceEngine:
             confounders.append(Confounder.SALINITY)
 
         # ASMAE confounders
-        asmae_water = evidence.get("asmae_water_stress")
+        # Canopy water content is not a water-stress probability.
+        asmae_water = None
         if asmae_water is not None and asmae_water > 0.4:
             conf -= 0.20
             if Confounder.WATER_STRESS not in confounders:
