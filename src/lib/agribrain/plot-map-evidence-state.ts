@@ -1090,12 +1090,20 @@ export function resolvePlotMapEvidenceState(input: {
   let actionCap: ActionCap = "monitor";
   const canSayHighlightedZone = visibleZoneCount > 0 && mapSemantics === "localized_alert";
   const canRecommendScout = canSayHighlightedZone && (evidenceLevel === "real_raster" || evidenceLevel === "partial_raster" || evidenceLevel === "model_assisted_raster");
+  // Spatial renderability is not prescription authority. A backend-issued,
+  // state-qualified driver and a non-diagnostic publication are mandatory;
+  // this UI cap does not replace the server-side prescription/actuator gate.
+  const scientificDriverQualified =
+    activeSurface?.provenance?.prescription_driver_allowed === true &&
+    activeSurface?.provenance?.state_update_allowed === true &&
+    activeSurface?.provenance?.diagnostic_only === false &&
+    activeSurface?.provenance?.visual_only === false;
 
   if (canRecommendScout) {
     actionCap = "scout";
   } else if (canSayHighlightedZone) {
     actionCap = "verify";
-  } else if (evidenceLevel === "real_raster" || evidenceLevel === "partial_raster") {
+  } else if ((evidenceLevel === "real_raster" || evidenceLevel === "partial_raster") && scientificDriverQualified) {
     actionCap = "prescription_allowed";
   } else {
     actionCap = "monitor";
