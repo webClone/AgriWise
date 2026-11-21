@@ -3,7 +3,7 @@
 /**
  * SidebarExpertView — Agronomic analysis console.
  * Dense scientific view: stats, zone decomposition, evidence chain, charts.
- * All data from real L10/engine data. Zero synthetic data.
+ * All data from real L10/engine data. Source reality and model-derived outputs are qualified separately.
  */
 
 import React from "react";
