@@ -78,7 +78,7 @@ def test_engine_output_uses_mode_gate_and_hardcoded_orchestrator_grant_is_gone()
     assert 'diagnostics["state_update_allowed"] = final_production_usable' in engine_source
     assert 'diagnostics["layer1_export_allowed"] = final_production_usable' in engine_source
 
-    root = Path(__file__).resolve().parents[3]
+    root = Path(__file__).resolve().parents[2]
     orch_path = root / "orchestrator_v2" / "runner.py"
     text = orch_path.read_text(encoding="utf-8")
     segment = text[text.index('"orchestrator_reintegration": {'):][:500]
