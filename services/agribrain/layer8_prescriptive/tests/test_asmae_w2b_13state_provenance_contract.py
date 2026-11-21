@@ -61,3 +61,59 @@ def test_w2b_l8_source_guard_does_not_manufacture_missing_sigma():
     ]
     assert 'feat.get("uncertainty", 0.1)' not in trust_adjustment
     assert 'getattr(feat, "uncertainty", 0.1)' not in trust_adjustment
+
+
+
+@pytest.mark.parametrize("action_name", ["IRRIGATE", "SPRAY", "FERTILIZE", "REPLANT"])
+def test_w2b_irreversible_asmae_action_cannot_self_certify(action_name):
+    from layer8_prescriptive.action_ranker import (
+        ActionRankingEngine, ActionType, IRREVERSIBLE_ACTIONS,
+    )
+    kind = getattr(ActionType, action_name)
+    assert kind in IRREVERSIBLE_ACTIONS
+    card = SimpleNamespace(
+        action_type=kind,
+        evidence=[SimpleNamespace(reference_id="asmae_lai", description="")],
+        explain="ASMAE LAI driven action",
+        driver_source_family="unknown",
+        primary_driver=None,
+        driver_confidence=None,
+        driver_uncertainty=None,
+        driver_channel=None,
+        corroborating_sources=[],
+        is_allowed=True,
+        blocked_reason=[],
+        requires_confirmation=False,
+        rate=None,
+    )
+    purported = {
+        "value": 3.2, "confidence": 0.99, "uncertainty": 0.01,
+        "bma_disagreement": 0.01, "resolution_m": 20.0,
+        "state_update_allowed": True, "diagnostic_only": False,
+        "asmae_channel": "state_evidence",
+    }
+    engine = object.__new__(ActionRankingEngine)
+    l8_input = SimpleNamespace(conflicts=[], asmae_features={"ASMAE_LAI": purported})
+    result = engine._apply_trust_adjustments([card], None, None, l8_input)
+    assert result[0].driver_source_family == "asmae"
+    assert result[0].is_allowed is False
+    assert "blocked_by_asmae_safety_gate" in result[0].blocked_reason
+
+
+def test_w2b_independent_non_asmae_action_is_not_globally_disabled():
+    from layer8_prescriptive.action_ranker import ActionRankingEngine, ActionType
+    card = SimpleNamespace(
+        action_type=ActionType.SCOUT,
+        evidence=[SimpleNamespace(reference_id="field_verified_soil_sample", description="")],
+        explain="Independent soil test",
+        driver_source_family="independent_lab",
+        primary_driver=None, driver_confidence=0.8,
+        driver_uncertainty=0.2, driver_channel="lab",
+        corroborating_sources=[], is_allowed=True, blocked_reason=[],
+        requires_confirmation=False, rate=None,
+    )
+    engine = object.__new__(ActionRankingEngine)
+    result = engine._apply_trust_adjustments(
+        [card], None, None, SimpleNamespace(conflicts=[], asmae_features={})
+    )
+    assert result[0].is_allowed is True
