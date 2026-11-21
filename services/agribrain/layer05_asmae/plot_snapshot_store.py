@@ -1293,7 +1293,8 @@ def load_latest_plot_snapshot(
         or (publication_frontend.get("asmae_proof") or {}).get("numerical_vector_hash")
         or (publication_frontend.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
         or node_num_hash
-        or (node.get("snapshot_kind") == "asmae" and (node.get("asmae") or {}).get("state_means"))
+        or publication_frontend.get("asmae_posterior_numerical_record") is not None
+        or (publication_frontend.get("asmae_numerical_publication_contract") or {}).get("mode") == "verified_numerical"
     )
 
     node_agreement_valid = True
@@ -1687,7 +1688,8 @@ def load_and_validate_plot_snapshot_by_id(
         or (publication_frontend.get("asmae_proof") or {}).get("numerical_vector_hash")
         or (publication_frontend.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
         or node_num_hash
-        or (node.get("snapshot_kind") == "asmae" and (node.get("asmae") or {}).get("state_means"))
+        or publication_frontend.get("asmae_posterior_numerical_record") is not None
+        or (publication_frontend.get("asmae_numerical_publication_contract") or {}).get("mode") == "verified_numerical"
     )
     numerical_binding_valid: Optional[bool] = None
     node_agreement_valid = True
