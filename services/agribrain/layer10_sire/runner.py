@@ -5265,6 +5265,7 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
         def is_asmae_type(t: str) -> bool:
             t = t.upper()
             return (
+                t.startswith("COMPOSITE_") or
                 t.startswith("ASMAE_") or 
                 "_ASMAE_" in t or 
                 t.endswith("_ASMAE") or
@@ -5363,6 +5364,15 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                 return True, ""
 
             # Diagnostic / Non-latent-state surfaces
+            if t_upper == "ASMAE_POSTERIOR_CONCENTRATION":
+                # Confidence is a diagnostic support raster, not a latent
+                # 13-state posterior, 1m approval or prescription authority.
+                current = bool(
+                    current_spatial_asmae
+                    and output.asmae_evidence_state.get("spatial_raster_available") is True
+                    and output.asmae_evidence_state.get("visualization_allowed") is True
+                )
+                return (current, "" if current else "missing_spatial_posterior")
             if "RESOLUTION" in t_upper:
                 if not current_1m_allowed:
                     return False, "missing_local_resolution_support"
