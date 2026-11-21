@@ -86,10 +86,8 @@ def test_ir05_asset_untrusted_stac_href_never_receives_cdse_token(monkeypatch, t
     fetcher = _fetcher(monkeypatch, tmp_path)
     def should_not_call(*args, **kwargs):
         raise AssertionError("unsafe origin reached network")
-    monkeypatch.setattr(
-        "services.agribrain.layer0.archive.archive_fetcher.requests.get",
-        should_not_call, raising=False,
-    )
+    import requests
+    monkeypatch.setattr(requests, "get", should_not_call)
     with pytest.raises(RuntimeError, match="archive_asset_download_not_verified"):
         fetcher._download_real_assets(
             SimpleNamespace(asset_urls={"B04": "https://untrusted.example/data.tif"}),
