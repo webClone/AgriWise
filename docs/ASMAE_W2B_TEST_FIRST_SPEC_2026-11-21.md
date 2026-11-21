@@ -42,3 +42,18 @@ Sources: `services/agribrain/layer3_decision/runner.py` around lines 305–325; 
 
 ## Gate
 Run the authored yield tests; add Layer4 standalone integration, L3 decision and L8 action card tests. Run affected complete Layer2/3/4/6/8 and Layer05 regression suites plus frontend, exact HEAD. Maintain all holds and master register.
+
+## Completion addendum — 2026-11-21 13:49
+**New executable Python red tests:**
+- `services/agribrain/layer4_nutrients/tests/test_asmae_w2b_standalone_authority_contract.py`: real `run_layer4_standalone` and unqualified LAI overrides, including diagnostic-only, missing authority and absent semantic lineage.
+- `services/agribrain/layer3_decision/tests/test_asmae_w2b_13state_provenance_contract.py`: 13 canonical states × 3 lower/mixed/`asmae_artifact:` evidence-ID variants, executing the current decision guard in an isolated source-body fixture.
+- `services/agribrain/layer8_prescriptive/tests/test_asmae_w2b_13state_provenance_contract.py`: 13 states × 3 identity variants, executing the current action provenance path, plus a missing-uncertainty nonfabrication check.
+These are bounded source-body regression fixtures, not real full Layer3/Layer8 runs. After production code, supplement with actual end-to-end recommendation cards and signed prescription authorization.
+
+**Run expected-RED gates:**
+```powershell
+python -m pytest services/agribrain/layer6_yield/tests/test_asmae_w2b_yield_authority_contract.py -q
+python -m pytest services/agribrain/layer4_nutrients/tests/test_asmae_w2b_standalone_authority_contract.py -q
+python -m pytest services/agribrain/layer3_decision/tests/test_asmae_w2b_13state_provenance_contract.py -q
+python -m pytest services/agribrain/layer8_prescriptive/tests/test_asmae_w2b_13state_provenance_contract.py -q
+```
