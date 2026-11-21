@@ -90,3 +90,48 @@ def test_runner_effective_authority_uses_narrowing_resolver():
     runner_source = inspect.getsource(ASMAERunner.execute)
     assert "permissions = intersect_execution_permissions(" in runner_source
     assert 'context["_asmae_execution_permissions"] = permissions' in runner_source
+
+
+
+def test_no_compute_or_production_grant_can_carry_training_export():
+    granted = {"compute_allowed": True,
+               "diagnostic_allowed": True,
+               "advisory_allowed": True,
+               "production_authority_allowed": True,
+               "training_export_allowed": True}
+    for restriction in (
+        {"compute_allowed": False},
+        {"production_authority_allowed": False},
+    ):
+        effective = intersect_execution_permissions(granted, restriction, "standard")
+        assert effective["training_export_allowed"] is False
+
+
+def test_cache_authority_downgrade_purges_old_weak_labels():
+    runner = object.__new__(ASMAERunner)
+    cached = {
+        "production_usable": True,
+        "state_update_allowed": True,
+        "layer1_export_allowed": True,
+        "weak_label_export_allowed": True,
+        "weak_labels": [{"label": "previously_authorized"}],
+        "visual_allowed": True,
+        "diagnostics": {"production_usable": True,
+                        "prescription_driver_allowed": True},
+    }
+    permissions = {
+        "diagnostic_allowed": True,
+        "advisory_allowed": True,
+        "visual_authority_allowed": True,
+        "production_authority_allowed": False,
+        "training_export_allowed": True,
+        "plot_state_publication_allowed": True,
+    }
+    served = runner._apply_execution_authority(cached, permissions)
+    assert served["production_usable"] is False
+    assert served["state_update_allowed"] is False
+    assert served["layer1_export_allowed"] is False
+    assert served["weak_label_export_allowed"] is False
+    assert served["weak_labels"] == []
+    assert served["diagnostics"]["prescription_driver_allowed"] is False
+    assert cached["weak_labels"]  # original cached payload is not mutated
