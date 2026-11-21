@@ -559,7 +559,8 @@ def api_v2_exact_snapshot(
     """
     from services.agribrain.layer05_asmae.plot_snapshot_store import (
         load_plot_snapshot_by_id, load_and_validate_plot_snapshot_by_id,
-        evaluate_snapshot_admission,
+        evaluate_snapshot_admission, requires_verified_numerical_binding,
+        validate_numerical_publication_mode,
     )
 
     validated = load_and_validate_plot_snapshot_by_id(snapshot_id, namespace=namespace)
@@ -586,13 +587,17 @@ def api_v2_exact_snapshot(
         raise HTTPException(status_code=409, detail="Exact snapshot integrity or schema validation failed")
 
     # If publication claims numerical authority, numericalBindingValid must be True (cannot be null or false)
-    claims_num = bool(
-        validated.get("snapshot_kind") == "asmae"
-        or str(snapshot_id).startswith("ASMAE-SNAPSHOT-")
-        or (validated.get("contract_validation") or {}).get("numerical_authority_verified") is True
-        or (validated.get("frontend_payload") or {}).get("claims_numerical_authority") is True
-    )
-    if claims_num and validation.get("numericalBindingValid") is not True:
+    # Numerical publication requires a real verifiable claim and vector.
+    # An ASMAE snapshot ID is a namespace marker, not a scientific certificate.
+    if not validate_numerical_publication_mode(validated):
+        raise HTTPException(
+            status_code=409, detail="Exact snapshot numerical publication contract invalid"
+        )
+    claims_num = requires_verified_numerical_binding(validated)
+    if claims_num and (
+        validation.get("numericalBindingValid") is not True
+        or validation.get("nodeAgreementValid") is not True
+    ):
         raise HTTPException(
             status_code=409,
             detail="Exact snapshot missing verified numerical authority binding"
