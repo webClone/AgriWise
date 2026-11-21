@@ -88,7 +88,7 @@ def test_ir05_asset_untrusted_stac_href_never_receives_cdse_token(monkeypatch, t
         raise AssertionError("unsafe origin reached network")
     import requests
     monkeypatch.setattr(requests, "get", should_not_call)
-    with pytest.raises(RuntimeError, match="archive_asset_download_not_verified"):
+    with pytest.raises(RuntimeError, match="archive_asset_host_not_allowlisted"):
         fetcher._download_real_assets(
             SimpleNamespace(asset_urls={"B04": "https://untrusted.example/data.tif"}),
             ["B04"], str(tmp_path / "safe"), {},

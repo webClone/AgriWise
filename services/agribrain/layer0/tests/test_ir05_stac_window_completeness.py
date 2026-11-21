@@ -235,7 +235,7 @@ def test_ir05_fetcher_rejects_quota_blockage_as_incomplete(monkeypatch, tmp_path
                 plot_id="plot", geometry_wkt="POINT(3 36)",
                 start_date="2026-06-16T12:45:00Z",
                 end_date="2026-06-30T00:00:00Z",
-                sources=["sentinel2"], manifest_only=True,
+                sources=["sentinel2"], manifest_only=False,
             )
 
 
@@ -266,7 +266,7 @@ def test_ir05_fetcher_rejects_successful_but_truncated_quota_plan(monkeypatch, t
                 plot_id="plot", geometry_wkt="POINT(3 36)",
                 start_date="2026-06-16T12:45:00Z",
                 end_date="2026-06-30T00:00:00Z",
-                sources=["sentinel2"], manifest_only=True,
+                sources=["sentinel2"], manifest_only=False,
             )
 
 
