@@ -2646,6 +2646,9 @@ class MesiaProductionService:
             p["admission_status"] = l0_rec.status.value
             p["admission_notes"] = l0_rec.admission_notes
             p["is_usable_for_assimilation"] = l0_rec.is_usable_for_assimilation
+            # A hash or a plausible file:// URI is not a native capture.
+            from services.agribrain.mesia.integration import verify_native_capture_for_plot
+            p["native_capture_present"] = verify_native_capture_for_plot(packet, plot_id)
             p["asmae_observation_event"] = asmae_event.to_dict() if asmae_event and hasattr(asmae_event, "to_dict") else None
 
             # Route observation event via ASMAEObservationDispatcher (WP07 / Finding #14)
@@ -2715,6 +2718,10 @@ class MesiaProductionService:
                 authority_state=AuthorityState.RESEARCH_ONLY,
                 presentation_state=PresentationState.LIVE if is_p_live else PresentationState.SIMULATION,
                 native_artifact_ref=packet.native_data_uri if is_p_live else None,
+                # The Tier-2 biological inference depends on the actual Layer0
+                # evaluation receipt (including rejection), not an invented
+                # physically measured biological truth.
+                parent_envelope_refs=(l0_rec.record_id,),
                 source_receipt_ref=f"rcpt-packet-{packet.packet_id}" if is_p_live else None,
                 calibration_state_ref="CALIB-UNVERIFIED-DEMONSTRATOR" if is_p_live else None,
                 software_epoch_ref="mesia-r6.1",
