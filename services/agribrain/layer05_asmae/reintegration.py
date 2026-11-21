@@ -698,6 +698,10 @@ def rebuild_canonical_plot_snapshot(
         frontend["asmae_proof"]["numerical_vector_hash"] = vec_hash
         frontend["asmae_proof"].setdefault("proof_id", f"proof-{snapshot_id}")
         frontend["asmae_proof"].setdefault("status", "valid")
+        frontend["asmae_numerical_publication_contract"] = {
+            "version": "asmae_numerical_publication_v1",
+            "mode": "verified_numerical",
+        }
     else:
         # Preserve diagnostic means if present, but do not claim numerical
         # authority or serialize a fake exact posterior uncertainty vector.
@@ -709,6 +713,11 @@ def rebuild_canonical_plot_snapshot(
         proof = frontend.get("asmae_proof")
         if isinstance(proof, dict):
             proof.pop("numerical_vector_hash", None)
+        frontend.pop("numerical_authority_claimed", None)
+        frontend["asmae_numerical_publication_contract"] = {
+            "version": "asmae_numerical_publication_v1",
+            "mode": "diagnostic",
+        }
 
     frontend["worker_reintegration"] = {
         "contract_version": REINTEGRATION_CONTRACT_VERSION,
