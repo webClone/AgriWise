@@ -463,6 +463,8 @@ class ASMAEIR05ArchiveBootstrapTests(unittest.TestCase):
                     return [
                         type("Record", (object,), {
                             "scene_id": "S2A_MSIL2A_20150701_TEST",
+                            "plot_id": plot_id,
+                            "geometry_hash": hashlib.sha256(geometry_wkt.encode("utf-8")).hexdigest(),
                             "source": "sentinel2",
                             "acquisition_time": "2015-07-01T10:30:00Z",
                             "product_level": "L2A",
@@ -507,6 +509,72 @@ class ASMAEIR05ArchiveBootstrapTests(unittest.TestCase):
         scene_rec = events[0]["payload"]["archive_scene"]
         self.assertEqual(scene_rec["scene_id"], "S2A_MSIL2A_20150701_TEST")
         self.assertEqual(scene_rec["source_content_hash"], "c" * 64)
+        self.assertIs(scene_rec["asset_content_verified"], False)
+        self.assertEqual(scene_rec["source_hash_kind"], "manifest_metadata_digest")
+
+
+    def test_ir05_t16_provider_rejects_foreign_plot_or_geometry(self):
+        from types import SimpleNamespace
+        wkt = "POLYGON((3 36, 3.01 36, 3.01 36.01, 3 36.01, 3 36))"
+        base = {
+            "plot_id": self.plot_id,
+            "geometry_hash": hashlib.sha256(wkt.encode("utf-8")).hexdigest(),
+            "scene_id": "S2A_STAC_TRUST_TEST",
+            "source": "sentinel2",
+            "acquisition_time": "2015-07-01T10:30:00Z",
+            "product_level": "L2A",
+            "cloud_score": 5.0,
+            "source_content_hash": "b" * 64,
+            "valid_pixel_fraction": 0.99,
+            "native_resolution_m": 10.0,
+            "quality_status": "accepted",
+            "bands_available": ["B04", "B08"],
+            "masks_available": ["SCL"],
+        }
+        for overridden, error in [
+            ({"plot_id": "foreign_plot"}, "archive_provider_cross_plot_record"),
+            ({"geometry_hash": "a" * 64}, "archive_provider_geometry_mismatch"),
+            ({"source": "sentinel1"}, "archive_provider_source_out_of_scope"),
+            ({"quality_status": "candidate"}, "archive_provider_unqualified_scene_status"),
+        ]:
+            class MaliciousFetcher:
+                def orchestrate_fetch(self, **kwargs):
+                    return [SimpleNamespace(**dict(base, **overridden))]
+            bridge = create_copernicus_archive_provider(
+                fetcher=MaliciousFetcher(),
+                plot_id=self.plot_id,
+                geometry_wkt=wkt,
+                sources=["sentinel2"],
+            )
+            with self.subTest(overridden=overridden):
+                with self.assertRaisesRegex(RuntimeError, error):
+                    bridge("2015-06-23T00:00:00Z", "2015-12-23T00:00:00Z")
+
+    def test_ir05_t17_incomplete_provider_must_not_checkpoint_completed(self):
+        class QuotaDeniedFetcher:
+            def orchestrate_fetch(self, **kwargs):
+                raise RuntimeError("archive_download_plan_incomplete:quota")
+        bridge = create_copernicus_archive_provider(
+            fetcher=QuotaDeniedFetcher(),
+            plot_id=self.plot_id,
+            geometry_wkt="POLYGON((3 36, 3.01 36, 3.01 36.01, 3 36.01, 3 36))",
+        )
+        service = ArchiveBootstrapService(
+            worldline=self.worldline,
+            bootstrap_root=self.bootstrap_root,
+            fetcher_factory=bridge,
+        )
+        with self.assertRaisesRegex(RuntimeError, "archive_download_plan_incomplete"):
+            service.run_bootstrap(
+                plot_id=self.plot_id,
+                geometry_hash=self.geometry_hash,
+                tenant_id=self.tenant_id,
+                namespace=self.namespace,
+                target_end_date="2015-12-23T00:00:00Z",
+            )
+        cp = service.load_checkpoint(self.plot_id, self.tenant_id, self.namespace)
+        self.assertEqual(cp.status, "FAILED")
+        self.assertNotEqual(cp.status, "COMPLETED")
 
 
 if __name__ == "__main__":
