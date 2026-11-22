@@ -23,7 +23,8 @@ dependencies = { file = ["services/agribrain/requirements.txt"] }
 testpaths = ["services/agribrain/tests", "services/agribrain/mesia/tests", "services/agribrain/layer05_asmae/tests"]
 python_files = ["test_*.py"]
 pythonpath = ["services/agribrain", "."]
-addopts = ["--import-mode=importlib", "-m", "not slow and not hardware and not replay"]
+norecursedirs = ["services/agribrain/scratch", "scratch", ".git", "node_modules", ".next"]
+addopts = ["--import-mode=importlib", "-m", "not slow and not hardware and not replay", "--ignore=services/agribrain/scratch"]
 markers = [
     "schema: Tests that validate contracts, schemas, and state machines without hardware.",
     "hardware: Tests that require physical radio acquisition hardware.",
