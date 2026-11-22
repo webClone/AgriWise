@@ -854,60 +854,81 @@ class MesiaProductionService:
         return res
 
     @classmethod
-    def _process_real_in_situ_wifi_csi(cls, plot_namespace: Union[PlotNamespace, str]) -> Dict[str, Any]:
-        """Processes authentic ground-level Wi-Fi CSI SigMF measurements if an in-situ receiver capture exists for this plot."""
+    def _process_real_in_situ_wifi_csi(
+        cls,
+        plot_namespace: Union[PlotNamespace, str],
+        storage_root: Optional[Union[str, Path]] = None,
+        target_capture_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Processes authentic ground-level Wi-Fi CSI SigMF measurements if a verified in-situ receiver capture exists for this plot."""
         if isinstance(plot_namespace, str):
             plot_namespace = PlotNamespace(tenant_id="default_tenant", farm_id="default_farm", plot_id=plot_namespace)
 
-        plot_id = plot_namespace.plot_id
-        evidence_dir = (
-            WORKSPACE_ROOT
-            / "services"
-            / "agribrain"
-            / "mesia"
-            / "data"
-            / "evidence"
-            / str(plot_namespace.tenant_id)
-            / str(plot_namespace.farm_id)
-            / str(plot_namespace.plot_id)
+        from services.agribrain.mesia.ingestion.sigmf_ingest import (
+            DEFAULT_STORAGE_ROOT,
+            verify_capture_integrity,
+            SigMFCaptureManifest,
+            _sanitize_id,
         )
-        data_dir = WORKSPACE_ROOT / "services" / "agribrain" / "mesia" / "data"
-        wifi_insitu_dir = data_dir / "insitu" / "wifi"
 
-        # Strict isolation: Only inspect files specifically belonging to this plot namespace!
-        candidate_paths = []
-        if evidence_dir.exists():
-            candidate_paths.extend(sorted(evidence_dir.glob("*.sigmf-data"), key=lambda p: p.stat().st_mtime, reverse=True))
-        if wifi_insitu_dir.exists():
-            candidate_paths.extend([
-                wifi_insitu_dir / f"plot_{plot_id}_real_field_csi.sigmf-data",
-                wifi_insitu_dir / f"plot_{plot_id}_field_csi.sigmf-data",
-            ])
-        candidate_paths.extend([
-            data_dir / f"plot_{plot_id}_real_field_csi.sigmf-data",
-            data_dir / f"plot_{plot_id}_field_csi.sigmf-data",
-        ])
+        root = Path(storage_root or DEFAULT_STORAGE_ROOT)
+        tenant_clean = _sanitize_id(plot_namespace.tenant_id, "tenant_id")
+        farm_clean = _sanitize_id(plot_namespace.farm_id, "farm_id") if plot_namespace.farm_id else "default_farm"
+        plot_clean = _sanitize_id(plot_namespace.plot_id, "plot_id")
 
-        log_file = None
-        for p in candidate_paths:
-            if p.exists():
-                log_file = p
+        # Candidate directories in precedence order: farm-isolated then legacy 2-level
+        candidate_dirs = [
+            root / tenant_clean / farm_clean / plot_clean,
+            root / tenant_clean / plot_clean,
+        ]
+
+        verified_manifest: Optional[SigMFCaptureManifest] = None
+        verified_data_file: Optional[Path] = None
+        verified_prefix: Optional[str] = None
+
+        for c_dir in candidate_dirs:
+            if not c_dir.exists() or not c_dir.is_dir():
+                continue
+            if target_capture_id:
+                m_file = c_dir / f"{target_capture_id}.manifest.json"
+                manifest_files = [m_file] if m_file.exists() else []
+            else:
+                manifest_files = sorted(c_dir.glob("*.manifest.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+
+            for mf in manifest_files:
+                if verify_capture_integrity(mf, expected_namespace=plot_namespace, storage_root=root):
+                    try:
+                        mf_data = json.loads(Path(mf).read_text(encoding="utf-8"))
+                        mf_obj = SigMFCaptureManifest.from_dict(mf_data)
+                        d_path = Path(mf_obj.data_path).resolve()
+                        m_path = Path(mf_obj.meta_path).resolve()
+                        if d_path.exists() and m_path.exists():
+                            verified_manifest = mf_obj
+                            verified_data_file = d_path
+                            verified_prefix = mf_obj.storage_prefix
+                            break
+                    except Exception:
+                        continue
+            if verified_manifest:
                 break
 
-        if not log_file:
+        if not verified_manifest or not verified_data_file or not verified_data_file.exists():
             return {
                 "status": "AWAITING_FIELD_RECEIVER_STREAM",
                 "receiver_type": "NONE_DEPLOYED",
-                "message": "Zero in-situ Wi-Fi CSI edge anchors detected inside parcel boundary. Deploy an ESP32-S3 or Nexmon CSI anchor within 120m to capture ground-level OFDM channel matrices.",
+                "message": "Zero verified in-situ Wi-Fi CSI captures detected inside parcel boundary.",
                 "physical_waves_measured": False,
+                "source_class": "UNVERIFIED",
+                "identity_state": "AWAITING_VERIFIED_CAPTURE",
+                "presentation_state": "UNVERIFIED",
+                "native_data_uri": None,
+                "sha256": None,
             }
 
         try:
             from services.agribrain.mesia.lanes.wifi.csi_extractor import NativeWifiCsiExtractor, WiHFC_Classifier
 
-            prefix = str(log_file)[:-11] if str(log_file).endswith(".sigmf-data") else str(log_file)
-            csi_dict = NativeWifiCsiExtractor.read_sigmf(prefix)
-
+            csi_dict = NativeWifiCsiExtractor.read_sigmf(verified_prefix)
             clf = WiHFC_Classifier()
             analysis = clf.analyze(csi_dict)
 
@@ -918,6 +939,9 @@ class MesiaProductionService:
                 return {
                     "status": "INSUFFICIENT_SUBCARRIER_DATA",
                     "physical_waves_measured": False,
+                    "source_class": "UNVERIFIED",
+                    "identity_state": "AWAITING_VERIFIED_CAPTURE",
+                    "presentation_state": "UNVERIFIED",
                     "message": "SigMF capture contains zero valid OFDM subcarrier amplitudes.",
                 }
 
@@ -934,6 +958,20 @@ class MesiaProductionService:
                 for idx, (amp, phase) in enumerate(zip(amps, phases))
             ]
 
+            native_uri = verified_data_file.as_uri()
+            canonical_rcpt = {
+                "receipt_id": f"rcpt-sigmf-{verified_manifest.capture_id[:16]}",
+                "capture_id": verified_manifest.capture_id,
+                "tenant_id": verified_manifest.tenant_id,
+                "farm_id": verified_manifest.farm_id,
+                "plot_id": verified_manifest.plot_id,
+                "data_sha256": verified_manifest.data_sha256,
+                "meta_sha256": verified_manifest.meta_sha256,
+                "capture_timestamp_utc": verified_manifest.capture_timestamp_utc.isoformat(),
+                "native_data_uri": native_uri,
+                "storage_prefix": verified_prefix,
+            }
+
             return {
                 "status": "MEASURED_IN_SITU_RADIO_WAVES",
                 "physical_waves_measured": True,
@@ -943,8 +981,13 @@ class MesiaProductionService:
                 "presentation_state": "LIVE",
                 "receiver_mount": "IOT_CANOPY_ANCHOR_OR_SOIL_POST",
                 "antenna_height_m": 1.2,
-                "log_source": log_file.name,
-                "sha256": csi_dict["sha256"],
+                "log_source": verified_data_file.name,
+                "native_data_uri": native_uri,
+                "sha256": verified_manifest.data_sha256,
+                "capture_id": verified_manifest.capture_id,
+                "acquisition_time": verified_manifest.capture_timestamp_utc,
+                "canonical_receipt": canonical_rcpt,
+                "receipt_id": canonical_rcpt["receipt_id"],
                 "file_size_bytes": csi_dict["file_size_bytes"],
                 "num_subcarriers": csi_dict["num_subcarriers"],
                 "center_frequency_hz": csi_dict["center_frequency_hz"],
@@ -967,6 +1010,9 @@ class MesiaProductionService:
             return {
                 "status": "IN_SITU_PROCESSING_ERROR",
                 "physical_waves_measured": False,
+                "source_class": "UNVERIFIED",
+                "identity_state": "AWAITING_VERIFIED_CAPTURE",
+                "presentation_state": "UNVERIFIED",
                 "error": str(err),
             }
 
@@ -977,6 +1023,7 @@ class MesiaProductionService:
         data_bytes: bytes = b"",
         meta_json: Optional[Dict[str, Any]] = None,
         plot_id: Optional[str] = None,
+        storage_root: Optional[Union[str, Path]] = None,
     ) -> Dict[str, Any]:
         """Ingests raw SigMF CSI frames recorded inside the plot with atomic content-addressed storage."""
         if plot_namespace is None:
@@ -985,24 +1032,80 @@ class MesiaProductionService:
             else:
                 return {"error": "plot_namespace is required", "status": "REJECTED"}
 
+        if not plot_namespace.is_valid():
+            return {"error": "Invalid plot namespace", "status": "REJECTED"}
+
+        if not data_bytes:
+            return {"error": "Raw data bytes required", "status": "REJECTED"}
+
+        if not meta_json or not isinstance(meta_json, dict):
+            return {"error": "SigMF metadata dictionary required", "status": "REJECTED"}
+
         if len(data_bytes) > 10 * 1024 * 1024:
             return {"error": "SigMF CSI payload exceeds 10MB size limit", "status": "REJECTED"}
 
-        evidence_rec = cls.save_raw_evidence(plot_namespace, data_bytes, extension="sigmf-data", is_quarantined=False)
+        from services.agribrain.mesia.ingestion.sigmf_ingest import (
+            ingest_sigmf_capture,
+            verify_capture_integrity,
+            QuarantinedCaptureException,
+            DEFAULT_STORAGE_ROOT,
+        )
 
-        data_dir = WORKSPACE_ROOT / "services" / "agribrain" / "mesia" / "data"
-        wifi_insitu_dir = data_dir / "insitu" / "wifi"
-        wifi_insitu_dir.mkdir(parents=True, exist_ok=True)
+        effective_root = Path(storage_root or DEFAULT_STORAGE_ROOT)
+        try:
+            manifest = ingest_sigmf_capture(
+                tenant_id=plot_namespace.tenant_id,
+                farm_id=plot_namespace.farm_id,
+                plot_id=plot_namespace.plot_id,
+                raw_data_bytes=data_bytes,
+                metadata_dict=meta_json,
+                storage_root=effective_root,
+            )
+        except QuarantinedCaptureException as qe:
+            return {
+                "status": "QUARANTINED",
+                "error": str(qe),
+                "physical_waves_measured": False,
+            }
+        except (ValueError, TypeError) as err:
+            return {
+                "status": "REJECTED",
+                "error": str(err),
+                "physical_waves_measured": False,
+            }
 
-        data_file = wifi_insitu_dir / f"plot_{plot_namespace.plot_id}_real_field_csi.sigmf-data"
-        meta_file = wifi_insitu_dir / f"plot_{plot_namespace.plot_id}_real_field_csi.sigmf-meta"
-        data_file.write_bytes(data_bytes)
+        # Validate write with verify_capture_integrity
+        if not verify_capture_integrity(manifest, expected_namespace=plot_namespace, storage_root=effective_root):
+            return {
+                "status": "REJECTED",
+                "error": "Capture integrity verification failed post-write",
+                "physical_waves_measured": False,
+            }
 
-        if meta_json:
-            meta_file.write_text(json.dumps(meta_json, indent=2), encoding="utf-8")
+        # Process features for this specific capture
+        res = cls._process_real_in_situ_wifi_csi(
+            plot_namespace=plot_namespace,
+            storage_root=effective_root,
+            target_capture_id=manifest.capture_id,
+        )
 
-        res = cls._process_real_in_situ_wifi_csi(plot_namespace)
-        res["evidence_record"] = evidence_rec
+        # Single canonical receipt referenced across upload, scan, and Layer 0
+        canonical_receipt = {
+            "receipt_id": f"rcpt-sigmf-{manifest.capture_id[:16]}",
+            "capture_id": manifest.capture_id,
+            "tenant_id": manifest.tenant_id,
+            "farm_id": manifest.farm_id,
+            "plot_id": manifest.plot_id,
+            "data_sha256": manifest.data_sha256,
+            "meta_sha256": manifest.meta_sha256,
+            "capture_timestamp_utc": manifest.capture_timestamp_utc.isoformat(),
+            "native_data_uri": Path(manifest.data_path).resolve().as_uri(),
+            "storage_prefix": manifest.storage_prefix,
+        }
+        res["canonical_receipt"] = canonical_receipt
+        res["receipt_id"] = canonical_receipt["receipt_id"]
+        res["capture_id"] = manifest.capture_id
+        res["native_data_uri"] = canonical_receipt["native_data_uri"]
         return res
 
 
@@ -1940,6 +2043,7 @@ class MesiaProductionService:
         soil_type: Optional[str] = None,
         plot_id: Optional[str] = None,
         withheld_observation: Optional[Dict[str, Any]] = None,
+        storage_root: Optional[Union[str, Path]] = None,
     ) -> Dict[str, Any]:
         """
         Runs live multi-radio opportunistic spectrum scan over the parcel polygon.
@@ -1987,7 +2091,10 @@ class MesiaProductionService:
         )
 
         # 1c. Check for authentic in-situ ground-level Wi-Fi CSI radio wave measurements
-        real_in_situ_wifi = cls._process_real_in_situ_wifi_csi(plot_namespace or plot_id)
+        if storage_root is not None:
+            real_in_situ_wifi = cls._process_real_in_situ_wifi_csi(plot_namespace or plot_id, storage_root=storage_root)
+        else:
+            real_in_situ_wifi = cls._process_real_in_situ_wifi_csi(plot_namespace or plot_id)
         has_real_wifi = bool(real_in_situ_wifi.get("physical_waves_measured"))
 
         # 2. Ingest Open-Meteo NWP model soil moisture strata (NWP_REANALYSIS)
@@ -2545,7 +2652,9 @@ class MesiaProductionService:
 
         # Verify optical immunity (Principle P-08), ingest into Layer 0 bridge, and embed TruthEnvelope
         bridge = MesiaAgriBrainBridge(
+            plot_namespace=plot_namespace,
             plot_id=plot_id,
+            storage_root=storage_root,
             target_grid=target_grid,
             grid_dim=(grid_dim, grid_dim),
             boundary_mask=raster_bundle.get("boundary_mask"),
@@ -2559,7 +2668,7 @@ class MesiaProductionService:
                 real_in_situ_gnss["measured_satellites"][0]["satellite_id"] if (has_real_gnss and real_in_situ_gnss.get("measured_satellites")) else (top_sats[0].get("name", "GPS-PRN01") if top_sats else "GPS-PRN01"),
                 vwc_subsurface,
                 real_in_situ_gnss.get("sha256") if has_real_gnss else None,
-                f"file://mesia/evidence/{plot_id}/{real_in_situ_gnss.get('log_source', 'in_situ_gnss.nmea')}" if has_real_gnss else None,
+                real_in_situ_gnss.get("native_data_uri") if has_real_gnss else None,
             ),
             ("mesia_cellular_canopy_water", "CELLULAR_DOWNLINK/v1", "RX_CELLULAR_GIS_METADATA", real_masts[0].get("osm_id", "CELL_MAST_01") if real_masts else "CELL_MAST_01", mean_cwi, None, None),
             ("mesia_dvb_deep_soil_water", "BROADCAST_UHF/v1", "RX_SDR_SURVEY_CHAIN", tda_station["name"], uhf_vwc, None, None),
@@ -2568,6 +2677,7 @@ class MesiaProductionService:
 
         if has_real_wifi:
             wifi_cwi = float(real_in_situ_wifi["canopy_water_index"])
+            wifi_receipt = real_in_situ_wifi.get("canonical_receipt")
             proposals.append({
                 "proposal_id": f"innov-wifi-{plot_id}-{now_utc.strftime('%H%M')}",
                 "feature": "mesia_wifi_csi_canopy_foliar",
@@ -2594,6 +2704,10 @@ class MesiaProductionService:
                 "is_derived_model_inference": True,
                 "physical_waves_measured": True,
                 "target_classification": real_in_situ_wifi.get("target_classification", "BACKGROUND"),
+                "canonical_receipt": wifi_receipt,
+                "receipt_id": real_in_situ_wifi.get("receipt_id"),
+                "capture_id": real_in_situ_wifi.get("capture_id"),
+                "native_artifact_ref": real_in_situ_wifi.get("native_data_uri"),
             })
             lane_packet_configs.append((
                 "mesia_wifi_csi_canopy_foliar",
@@ -2602,7 +2716,7 @@ class MesiaProductionService:
                 real_in_situ_wifi.get("transmitter_mac", "REAL_WIFI_AP"),
                 wifi_cwi,
                 real_in_situ_wifi.get("sha256"),
-                f"file://mesia/evidence/{plot_id}/{real_in_situ_wifi.get('log_source', 'in_situ_wifi.sigmf-data')}",
+                real_in_situ_wifi.get("native_data_uri"),
             ))
 
         asmae_dispatcher = ASMAEObservationDispatcher()
@@ -2615,12 +2729,18 @@ class MesiaProductionService:
             raw_data_str = f"{feat}:{val}:{plot_id}:{now_utc.isoformat()}"
             raw_hash = custom_hash or hashlib.sha256(raw_data_str.encode("utf-8")).hexdigest()
             data_uri = custom_uri or f"file://mesia/evidence/{plot_id}/{pkt_id}.raw"
+            pkt_utc = now_utc
+            if feat == "mesia_wifi_csi_canopy_foliar" and real_in_situ_wifi.get("acquisition_time"):
+                pkt_utc = real_in_situ_wifi["acquisition_time"]
+            elif feat == "mesia_gnssr_in_situ_vwc" and real_in_situ_gnss.get("acquisition_time"):
+                pkt_utc = real_in_situ_gnss["acquisition_time"]
+
             packet = RadioObservationPacket(
                 packet_id=pkt_id,
                 source_profile=profile,
                 receiver_id=rx_id,
                 transmitter_id=str(tx_id),
-                utc_time=now_utc,
+                utc_time=pkt_utc,
                 native_data_uri=data_uri,
                 native_data_hash=raw_hash,
             )
@@ -2648,7 +2768,8 @@ class MesiaProductionService:
             p["is_usable_for_assimilation"] = l0_rec.is_usable_for_assimilation
             # A hash or a plausible file:// URI is not a native capture.
             from services.agribrain.mesia.integration import verify_native_capture_for_plot
-            p["native_capture_present"] = verify_native_capture_for_plot(packet, plot_id)
+            p["native_capture_present"] = verify_native_capture_for_plot(packet, plot_namespace)
+            p["native_artifact_ref"] = packet.native_data_uri
             p["asmae_observation_event"] = asmae_event.to_dict() if asmae_event and hasattr(asmae_event, "to_dict") else None
 
             # Route observation event via ASMAEObservationDispatcher (WP07 / Finding #14)
@@ -2722,10 +2843,10 @@ class MesiaProductionService:
                 # evaluation receipt (including rejection), not an invented
                 # physically measured biological truth.
                 parent_envelope_refs=(l0_rec.record_id,),
-                source_receipt_ref=f"rcpt-packet-{packet.packet_id}" if is_p_live else None,
+                source_receipt_ref=p.get("receipt_id") or (f"rcpt-packet-{packet.packet_id}" if is_p_live else None),
                 calibration_state_ref="CALIB-UNVERIFIED-DEMONSTRATOR" if is_p_live else None,
                 software_epoch_ref="mesia-r6.1",
-                observed_at=now_utc,
+                observed_at=pkt_utc,
                 valid_for_seconds=3600.0,
                 uncertainty=round(gum_budget.expanded_uncertainty, 4),
                 decision_eligible=False,
@@ -3127,6 +3248,7 @@ class MesiaProductionService:
                 "spatial_lattice_1m": spatial_lattice_1m,
             },
             "asmae_p08_proposals": proposals,
+            "evidence_proposals": proposals,
             "closure_certificate": validation_loop_result.get("closure_certificate"),
             "closure_certificate_hash": validation_loop_result.get("closure_certificate_hash"),
             "fleet_health": cls.evaluate_fleet_and_drift_status(plot_namespace or plot_id),

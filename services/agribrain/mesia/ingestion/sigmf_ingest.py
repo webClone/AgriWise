@@ -64,9 +64,10 @@ def ingest_sigmf_capture(
     plot_id: str,
     raw_data_bytes: bytes,
     metadata_dict: Dict[str, Any],
-    storage_root: Optional[Path] = None,
+    storage_root: Optional[Union[str, Path]] = None,
+    farm_id: Optional[str] = None,
 ) -> SigMFCaptureManifest:
-    """Ingest a SigMF CSI/IQ recording with atomic binding and strict tenant scoping.
+    """Ingest a SigMF CSI/IQ recording with atomic binding and strict tenant/farm/plot scoping.
 
     Args:
         tenant_id: Tenant identifier (e.g. 'tenant_algeria_01').
@@ -74,6 +75,7 @@ def ingest_sigmf_capture(
         raw_data_bytes: Raw binary bytes of the .sigmf-data stream.
         metadata_dict: Full SigMF metadata dictionary.
         storage_root: Optional root directory for captures.
+        farm_id: Optional farm identifier (defaults to 'default_farm').
 
     Returns:
         SigMFCaptureManifest binding data and metadata under identical capture_id.
@@ -81,9 +83,10 @@ def ingest_sigmf_capture(
     Raises:
         QuarantinedCaptureException: If metadata lacks valid timestamp, hardware info,
             or binary payload is empty.
-        ValueError: If tenant_id or plot_id contains path traversal elements.
+        ValueError: If tenant_id, farm_id, or plot_id contains path traversal elements.
     """
     tenant_clean = _sanitize_id(tenant_id, "tenant_id")
+    farm_clean = _sanitize_id(farm_id or "default_farm", "farm_id")
     plot_clean = _sanitize_id(plot_id, "plot_id")
 
     if not raw_data_bytes:
@@ -136,9 +139,12 @@ def ingest_sigmf_capture(
     combined_hasher.update(meta_json_bytes)
     capture_id = combined_hasher.hexdigest()
 
-    # 4. Scoped atomic write
+    # 4. Scoped atomic write under farm-isolated namespace
     root = Path(storage_root or DEFAULT_STORAGE_ROOT)
-    dest_dir = root / tenant_clean / plot_clean
+    if farm_id and farm_clean != "default_farm":
+        dest_dir = root / tenant_clean / farm_clean / plot_clean
+    else:
+        dest_dir = root / tenant_clean / plot_clean
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     prefix = dest_dir / capture_id
@@ -165,6 +171,7 @@ def ingest_sigmf_capture(
     manifest = SigMFCaptureManifest(
         capture_id=capture_id,
         tenant_id=tenant_clean,
+        farm_id=farm_clean,
         plot_id=plot_clean,
         capture_timestamp_utc=capture_timestamp,
         data_sha256=data_sha256,
@@ -181,35 +188,217 @@ def ingest_sigmf_capture(
     return manifest
 
 
-def verify_capture_integrity(storage_prefix_or_manifest: Union[str, Path, SigMFCaptureManifest]) -> bool:
-    """Verify that both .sigmf-data and .sigmf-meta exist and match their SHA-256 digests."""
-    if isinstance(storage_prefix_or_manifest, SigMFCaptureManifest):
-        prefix = Path(storage_prefix_or_manifest.storage_prefix)
-        expected_data_sha = storage_prefix_or_manifest.data_sha256
-        expected_meta_sha = storage_prefix_or_manifest.meta_sha256
-    else:
-        p_str = str(storage_prefix_or_manifest)
-        if p_str.endswith(".sigmf-data"):
-            prefix = Path(p_str[:-11])
-        elif p_str.endswith(".sigmf-meta"):
-            prefix = Path(p_str[:-11])
+def verify_capture_integrity(
+    storage_prefix_or_manifest: Union[str, Path, SigMFCaptureManifest],
+    expected_namespace: Optional[Any] = None,
+    storage_root: Optional[Union[str, Path]] = None,
+) -> bool:
+    """Verify that .sigmf-data, .sigmf-meta, and .manifest.json exist, are non-symlink,
+    and mutually bind data, metadata, manifest, namespace, and content-addressed capture_id.
+    """
+    try:
+        expected_tenant: Optional[str] = None
+        expected_farm: Optional[str] = None
+        expected_plot: Optional[str] = None
+        if expected_namespace is not None:
+            if hasattr(expected_namespace, "tenant_id") and hasattr(expected_namespace, "plot_id"):
+                expected_tenant = _sanitize_id(str(expected_namespace.tenant_id), "tenant_id")
+                expected_plot = _sanitize_id(str(expected_namespace.plot_id), "plot_id")
+                if hasattr(expected_namespace, "farm_id") and expected_namespace.farm_id:
+                    expected_farm = _sanitize_id(str(expected_namespace.farm_id), "farm_id")
+            elif isinstance(expected_namespace, dict):
+                expected_tenant = _sanitize_id(str(expected_namespace.get("tenant_id") or ""), "tenant_id")
+                expected_plot = _sanitize_id(str(expected_namespace.get("plot_id") or ""), "plot_id")
+                if expected_namespace.get("farm_id"):
+                    expected_farm = _sanitize_id(str(expected_namespace["farm_id"]), "farm_id")
+            elif isinstance(expected_namespace, str) and ":" in expected_namespace:
+                parts = expected_namespace.split(":")
+                if len(parts) >= 3 and parts[0] and parts[2]:
+                    expected_tenant = _sanitize_id(parts[0], "tenant_id")
+                    if parts[1]:
+                        expected_farm = _sanitize_id(parts[1], "farm_id")
+                    expected_plot = _sanitize_id(parts[2], "plot_id")
+
+        if isinstance(storage_prefix_or_manifest, SigMFCaptureManifest):
+            prefix = Path(storage_prefix_or_manifest.storage_prefix)
+            expected_data_sha = storage_prefix_or_manifest.data_sha256.lower()
+            expected_meta_sha = storage_prefix_or_manifest.meta_sha256.lower()
+            expected_capture_id = storage_prefix_or_manifest.capture_id.lower()
+            manifest_tenant = _sanitize_id(storage_prefix_or_manifest.tenant_id, "tenant_id")
+            manifest_farm = _sanitize_id(getattr(storage_prefix_or_manifest, "farm_id", "default_farm") or "default_farm", "farm_id")
+            manifest_plot = _sanitize_id(storage_prefix_or_manifest.plot_id, "plot_id")
+            if expected_tenant and manifest_tenant != expected_tenant:
+                return False
+            if manifest_farm != "default_farm" and manifest_farm != expected_farm:
+                return False
+            if expected_plot and manifest_plot != expected_plot:
+                return False
+            expected_tenant = manifest_tenant
+            expected_farm = manifest_farm
+            expected_plot = manifest_plot
         else:
-            prefix = Path(p_str)
-        expected_data_sha = None
-        expected_meta_sha = None
+            p_str = str(storage_prefix_or_manifest).strip()
+            if p_str.startswith("file://"):
+                from urllib.parse import urlsplit
+                from urllib.request import url2pathname
+                parsed = urlsplit(p_str)
+                p_str = url2pathname(parsed.path)
+            if p_str.endswith(".sigmf-data"):
+                prefix = Path(p_str[:-11])
+            elif p_str.endswith(".sigmf-meta"):
+                prefix = Path(p_str[:-11])
+            elif p_str.endswith(".manifest.json"):
+                prefix = Path(p_str[:-14])
+            else:
+                prefix = Path(p_str)
+            expected_data_sha = None
+            expected_meta_sha = None
+            expected_capture_id = None
 
-    data_file = prefix.parent / f"{prefix.name}.sigmf-data"
-    meta_file = prefix.parent / f"{prefix.name}.sigmf-meta"
+        dest_dir = prefix.parent
+        capture_stem = prefix.name
 
-    if not data_file.exists() or not meta_file.exists():
+        data_file = dest_dir / f"{capture_stem}.sigmf-data"
+        meta_file = dest_dir / f"{capture_stem}.sigmf-meta"
+        manifest_file = dest_dir / f"{capture_stem}.manifest.json"
+
+        # 1. Existence and regular file checks
+        if not data_file.is_file() or not meta_file.is_file() or not manifest_file.is_file():
+            return False
+
+        # 2. Strict symlink rejection
+        if data_file.is_symlink() or meta_file.is_symlink() or manifest_file.is_symlink():
+            return False
+
+        # 3. Read and hash data payload
+        raw_data_bytes = data_file.read_bytes()
+        if not raw_data_bytes:
+            return False
+        actual_data_sha = hashlib.sha256(raw_data_bytes).hexdigest().lower()
+        if expected_data_sha and actual_data_sha != expected_data_sha:
+            return False
+
+        # 4. Read and hash meta payload
+        meta_json_bytes = meta_file.read_bytes()
+        if not meta_json_bytes:
+            return False
+        actual_meta_sha = hashlib.sha256(meta_json_bytes).hexdigest().lower()
+        if expected_meta_sha and actual_meta_sha != expected_meta_sha:
+            return False
+
+        # 5. Compute combined capture_id
+        combined_hasher = hashlib.sha256()
+        combined_hasher.update(raw_data_bytes)
+        combined_hasher.update(meta_json_bytes)
+        computed_capture_id = combined_hasher.hexdigest().lower()
+
+        # Stem must match computed capture ID
+        if capture_stem.lower() != computed_capture_id:
+            return False
+        if expected_capture_id and expected_capture_id != computed_capture_id:
+            return False
+
+        # 6. Parse and validate metadata dictionary
+        try:
+            metadata_dict = json.loads(meta_json_bytes.decode("utf-8"))
+            if not isinstance(metadata_dict, dict):
+                return False
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return False
+
+        embedded_data_sha = str(metadata_dict.get("global", {}).get("core:sha256", "")).lower()
+        if not embedded_data_sha or embedded_data_sha != actual_data_sha:
+            return False
+
+        captures = metadata_dict.get("captures")
+        if not isinstance(captures, list) or not captures or not isinstance(captures[0], dict):
+            return False
+        if not captures[0].get("core:datetime"):
+            return False
+
+        # 7. Parse and validate manifest dictionary
+        try:
+            manifest_dict = json.loads(manifest_file.read_text(encoding="utf-8"))
+            if not isinstance(manifest_dict, dict):
+                return False
+        except (OSError, json.JSONDecodeError):
+            return False
+
+        if str(manifest_dict.get("capture_id", "")).lower() != computed_capture_id:
+            return False
+        if str(manifest_dict.get("data_sha256", "")).lower() != actual_data_sha:
+            return False
+        if str(manifest_dict.get("meta_sha256", "")).lower() != actual_meta_sha:
+            return False
+
+        for req_field in ("tenant_id", "plot_id", "capture_timestamp_utc", "radio_profile", "packet_count", "storage_prefix"):
+            if req_field not in manifest_dict or manifest_dict[req_field] is None:
+                return False
+
+        manifest_tenant = _sanitize_id(str(manifest_dict.get("tenant_id", "")), "tenant_id")
+        manifest_farm = _sanitize_id(str(manifest_dict.get("farm_id") or "default_farm"), "farm_id")
+        manifest_plot = _sanitize_id(str(manifest_dict.get("plot_id", "")), "plot_id")
+
+        if expected_tenant and manifest_tenant != expected_tenant:
+            return False
+        if expected_plot and manifest_plot != expected_plot:
+            return False
+        if manifest_farm != "default_farm" and manifest_farm != expected_farm:
+            return False
+
+        # Cross-check capture_timestamp_utc with captures[0]["core:datetime"]
+        meta_dt_str = str(captures[0].get("core:datetime", "")).strip()
+        manifest_dt_str = str(manifest_dict.get("capture_timestamp_utc", "")).strip()
+        if not meta_dt_str or not manifest_dt_str:
+            return False
+        try:
+            meta_dt = parse_capture_timestamp(meta_dt_str)
+            manifest_dt = parse_capture_timestamp(manifest_dt_str)
+            if meta_dt != manifest_dt:
+                return False
+        except QuarantinedCaptureException:
+            return False
+
+        # Cross-check manifest storage_prefix against verified capture prefix
+        manifest_storage_prefix = str(manifest_dict.get("storage_prefix", "")).strip()
+        if not manifest_storage_prefix:
+            return False
+        manifest_prefix_path = Path(manifest_storage_prefix)
+        if manifest_prefix_path.name.lower() != computed_capture_id:
+            return False
+        if manifest_prefix_path.is_absolute():
+            try:
+                if manifest_prefix_path.resolve() != prefix.resolve():
+                    return False
+            except (OSError, ValueError):
+                return False
+        else:
+            parts = manifest_prefix_path.parts
+            if len(parts) >= 3:
+                if parts[-1].lower() != computed_capture_id or parts[-2] != manifest_plot:
+                    return False
+                if len(parts) >= 4 and manifest_farm != "default_farm" and parts[-3] != manifest_farm:
+                    return False
+
+        # 8. Verify directory namespace hierarchy matches manifest
+        resolved_dest = dest_dir.resolve(strict=True)
+        parts = resolved_dest.parts
+        if len(parts) >= 3 and parts[-3] == manifest_tenant and parts[-2] == manifest_farm and parts[-1] == manifest_plot:
+            pass
+        elif len(parts) >= 2 and parts[-2] == manifest_tenant and parts[-1] == manifest_plot:
+            if manifest_farm != "default_farm" and expected_farm and expected_farm != manifest_farm:
+                return False
+        else:
+            return False
+
+        # 9. Verify strictly within storage root if provided
+        if storage_root is not None:
+            resolved_root = Path(storage_root).resolve(strict=True)
+            try:
+                resolved_dest.relative_to(resolved_root)
+            except ValueError:
+                return False
+
+        return True
+    except Exception:
         return False
-
-    actual_data_sha = hashlib.sha256(data_file.read_bytes()).hexdigest()
-    actual_meta_sha = hashlib.sha256(meta_file.read_bytes()).hexdigest()
-
-    if expected_data_sha and actual_data_sha != expected_data_sha:
-        return False
-    if expected_meta_sha and actual_meta_sha != expected_meta_sha:
-        return False
-
-    return True
