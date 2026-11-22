@@ -489,3 +489,139 @@ def test_negative_control_tampered_numerical_hash_rejected():
     assert admission["is_valid"] is False
     assert admission["status"] == "quarantined"
     assert "numericalBindingValid" in admission["invalid_integrity_flags"]
+
+
+def test_adversarial_diagnostic_classification_cannot_suppress_contradictory_numerical_evidence():
+    """Adversarial check: A caller cannot supply DIAGNOSTIC_ONLY to suppress contradictory numerical evidence."""
+    plot_id = "parcel-adv-suppress"
+    ns = PlotNamespace(tenant_id="tenant-adv", farm_id="farm-adv", plot_id=plot_id)
+
+    # 1. Scientific result contains a certified numerical digest
+    res = _base_diagnostic_asmae_result(plot_id=plot_id)
+    res["asmae_numerical_digest"] = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    ref = snapshot_store.publish_latest_snapshot(res, context_hash="ctx-adv", geometry_hash="geom-adv")
+    res["snapshot_ref"] = ref
+    snap_id = res["snapshot_id"]
+    fe_payload = _base_diagnostic_frontend_payload(snap_id, plot_id=plot_id)
+
+    # Attempting to declare DIAGNOSTIC_ONLY while numerical digest is present fails closed
+    with pytest.raises(ValueError, match="contradicts certified numerical posterior in scientific_result"):
+        plot_snapshot_store.publish_canonical_plot_snapshot(
+            namespace=ns,
+            geometry_hash="geom-adv",
+            snapshot_id=snap_id,
+            asmae_result=res,
+            frontend_payload=fe_payload,
+            job_id="job-adv-1",
+            manifest_hash="manifest-adv-1",
+            publication_authority="DIAGNOSTIC_ONLY",
+        )
+
+    # 2. Scientific result explicitly claims numerical authority
+    res2 = _base_diagnostic_asmae_result(plot_id=plot_id)
+    res2["claims_numerical_authority"] = True
+    ref2 = snapshot_store.publish_latest_snapshot(res2, context_hash="ctx-adv-2", geometry_hash="geom-adv-2")
+    res2["snapshot_ref"] = ref2
+    snap_id2 = res2["snapshot_id"]
+    fe_payload2 = _base_diagnostic_frontend_payload(snap_id2, plot_id=plot_id)
+
+    with pytest.raises(ValueError, match="contradicts explicit claims_numerical_authority=True"):
+        plot_snapshot_store.publish_canonical_plot_snapshot(
+            namespace=ns,
+            geometry_hash="geom-adv-2",
+            snapshot_id=snap_id2,
+            asmae_result=res2,
+            frontend_payload=fe_payload2,
+            job_id="job-adv-2",
+            manifest_hash="manifest-adv-2",
+            publication_authority="DIAGNOSTIC_ONLY",
+        )
+
+    # 3. Frontend payload contains asmae_posterior_numerical_record
+    res3 = _base_diagnostic_asmae_result(plot_id=plot_id)
+    ref3 = snapshot_store.publish_latest_snapshot(res3, context_hash="ctx-adv-3", geometry_hash="geom-adv-3")
+    res3["snapshot_ref"] = ref3
+    snap_id3 = res3["snapshot_id"]
+    fe_payload3 = _base_diagnostic_frontend_payload(snap_id3, plot_id=plot_id)
+    fe_payload3["asmae_posterior_numerical_record"] = {
+        "states": {"root_zone_moisture": 0.4},
+        "sigmas": {"root_zone_moisture": 0.02},
+        "numerical_vector_hash": "mock_hash",
+    }
+
+    with pytest.raises(ValueError, match="contradicts numerical posterior record in frontend_payload"):
+        plot_snapshot_store.publish_canonical_plot_snapshot(
+            namespace=ns,
+            geometry_hash="geom-adv-3",
+            snapshot_id=snap_id3,
+            asmae_result=res3,
+            frontend_payload=fe_payload3,
+            job_id="job-adv-3",
+            manifest_hash="manifest-adv-3",
+            publication_authority="DIAGNOSTIC_ONLY",
+        )
+
+
+def test_adversarial_tampered_diagnostic_snapshot_with_numerical_digest_quarantined_on_read():
+    """Adversarial check: A disk snapshot claiming DIAGNOSTIC_ONLY but possessing numerical evidence is quarantined."""
+    plot_id = "parcel-adv-tamper-read"
+    ns = PlotNamespace(tenant_id="tenant-adv-read", farm_id="farm-adv-read", plot_id=plot_id)
+
+    res = _base_diagnostic_asmae_result(plot_id=plot_id)
+    ref = snapshot_store.publish_latest_snapshot(res, context_hash="ctx-adv-read", geometry_hash="geom-adv-read")
+    res["snapshot_ref"] = ref
+    snap_id = res["snapshot_id"]
+    fe_payload = _base_diagnostic_frontend_payload(snap_id, plot_id=plot_id)
+
+    # Publish clean diagnostic snapshot
+    head = plot_snapshot_store.publish_canonical_plot_snapshot(
+        namespace=ns,
+        geometry_hash="geom-adv-read",
+        snapshot_id=snap_id,
+        asmae_result=res,
+        frontend_payload=fe_payload,
+        job_id="job-adv-read",
+        manifest_hash="manifest-adv-read",
+        publication_authority="DIAGNOSTIC_ONLY",
+    )
+
+    # Now tamper with the node file on disk by injecting contradictory numerical digest
+    node_path = Path(head["node_ref"])
+    import json
+    with open(node_path, "r", encoding="utf-8") as f:
+        node_data = json.load(f)
+
+    # Inject contradictory numerical digest into asmae / scientific_result
+    if "asmae" in node_data:
+        node_data["asmae"]["asmae_numerical_digest"] = "sha256:contradictory_numerical_digest_12345"
+    if "scientific_result" in node_data:
+        node_data["scientific_result"]["asmae_numerical_digest"] = "sha256:contradictory_numerical_digest_12345"
+    if "asmae" not in node_data and "scientific_result" not in node_data:
+        node_data["asmae"] = {"asmae_numerical_digest": "sha256:contradictory_numerical_digest_12345"}
+
+    # Recompute node hash to simulate sophisticated attacker
+    hashable = {k: v for k, v in node_data.items() if not k.endswith("_ref") and k != "node_hash"}
+    import hashlib
+    node_data["node_hash"] = hashlib.sha256(json.dumps(hashable, sort_keys=True).encode("utf-8")).hexdigest()
+
+    with open(node_path, "w", encoding="utf-8") as f:
+        json.dump(node_data, f)
+
+    # Also update head's node_hash to match
+    head_path = plot_snapshot_store._head_path(ns)
+    with open(head_path, "r", encoding="utf-8") as f:
+        head_data = json.load(f)
+    head_data["node_hash"] = node_data["node_hash"]
+    with open(head_path, "w", encoding="utf-8") as f:
+        json.dump(head_data, f)
+
+    # Reader must detect the contradiction: DIAGNOSTIC_ONLY cannot possess numerical digest
+    loaded = plot_snapshot_store.load_latest_plot_snapshot(ns, force_verify=True)
+    assert loaded is not None
+    assert loaded["contract_validation"]["authority_agreement_valid"] is False
+
+    admission = plot_snapshot_store.evaluate_snapshot_admission(loaded, ns)
+    assert admission["is_valid"] is False
+    assert admission["status"] == "quarantined"
+    assert "authorityAgreementValid" in admission["invalid_integrity_flags"]
+

@@ -51,34 +51,51 @@ def resolve_publication_authority(
     - DIAGNOSTIC_ONLY: Bounded diagnostic observations without numerical state certification.
     - CONTAINED_PROPOSAL: Contained experimental proposal for simulation/what-if evaluation.
     """
-    if publication_authority and str(publication_authority).strip().upper() in VALID_PUBLICATION_AUTHORITIES:
-        return str(publication_authority).strip().upper()
-
     fe = frontend_payload or {}
-    fe_auth = fe.get("publication_authority")
-    if fe_auth and str(fe_auth).strip().upper() in VALID_PUBLICATION_AUTHORITIES:
-        return str(fe_auth).strip().upper()
-
     sci = scientific_result or {}
-    sci_auth = sci.get("publication_authority")
-    if sci_auth and str(sci_auth).strip().upper() in VALID_PUBLICATION_AUTHORITIES:
-        return str(sci_auth).strip().upper()
+
+    has_numerical_evidence = bool(
+        sci.get("asmae_numerical_digest")
+        or (sci.get("state_means") and sci.get("state_covariances"))
+        or (fe.get("asmae_posterior_numerical_record") and (fe.get("asmae_proof") or {}).get("numerical_vector_hash"))
+        or sci.get("claims_numerical_authority") is True
+        or fe.get("claims_numerical_authority") is True
+    )
+
+    explicit_auth: Optional[str] = None
+    if publication_authority and str(publication_authority).strip().upper() in VALID_PUBLICATION_AUTHORITIES:
+        explicit_auth = str(publication_authority).strip().upper()
+    elif fe.get("publication_authority") and str(fe.get("publication_authority")).strip().upper() in VALID_PUBLICATION_AUTHORITIES:
+        explicit_auth = str(fe.get("publication_authority")).strip().upper()
+    elif sci.get("publication_authority") and str(sci.get("publication_authority")).strip().upper() in VALID_PUBLICATION_AUTHORITIES:
+        explicit_auth = str(sci.get("publication_authority")).strip().upper()
+
+    if explicit_auth:
+        if explicit_auth in ("DIAGNOSTIC_ONLY", "CONTAINED_PROPOSAL"):
+            if sci.get("claims_numerical_authority") is True or fe.get("claims_numerical_authority") is True:
+                raise ValueError(
+                    f"Publication authority '{explicit_auth}' contradicts explicit claims_numerical_authority=True in evidence"
+                )
+            if sci.get("asmae_numerical_digest") or (sci.get("state_means") and sci.get("state_covariances")):
+                raise ValueError(
+                    f"Publication authority '{explicit_auth}' contradicts certified numerical posterior in scientific_result"
+                )
+            if fe.get("asmae_posterior_numerical_record") or (fe.get("asmae_proof") or {}).get("numerical_vector_hash"):
+                raise ValueError(
+                    f"Publication authority '{explicit_auth}' contradicts numerical posterior record in frontend_payload"
+                )
+        return explicit_auth
 
     # Explicit disclaimers
     if fe.get("claims_numerical_authority") is False or sci.get("claims_numerical_authority") is False:
+        if sci.get("asmae_numerical_digest") or (sci.get("state_means") and sci.get("state_covariances")) or fe.get("asmae_posterior_numerical_record"):
+            raise ValueError("Contradictory evidence: claims_numerical_authority=False but numerical posterior is present")
         if fe.get("contained_proposal") is True or sci.get("contained_proposal") is True:
             return "CONTAINED_PROPOSAL"
         return "DIAGNOSTIC_ONLY"
 
     # Explicit claims or numerical records
-    if (
-        fe.get("claims_numerical_authority") is True
-        or fe.get("numerical_authority_claimed") is True
-        or sci.get("claims_numerical_authority") is True
-        or sci.get("asmae_numerical_digest")
-        or (sci.get("state_means") and sci.get("state_covariances"))
-        or (fe.get("asmae_posterior_numerical_record") and (fe.get("asmae_proof") or {}).get("numerical_vector_hash"))
-    ):
+    if has_numerical_evidence:
         return "CERTIFIED_NUMERICAL"
 
     return "DIAGNOSTIC_ONLY"
@@ -864,6 +881,19 @@ def evaluate_snapshot_admission(
             invalid_integrity.append("numericalBindingValid")
         if validation.get("nodeAgreementValid") is False:
             invalid_integrity.append("nodeAgreementValid")
+        if validation.get("authorityAgreementValid") is False:
+            invalid_integrity.append("authorityAgreementValid")
+        sci_res = snapshot.get("asmae") or snapshot.get("scientific_result") or {}
+        if (
+            sci_res.get("asmae_numerical_digest")
+            or (sci_res.get("state_means") and sci_res.get("state_covariances"))
+            or fe_payload.get("asmae_posterior_numerical_record")
+            or (fe_payload.get("asmae_proof") or {}).get("numerical_vector_hash")
+            or fe_payload.get("claims_numerical_authority") is True
+            or sci_res.get("claims_numerical_authority") is True
+        ):
+            if "authorityAgreementValid" not in invalid_integrity:
+                invalid_integrity.append("authorityAgreementValid")
     elif pub_auth == "CONTAINED_PROPOSAL":
         if validation.get("numericalBindingValid") is False:
             invalid_integrity.append("numericalBindingValid")
@@ -1339,8 +1369,13 @@ def load_latest_plot_snapshot(
         or node.get("publication_authority")
         or publication_frontend.get("publication_authority")
     )
-    if fe_pub_auth == "DIAGNOSTIC_ONLY" or publication_frontend.get("claims_numerical_authority") is False:
+    authority_agreement_valid = True
+    if fe_pub_auth in ("DIAGNOSTIC_ONLY", "CONTAINED_PROPOSAL"):
         claims_numerical_authority = False
+        if node_num_hash or num_rec or (node.get("asmae") or {}).get("state_means"):
+            authority_agreement_valid = False
+            node_agreement_valid = False
+            numerical_binding_valid = False
     elif fe_pub_auth == "CERTIFIED_NUMERICAL":
         claims_numerical_authority = True
     else:
@@ -1414,6 +1449,7 @@ def load_latest_plot_snapshot(
         "temporalBindingValid": temporal_binding_valid,
         "numericalBindingValid": numerical_binding_valid,
         "nodeAgreementValid": bool(node_agreement_valid),
+        "authorityAgreementValid": bool(authority_agreement_valid),
         "replayReceiptValid": replay_receipt_valid,
         "bindingValid": bool(
             head.get("snapshot_id") == snapshot_id
@@ -1484,7 +1520,8 @@ def load_latest_plot_snapshot(
         "contract_reason": effective_contract_reason,
         "declared_status_reason": declared_status_reason,
         "numerical_binding_valid": numerical_binding_valid,
-        "numerical_authority_verified": bool(numerical_binding_valid is True and node_agreement_valid),
+        "numerical_authority_verified": bool(numerical_binding_valid is True and node_agreement_valid and authority_agreement_valid),
+        "authority_agreement_valid": bool(authority_agreement_valid),
         "publication_authority": node["publication_authority"],
     }
     if numerical_binding_valid is False or not node_agreement_valid:
@@ -1745,8 +1782,13 @@ def load_and_validate_plot_snapshot_by_id(
         or node.get("publication_authority")
         or publication_frontend.get("publication_authority")
     )
-    if fe_pub_auth == "DIAGNOSTIC_ONLY" or publication_frontend.get("claims_numerical_authority") is False:
+    authority_agreement_valid = True
+    if fe_pub_auth in ("DIAGNOSTIC_ONLY", "CONTAINED_PROPOSAL"):
         claims_numerical_authority = False
+        if node_num_hash or num_rec or (node.get("asmae") or {}).get("state_means"):
+            authority_agreement_valid = False
+            node_agreement_valid = False
+            numerical_binding_valid = False
     elif fe_pub_auth == "CERTIFIED_NUMERICAL":
         claims_numerical_authority = True
     else:
@@ -1813,6 +1855,7 @@ def load_and_validate_plot_snapshot_by_id(
         "temporalBindingValid": temporal_binding_valid,
         "numericalBindingValid": numerical_binding_valid,
         "nodeAgreementValid": bool(node_agreement_valid),
+        "authorityAgreementValid": bool(authority_agreement_valid),
         "replayReceiptValid": replay_receipt_valid,
         "bindingValid": bool(
             publication.get("snapshot_id") == snapshot_id
@@ -1873,7 +1916,8 @@ def load_and_validate_plot_snapshot_by_id(
         "publication_status_valid": validation_flags["publicationStatusValid"],
         "published_schema_version": published_schema_version,
         "derived_publication_status": derived_publication_status,
-        "numerical_authority_verified": bool(numerical_binding_valid is True),
+        "numerical_authority_verified": bool(numerical_binding_valid is True and node_agreement_valid and authority_agreement_valid),
+        "authority_agreement_valid": bool(authority_agreement_valid),
         "temporal_binding_verified": bool(temporal_binding_valid),
         "publication_authority": node["publication_authority"],
     }

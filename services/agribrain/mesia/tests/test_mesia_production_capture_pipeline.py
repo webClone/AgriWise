@@ -14,6 +14,7 @@ Validates Lane 1 MESIA Production Capture Remediation:
 import base64
 import json
 import math
+import uuid
 import numpy as np
 import pytest
 from datetime import datetime, timezone, timedelta
@@ -22,6 +23,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from services.agribrain.app.main import app, require_internal_service_request
+from services.agribrain.app.internal_service_auth import compute_request_signature
 from services.agribrain.common.plot_namespace import PlotNamespace
 from services.agribrain.mesia.contracts.capture_manifest import SigMFCaptureManifest
 from services.agribrain.mesia.ingestion import sigmf_ingest
@@ -388,3 +390,84 @@ def test_unobserved_plot_baseline():
                 assert p.get("presentation_state") != "LIVE"
     finally:
         app.dependency_overrides.clear()
+
+
+def test_genuine_signed_internal_service_authentication_pipeline(test_storage):
+    """Exit Gate 8: Genuine signed HMAC authentication without dependency overrides."""
+    client = TestClient(app)
+    app.dependency_overrides.clear()  # Ensure strictly zero overrides
+
+    tenant_id = "tenant_genuine_hmac"
+    farm_id = "farm_genuine_hmac"
+    plot_id = "parcel_genuine_hmac_99"
+
+    capture_time = datetime(2026, 11, 22, 16, 0, 0, tzinfo=timezone.utc)
+    raw_bytes, meta_dict = _generate_synthetic_wifi_sigmf(capture_time)
+    data_b64 = base64.b64encode(raw_bytes).decode("ascii")
+
+    payload_dict = {"data_b64": data_b64, "meta_json": meta_dict}
+    body_bytes = json.dumps(payload_dict).encode("utf-8")
+
+    import time
+    timestamp = str(time.time())
+    nonce = uuid.uuid4().hex
+    path = "/v2/mesia/ingest-sigmf-csi"
+
+    # Compute genuine RFC 3986 canonical HMAC-SHA256 signature
+    sig = compute_request_signature(
+        method="POST",
+        path=path,
+        query_string="",
+        tenant_id=tenant_id,
+        farm_id=farm_id,
+        plot_id=plot_id,
+        body_bytes=body_bytes,
+        timestamp=timestamp,
+        nonce=nonce,
+        key_version="v1",
+    )
+
+    headers = {
+        "X-AgriBrain-Signature": sig,
+        "X-AgriBrain-Timestamp": timestamp,
+        "X-AgriBrain-Nonce": nonce,
+        "X-AgriBrain-Key-Version": "v1",
+        "X-Tenant-Id": tenant_id,
+        "X-Farm-Id": farm_id,
+        "X-Plot-Id": plot_id,
+        "Content-Type": "application/json",
+    }
+
+    # 1. Genuine signed request succeeds through real require_internal_service_request
+    resp = client.post(path, content=body_bytes, headers=headers)
+    assert resp.status_code == 200, f"Signed upload failed: {resp.text}"
+    resp_data = resp.json()
+    assert resp_data["status"] == "MEASURED_IN_SITU_RADIO_WAVES"
+    assert resp_data["physical_waves_measured"] is True
+    capture_id = resp_data["capture_id"]
+
+    # Verify storage partition matches authenticated namespace exactly
+    dest_dir = test_storage / tenant_id / farm_id / plot_id
+    assert dest_dir.is_dir()
+    assert (dest_dir / f"{capture_id}.sigmf-meta").is_file()
+    assert (dest_dir / f"{capture_id}.sigmf-data").is_file()
+    assert (dest_dir / f"{capture_id}.manifest.json").is_file()
+
+    # 2. Tampered body fails closed (401 Unauthorized)
+    tampered_body = json.dumps({"data_b64": data_b64, "meta_json": {**meta_dict, "tampered": True}}).encode("utf-8")
+    resp_tampered = client.post(path, content=tampered_body, headers=headers)
+    assert resp_tampered.status_code == 401
+
+    # 3. Tampered signature fails closed (401 Unauthorized)
+    headers_bad_sig = {**headers, "X-AgriBrain-Signature": "deadbeef" * 8, "X-AgriBrain-Nonce": uuid.uuid4().hex}
+    resp_bad_sig = client.post(path, content=body_bytes, headers=headers_bad_sig)
+    assert resp_bad_sig.status_code == 401
+
+    # 4. Missing headers fails closed (401 Unauthorized)
+    resp_no_headers = client.post(path, content=body_bytes)
+    assert resp_no_headers.status_code == 401
+
+    # 5. Replay attack with same nonce fails closed (401 Unauthorized)
+    resp_replay = client.post(path, content=body_bytes, headers=headers)
+    assert resp_replay.status_code == 401
+
