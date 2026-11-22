@@ -64,9 +64,10 @@ def ingest_sigmf_capture(
     plot_id: str,
     raw_data_bytes: bytes,
     metadata_dict: Dict[str, Any],
-    storage_root: Optional[Path] = None,
+    storage_root: Optional[Union[str, Path]] = None,
+    farm_id: Optional[str] = None,
 ) -> SigMFCaptureManifest:
-    """Ingest a SigMF CSI/IQ recording with atomic binding and strict tenant scoping.
+    """Ingest a SigMF CSI/IQ recording with atomic binding and strict tenant/farm/plot scoping.
 
     Args:
         tenant_id: Tenant identifier (e.g. 'tenant_algeria_01').
@@ -74,6 +75,7 @@ def ingest_sigmf_capture(
         raw_data_bytes: Raw binary bytes of the .sigmf-data stream.
         metadata_dict: Full SigMF metadata dictionary.
         storage_root: Optional root directory for captures.
+        farm_id: Optional farm identifier (defaults to 'default_farm').
 
     Returns:
         SigMFCaptureManifest binding data and metadata under identical capture_id.
@@ -81,9 +83,10 @@ def ingest_sigmf_capture(
     Raises:
         QuarantinedCaptureException: If metadata lacks valid timestamp, hardware info,
             or binary payload is empty.
-        ValueError: If tenant_id or plot_id contains path traversal elements.
+        ValueError: If tenant_id, farm_id, or plot_id contains path traversal elements.
     """
     tenant_clean = _sanitize_id(tenant_id, "tenant_id")
+    farm_clean = _sanitize_id(farm_id or "default_farm", "farm_id")
     plot_clean = _sanitize_id(plot_id, "plot_id")
 
     if not raw_data_bytes:
@@ -136,9 +139,12 @@ def ingest_sigmf_capture(
     combined_hasher.update(meta_json_bytes)
     capture_id = combined_hasher.hexdigest()
 
-    # 4. Scoped atomic write
+    # 4. Scoped atomic write under farm-isolated namespace
     root = Path(storage_root or DEFAULT_STORAGE_ROOT)
-    dest_dir = root / tenant_clean / plot_clean
+    if farm_id and farm_clean != "default_farm":
+        dest_dir = root / tenant_clean / farm_clean / plot_clean
+    else:
+        dest_dir = root / tenant_clean / plot_clean
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     prefix = dest_dir / capture_id
@@ -165,6 +171,7 @@ def ingest_sigmf_capture(
     manifest = SigMFCaptureManifest(
         capture_id=capture_id,
         tenant_id=tenant_clean,
+        farm_id=farm_clean,
         plot_id=plot_clean,
         capture_timestamp_utc=capture_timestamp,
         data_sha256=data_sha256,
@@ -191,18 +198,25 @@ def verify_capture_integrity(
     """
     try:
         expected_tenant: Optional[str] = None
+        expected_farm: Optional[str] = None
         expected_plot: Optional[str] = None
         if expected_namespace is not None:
             if hasattr(expected_namespace, "tenant_id") and hasattr(expected_namespace, "plot_id"):
                 expected_tenant = _sanitize_id(str(expected_namespace.tenant_id), "tenant_id")
                 expected_plot = _sanitize_id(str(expected_namespace.plot_id), "plot_id")
+                if hasattr(expected_namespace, "farm_id") and expected_namespace.farm_id:
+                    expected_farm = _sanitize_id(str(expected_namespace.farm_id), "farm_id")
             elif isinstance(expected_namespace, dict):
                 expected_tenant = _sanitize_id(str(expected_namespace.get("tenant_id") or ""), "tenant_id")
                 expected_plot = _sanitize_id(str(expected_namespace.get("plot_id") or ""), "plot_id")
+                if expected_namespace.get("farm_id"):
+                    expected_farm = _sanitize_id(str(expected_namespace["farm_id"]), "farm_id")
             elif isinstance(expected_namespace, str) and ":" in expected_namespace:
                 parts = expected_namespace.split(":")
                 if len(parts) >= 3 and parts[0] and parts[2]:
                     expected_tenant = _sanitize_id(parts[0], "tenant_id")
+                    if parts[1]:
+                        expected_farm = _sanitize_id(parts[1], "farm_id")
                     expected_plot = _sanitize_id(parts[2], "plot_id")
 
         if isinstance(storage_prefix_or_manifest, SigMFCaptureManifest):
@@ -211,12 +225,16 @@ def verify_capture_integrity(
             expected_meta_sha = storage_prefix_or_manifest.meta_sha256.lower()
             expected_capture_id = storage_prefix_or_manifest.capture_id.lower()
             manifest_tenant = _sanitize_id(storage_prefix_or_manifest.tenant_id, "tenant_id")
+            manifest_farm = _sanitize_id(getattr(storage_prefix_or_manifest, "farm_id", "default_farm") or "default_farm", "farm_id")
             manifest_plot = _sanitize_id(storage_prefix_or_manifest.plot_id, "plot_id")
             if expected_tenant and manifest_tenant != expected_tenant:
+                return False
+            if manifest_farm != "default_farm" and manifest_farm != expected_farm:
                 return False
             if expected_plot and manifest_plot != expected_plot:
                 return False
             expected_tenant = manifest_tenant
+            expected_farm = manifest_farm
             expected_plot = manifest_plot
         else:
             p_str = str(storage_prefix_or_manifest).strip()
@@ -318,11 +336,14 @@ def verify_capture_integrity(
                 return False
 
         manifest_tenant = _sanitize_id(str(manifest_dict.get("tenant_id", "")), "tenant_id")
+        manifest_farm = _sanitize_id(str(manifest_dict.get("farm_id") or "default_farm"), "farm_id")
         manifest_plot = _sanitize_id(str(manifest_dict.get("plot_id", "")), "plot_id")
 
         if expected_tenant and manifest_tenant != expected_tenant:
             return False
         if expected_plot and manifest_plot != expected_plot:
+            return False
+        if manifest_farm != "default_farm" and manifest_farm != expected_farm:
             return False
 
         # Cross-check capture_timestamp_utc with captures[0]["core:datetime"]
@@ -331,13 +352,12 @@ def verify_capture_integrity(
         if not meta_dt_str or not manifest_dt_str:
             return False
         try:
-            meta_dt = datetime.fromisoformat(meta_dt_str.replace("Z", "+00:00"))
-            manifest_dt = datetime.fromisoformat(manifest_dt_str.replace("Z", "+00:00"))
+            meta_dt = parse_capture_timestamp(meta_dt_str)
+            manifest_dt = parse_capture_timestamp(manifest_dt_str)
             if meta_dt != manifest_dt:
                 return False
-        except (ValueError, TypeError):
-            if meta_dt_str != manifest_dt_str:
-                return False
+        except QuarantinedCaptureException:
+            return False
 
         # Cross-check manifest storage_prefix against verified capture prefix
         manifest_storage_prefix = str(manifest_dict.get("storage_prefix", "")).strip()
@@ -355,12 +375,20 @@ def verify_capture_integrity(
         else:
             parts = manifest_prefix_path.parts
             if len(parts) >= 3:
-                if (parts[-3] != manifest_tenant or parts[-2] != manifest_plot or parts[-1].lower() != computed_capture_id):
+                if parts[-1].lower() != computed_capture_id or parts[-2] != manifest_plot:
+                    return False
+                if len(parts) >= 4 and manifest_farm != "default_farm" and parts[-3] != manifest_farm:
                     return False
 
         # 8. Verify directory namespace hierarchy matches manifest
         resolved_dest = dest_dir.resolve(strict=True)
-        if len(resolved_dest.parts) < 2 or resolved_dest.parts[-2] != manifest_tenant or resolved_dest.parts[-1] != manifest_plot:
+        parts = resolved_dest.parts
+        if len(parts) >= 3 and parts[-3] == manifest_tenant and parts[-2] == manifest_farm and parts[-1] == manifest_plot:
+            pass
+        elif len(parts) >= 2 and parts[-2] == manifest_tenant and parts[-1] == manifest_plot:
+            if manifest_farm != "default_farm" and expected_farm and expected_farm != manifest_farm:
+                return False
+        else:
             return False
 
         # 9. Verify strictly within storage root if provided

@@ -100,6 +100,9 @@ class SigMFCaptureManifest:
     storage_prefix: str
     """Scoped base path (excluding .sigmf-data / .sigmf-meta extension)."""
 
+    farm_id: str = "default_farm"
+    """Farm identifier providing multi-farm tenant isolation."""
+
     def __post_init__(self) -> None:
         if not self.capture_id or len(self.capture_id) < 16:
             raise ValueError("Invalid capture_id: must be a non-empty hash")
@@ -107,6 +110,8 @@ class SigMFCaptureManifest:
             raise ValueError("tenant_id must not be empty")
         if not self.plot_id or not self.plot_id.strip():
             raise ValueError("plot_id must not be empty")
+        if not self.farm_id or not self.farm_id.strip():
+            raise ValueError("farm_id must not be empty")
         if not isinstance(self.capture_timestamp_utc, datetime):
             raise ValueError("capture_timestamp_utc must be a datetime object")
 
@@ -122,6 +127,7 @@ class SigMFCaptureManifest:
         return {
             "capture_id": self.capture_id,
             "tenant_id": self.tenant_id,
+            "farm_id": self.farm_id,
             "plot_id": self.plot_id,
             "capture_timestamp_utc": self.capture_timestamp_utc.isoformat(),
             "data_sha256": self.data_sha256,
@@ -141,6 +147,7 @@ class SigMFCaptureManifest:
         return cls(
             capture_id=d["capture_id"],
             tenant_id=d["tenant_id"],
+            farm_id=str(d.get("farm_id") or "default_farm").strip(),
             plot_id=d["plot_id"],
             capture_timestamp_utc=ts,
             data_sha256=d["data_sha256"],

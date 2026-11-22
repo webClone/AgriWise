@@ -88,6 +88,7 @@ def verify_native_capture_for_plot(
             return False
 
         target_tenant = _sanitize_id(target_ns.tenant_id, "tenant_id")
+        target_farm = _sanitize_id(target_ns.farm_id, "farm_id") if target_ns.farm_id else "default_farm"
         target_plot = _sanitize_id(target_ns.plot_id, "plot_id")
 
         uri = getattr(packet, "native_data_uri", "") or ""
@@ -117,11 +118,19 @@ def verify_native_capture_for_plot(
 
         # Verify candidate is under root
         relative = candidate_resolved.relative_to(root)
-        if len(relative.parts) < 3:
-            return False
-
-        # Exact match tenant and plot directories against authenticated namespace
-        if relative.parts[0] != target_tenant or relative.parts[1] != target_plot:
+        if len(relative.parts) >= 4:
+            # Farm-isolated hierarchy: tenant / farm / plot / capture_file
+            if relative.parts[0] != target_tenant:
+                return False
+            if target_farm and target_farm != "default_farm" and relative.parts[1] != target_farm:
+                return False
+            if relative.parts[2] != target_plot:
+                return False
+        elif len(relative.parts) == 3:
+            # Legacy 2-level hierarchy: tenant / plot / capture_file
+            if relative.parts[0] != target_tenant or relative.parts[1] != target_plot:
+                return False
+        else:
             return False
 
         # Verify no symlink in parent hierarchy between candidate and root
