@@ -31,6 +31,58 @@ PLOT_SNAPSHOT_ROOT = (
     Path(__file__).resolve().parents[1] / "artifacts" / "plot_snapshots"
 )
 
+VALID_PUBLICATION_AUTHORITIES = frozenset({
+    "CERTIFIED_NUMERICAL",
+    "DIAGNOSTIC_ONLY",
+    "CONTAINED_PROPOSAL",
+})
+
+
+def resolve_publication_authority(
+    *,
+    publication_authority: Optional[str] = None,
+    frontend_payload: Optional[Dict[str, Any]] = None,
+    scientific_result: Optional[Dict[str, Any]] = None,
+    snapshot_kind: str = "asmae",
+) -> str:
+    """Classify versioned scientific publication authority.
+
+    - CERTIFIED_NUMERICAL: Full state posterior with verified covariance/uncertainty vectors.
+    - DIAGNOSTIC_ONLY: Bounded diagnostic observations without numerical state certification.
+    - CONTAINED_PROPOSAL: Contained experimental proposal for simulation/what-if evaluation.
+    """
+    if publication_authority and str(publication_authority).strip().upper() in VALID_PUBLICATION_AUTHORITIES:
+        return str(publication_authority).strip().upper()
+
+    fe = frontend_payload or {}
+    fe_auth = fe.get("publication_authority")
+    if fe_auth and str(fe_auth).strip().upper() in VALID_PUBLICATION_AUTHORITIES:
+        return str(fe_auth).strip().upper()
+
+    sci = scientific_result or {}
+    sci_auth = sci.get("publication_authority")
+    if sci_auth and str(sci_auth).strip().upper() in VALID_PUBLICATION_AUTHORITIES:
+        return str(sci_auth).strip().upper()
+
+    # Explicit disclaimers
+    if fe.get("claims_numerical_authority") is False or sci.get("claims_numerical_authority") is False:
+        if fe.get("contained_proposal") is True or sci.get("contained_proposal") is True:
+            return "CONTAINED_PROPOSAL"
+        return "DIAGNOSTIC_ONLY"
+
+    # Explicit claims or numerical records
+    if (
+        fe.get("claims_numerical_authority") is True
+        or fe.get("numerical_authority_claimed") is True
+        or sci.get("claims_numerical_authority") is True
+        or sci.get("asmae_numerical_digest")
+        or (sci.get("state_means") and sci.get("state_covariances"))
+        or (fe.get("asmae_posterior_numerical_record") and (fe.get("asmae_proof") or {}).get("numerical_vector_hash"))
+    ):
+        return "CERTIFIED_NUMERICAL"
+
+    return "DIAGNOSTIC_ONLY"
+
 _ASMAE_RUNTIME_FIELDS = frozenset({
     "snapshot_ref",
     "snapshot_status",
@@ -195,6 +247,7 @@ def publish_canonical_plot_snapshot(
     execution_identity: Optional[Dict[str, Any]] = None,
     snapshot_kind: str = "asmae",
     allow_overwrite: bool = False,
+    publication_authority: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Write one immutable node, then atomically supersede the plot head."""
     ns = _coerce_namespace(namespace or plot_id, tenant_id=tenant_id, farm_id=farm_id)
@@ -226,6 +279,13 @@ def publish_canonical_plot_snapshot(
         else copy.deepcopy(asmae_result)
     )
 
+    pub_auth = resolve_publication_authority(
+        publication_authority=publication_authority,
+        frontend_payload=frontend_payload,
+        scientific_result=scientific_result,
+        snapshot_kind=normalized_kind,
+    )
+
     directory = _plot_dir(ns)
     node_dir = directory / "nodes"
     node_dir.mkdir(parents=True, exist_ok=True)
@@ -237,6 +297,16 @@ def publish_canonical_plot_snapshot(
     # The frontend payload is part of both immutable artifacts.  Finalize a
     # private copy before either hash is computed and never mutate it again.
     immutable_frontend_payload = copy.deepcopy(frontend_payload)
+    if pub_auth == "DIAGNOSTIC_ONLY":
+        immutable_frontend_payload["claims_numerical_authority"] = False
+        scientific_result["claims_numerical_authority"] = False
+    elif pub_auth == "CERTIFIED_NUMERICAL":
+        immutable_frontend_payload["claims_numerical_authority"] = True
+        scientific_result["claims_numerical_authority"] = True
+    elif pub_auth == "CONTAINED_PROPOSAL":
+        immutable_frontend_payload["claims_numerical_authority"] = False
+        scientific_result["claims_numerical_authority"] = False
+    immutable_frontend_payload["publication_authority"] = pub_auth
     if normalized_kind == "asmae":
         from services.agribrain.layer05_asmae.reintegration import _mark_completed_publication
         _mark_completed_publication(immutable_frontend_payload, str(job_id))
@@ -349,6 +419,7 @@ def publish_canonical_plot_snapshot(
     envelope: Dict[str, Any] = {
         "contract_version": PLOT_SNAPSHOT_CONTRACT_VERSION,
         "snapshot_kind": normalized_kind,
+        "publication_authority": pub_auth,
         "snapshot_id": snapshot_id,
         "tenant_id": ns.tenant_id,
         "farm_id": ns.farm_id,
@@ -406,6 +477,7 @@ def publish_canonical_plot_snapshot(
         comparable_keys = (
             (
                 "contract_version", "snapshot_kind", "snapshot_id",
+                "publication_authority",
                 "tenant_id", "farm_id", "plot_id", "geometry_hash",
                 "asmae_content_hash", "crop_posterior_lineage",
                 "crop_worldline_event_id", "phenology_worldline_event_id",
@@ -414,6 +486,7 @@ def publish_canonical_plot_snapshot(
             if normalized_kind == "asmae"
             else (
                 "contract_version", "snapshot_kind", "snapshot_id",
+                "publication_authority",
                 "tenant_id", "farm_id", "plot_id", "geometry_hash",
                 "scientific_content_hash", "crop_posterior_lineage",
                 "crop_worldline_event_id", "phenology_worldline_event_id",
@@ -526,6 +599,7 @@ def publish_canonical_plot_snapshot(
     publication = {
         "contract_version": PLOT_PUBLICATION_CONTRACT_VERSION,
         "snapshot_kind": normalized_kind,
+        "publication_authority": pub_auth,
         "tenant_id": ns.tenant_id,
         "farm_id": ns.farm_id,
         "plot_id": ns.plot_id,
@@ -603,6 +677,7 @@ def publish_canonical_plot_snapshot(
     receipt = {
         "contract_version": PLOT_SNAPSHOT_RECEIPT_CONTRACT_VERSION,
         "snapshot_kind": normalized_kind,
+        "publication_authority": pub_auth,
         "tenant_id": ns.tenant_id,
         "farm_id": ns.farm_id,
         "plot_id": ns.plot_id,
@@ -669,6 +744,7 @@ def publish_canonical_plot_snapshot(
     head = {
         "contract_version": PLOT_SNAPSHOT_CONTRACT_VERSION,
         "snapshot_kind": normalized_kind,
+        "publication_authority": pub_auth,
         "tenant_id": ns.tenant_id,
         "farm_id": ns.farm_id,
         "plot_id": ns.plot_id,
@@ -724,6 +800,7 @@ def evaluate_snapshot_admission(
             "invalid_contract_flags": [],
             "quarantined": True,
             "refresh_required": True,
+            "publication_authority": None,
         }
 
     validation = snapshot.get("validation") or {}
@@ -746,18 +823,50 @@ def evaluate_snapshot_admission(
 
     invalid_integrity = [k for k in integrity_keys if validation.get(k) is not True]
 
-    claims_num = bool(
-        snapshot.get("snapshot_kind") == "asmae"
-        or str(snapshot.get("snapshot_id") or "").startswith("ASMAE-SNAPSHOT-")
-        or (snapshot.get("contract_validation") or {}).get("numerical_authority_verified") is True
-        or (snapshot.get("frontend_payload") or {}).get("claims_numerical_authority") is True
-        or (snapshot.get("scientific_result") or {}).get("asmae_numerical_digest")
+    fe_payload = snapshot.get("frontend_payload") or {}
+    pub_auth = (
+        snapshot.get("publication_authority")
+        or (snapshot.get("contract_validation") or {}).get("publication_authority")
+        or fe_payload.get("publication_authority")
+        or resolve_publication_authority(
+            frontend_payload=fe_payload,
+            scientific_result=snapshot.get("asmae") or snapshot.get("scientific_result"),
+            snapshot_kind=snapshot.get("snapshot_kind", "asmae"),
+        )
     )
-    if claims_num:
+
+    if pub_auth == "CERTIFIED_NUMERICAL":
         if validation.get("numericalBindingValid") is not True:
             invalid_integrity.append("numericalBindingValid")
         if validation.get("nodeAgreementValid") is not True:
             invalid_integrity.append("nodeAgreementValid")
+        num_rec = fe_payload.get("asmae_posterior_numerical_record")
+        if isinstance(num_rec, dict) and "states" in num_rec and "sigmas" in num_rec:
+            import math
+            states = num_rec.get("states", {})
+            sigmas = num_rec.get("sigmas", {})
+            if not isinstance(states, dict) or not isinstance(sigmas, dict) or not states:
+                if "numericalBindingValid" not in invalid_integrity:
+                    invalid_integrity.append("numericalBindingValid")
+            else:
+                for k, v in states.items():
+                    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(float(v)):
+                        if "numericalBindingValid" not in invalid_integrity:
+                            invalid_integrity.append("numericalBindingValid")
+                        break
+                for k, v in sigmas.items():
+                    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(float(v)) or float(v) < 0.0:
+                        if "numericalBindingValid" not in invalid_integrity:
+                            invalid_integrity.append("numericalBindingValid")
+                        break
+    elif pub_auth == "DIAGNOSTIC_ONLY":
+        if validation.get("numericalBindingValid") is False:
+            invalid_integrity.append("numericalBindingValid")
+        if validation.get("nodeAgreementValid") is False:
+            invalid_integrity.append("nodeAgreementValid")
+    elif pub_auth == "CONTAINED_PROPOSAL":
+        if validation.get("numericalBindingValid") is False:
+            invalid_integrity.append("numericalBindingValid")
 
     if invalid_integrity:
         return {
@@ -768,6 +877,7 @@ def evaluate_snapshot_admission(
             "invalid_contract_flags": [],
             "quarantined": True,
             "refresh_required": True,
+            "publication_authority": pub_auth,
         }
 
     invalid_contract = [k for k in contract_keys if validation.get(k) is not True]
@@ -780,6 +890,7 @@ def evaluate_snapshot_admission(
             "invalid_contract_flags": invalid_contract,
             "quarantined": False,
             "refresh_required": True,
+            "publication_authority": pub_auth,
         }
 
     return {
@@ -790,6 +901,7 @@ def evaluate_snapshot_admission(
         "invalid_contract_flags": [],
         "quarantined": False,
         "refresh_required": False,
+        "publication_authority": pub_auth,
     }
 
 
@@ -1222,14 +1334,24 @@ def load_latest_plot_snapshot(
         or ((node.get("frontend_payload") or {}).get("asmae_posterior_numerical_record") or {}).get("numerical_vector_hash")
         or (node.get("asmae") or {}).get("asmae_numerical_digest")
     )
-    claims_numerical_authority = bool(
-        publication_frontend.get("claims_numerical_authority") is True
-        or publication_frontend.get("numerical_authority_claimed") is True
-        or (publication_frontend.get("asmae_proof") or {}).get("numerical_vector_hash")
-        or (publication_frontend.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
-        or node_num_hash
-        or (node.get("snapshot_kind") == "asmae" and (node.get("asmae") or {}).get("state_means"))
+    fe_pub_auth = (
+        publication.get("publication_authority")
+        or node.get("publication_authority")
+        or publication_frontend.get("publication_authority")
     )
+    if fe_pub_auth == "DIAGNOSTIC_ONLY" or publication_frontend.get("claims_numerical_authority") is False:
+        claims_numerical_authority = False
+    elif fe_pub_auth == "CERTIFIED_NUMERICAL":
+        claims_numerical_authority = True
+    else:
+        claims_numerical_authority = bool(
+            publication_frontend.get("claims_numerical_authority") is True
+            or publication_frontend.get("numerical_authority_claimed") is True
+            or (publication_frontend.get("asmae_proof") or {}).get("numerical_vector_hash")
+            or (publication_frontend.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
+            or node_num_hash
+            or (node.get("snapshot_kind") == "asmae" and (node.get("asmae") or {}).get("state_means"))
+        )
 
     node_agreement_valid = True
     if num_rec is not None:
@@ -1353,6 +1475,7 @@ def load_latest_plot_snapshot(
     else:
         effective_contract_reason = contract_reason
 
+    node["publication_authority"] = fe_pub_auth or ("CERTIFIED_NUMERICAL" if claims_numerical_authority else "DIAGNOSTIC_ONLY")
     node["validation"] = validation_flags
     node["contract_validation"] = {
         "current_surface_schema_version": SURFACES_SCHEMA_VERSION,
@@ -1362,6 +1485,7 @@ def load_latest_plot_snapshot(
         "declared_status_reason": declared_status_reason,
         "numerical_binding_valid": numerical_binding_valid,
         "numerical_authority_verified": bool(numerical_binding_valid is True and node_agreement_valid),
+        "publication_authority": node["publication_authority"],
     }
     if numerical_binding_valid is False or not node_agreement_valid:
         node["scientific_authority_certified"] = False
@@ -1616,14 +1740,24 @@ def load_and_validate_plot_snapshot_by_id(
         or ((node.get("frontend_payload") or {}).get("asmae_posterior_numerical_record") or {}).get("numerical_vector_hash")
         or (node.get("asmae") or {}).get("asmae_numerical_digest")
     )
-    claims_numerical_authority = bool(
-        publication_frontend.get("claims_numerical_authority") is True
-        or publication_frontend.get("numerical_authority_claimed") is True
-        or (publication_frontend.get("asmae_proof") or {}).get("numerical_vector_hash")
-        or (publication_frontend.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
-        or node_num_hash
-        or (node.get("snapshot_kind") == "asmae" and (node.get("asmae") or {}).get("state_means"))
+    fe_pub_auth = (
+        publication.get("publication_authority")
+        or node.get("publication_authority")
+        or publication_frontend.get("publication_authority")
     )
+    if fe_pub_auth == "DIAGNOSTIC_ONLY" or publication_frontend.get("claims_numerical_authority") is False:
+        claims_numerical_authority = False
+    elif fe_pub_auth == "CERTIFIED_NUMERICAL":
+        claims_numerical_authority = True
+    else:
+        claims_numerical_authority = bool(
+            publication_frontend.get("claims_numerical_authority") is True
+            or publication_frontend.get("numerical_authority_claimed") is True
+            or (publication_frontend.get("asmae_proof") or {}).get("numerical_vector_hash")
+            or (publication_frontend.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
+            or node_num_hash
+            or (node.get("snapshot_kind") == "asmae" and (node.get("asmae") or {}).get("state_means"))
+        )
     numerical_binding_valid: Optional[bool] = None
     node_agreement_valid = True
     if num_rec is not None:
@@ -1732,6 +1866,7 @@ def load_and_validate_plot_snapshot_by_id(
     node["evidence_cutoff_at"] = authoritative_evidence_cutoff
     node["observation_window"] = authoritative_observation_window
     node["validation"] = validation_flags
+    node["publication_authority"] = fe_pub_auth or ("CERTIFIED_NUMERICAL" if claims_numerical_authority else "DIAGNOSTIC_ONLY")
     node["contract_validation"] = {
         "schema_valid": validation_flags["schemaValid"],
         "contract_valid": validation_flags["contractValid"],
@@ -1740,6 +1875,7 @@ def load_and_validate_plot_snapshot_by_id(
         "derived_publication_status": derived_publication_status,
         "numerical_authority_verified": bool(numerical_binding_valid is True),
         "temporal_binding_verified": bool(temporal_binding_valid),
+        "publication_authority": node["publication_authority"],
     }
     node["historical"] = True
     return node

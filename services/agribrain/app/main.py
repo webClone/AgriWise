@@ -587,8 +587,7 @@ def api_v2_exact_snapshot(
 
     # If publication claims numerical authority, numericalBindingValid must be True (cannot be null or false)
     claims_num = bool(
-        validated.get("snapshot_kind") == "asmae"
-        or str(snapshot_id).startswith("ASMAE-SNAPSHOT-")
+        admission.get("publication_authority") == "CERTIFIED_NUMERICAL"
         or (validated.get("contract_validation") or {}).get("numerical_authority_verified") is True
         or (validated.get("frontend_payload") or {}).get("claims_numerical_authority") is True
     )
@@ -652,6 +651,7 @@ def api_v2_canonical_plot_snapshot(
             "tenant_id": namespace.tenant_id,
             "farm_id": namespace.farm_id,
             "snapshot_id": snapshot.get("snapshot_id"),
+            "publication_authority": admission.get("publication_authority"),
             "validation": snapshot.get("validation") or {},
             "contract_validation": snapshot.get("contract_validation") or {},
         }
