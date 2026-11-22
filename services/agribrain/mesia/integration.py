@@ -122,12 +122,14 @@ def verify_native_capture_for_plot(
             # Farm-isolated hierarchy: tenant / farm / plot / capture_file
             if relative.parts[0] != target_tenant:
                 return False
-            if target_farm and target_farm != "default_farm" and relative.parts[1] != target_farm:
+            if target_farm and relative.parts[1] != target_farm:
                 return False
             if relative.parts[2] != target_plot:
                 return False
         elif len(relative.parts) == 3:
             # Legacy 2-level hierarchy: tenant / plot / capture_file
+            if target_farm and target_farm != "default_farm":
+                return False
             if relative.parts[0] != target_tenant or relative.parts[1] != target_plot:
                 return False
         else:

@@ -57,7 +57,7 @@ def test_p2_11_missing_nonlocal_and_spoofed_native_capture_never_qualifies(tmp_p
 
 def test_p2_11_actual_sha256_match_requires_plot_and_tenant_scoped_file(tmp_path):
     ns = PlotNamespace(tenant_id="tenant-1", farm_id="farm-1", plot_id="plot-1")
-    directory = tmp_path / "tenant-1" / "plot-1"
+    directory = tmp_path / "tenant-1" / "farm-1" / "plot-1"
     directory.mkdir(parents=True)
     raw = b"$GPRMC,20261121,24.5,SNR,37.4\r\n"
     real_file = directory / "capture.nmea"
@@ -216,6 +216,7 @@ def test_batch_a_d01_cross_tenant_same_plot_rejection(tmp_path):
     }
     manifest_b = ingest_sigmf_capture(
         tenant_id=tenant_b,
+        farm_id="farm-b",
         plot_id=shared_plot,
         raw_data_bytes=raw_data,
         metadata_dict=meta,
@@ -530,3 +531,45 @@ def test_batch_a_d02_manifest_timestamp_mismatch_rejection(tmp_path):
     pkt = _packet(uri=data_file.as_uri(), digest=manifest.data_sha256)
     assert not verify_capture_integrity(data_file, expected_namespace=ns, storage_root=tmp_path)
     assert not verify_native_capture_for_plot(pkt, ns, storage_root=tmp_path)
+
+
+def test_legacy_capture_rejected_for_non_default_farm(tmp_path):
+    """P1 Regression: Legacy captures (default_farm / 2-level) cannot cross boundaries to non-default farms."""
+    from services.agribrain.mesia.service import MesiaProductionService
+
+    tenant = "tenant-legacy-cross"
+    plot = "plot-legacy-cross"
+    # Legacy ingestion without farm_id (defaults to default_farm, writes to tenant/plot/)
+    raw = b"legacy_sigmf_iq_data_payload_cross_farm"
+    meta = {
+        "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
+        "captures": [{
+            "core:datetime": datetime(2026, 11, 22, 14, 0, 0, tzinfo=timezone.utc).isoformat(),
+            "core:frequency": 2.45e9,
+        }],
+        "annotations": [{"core:sample_count": 10}],
+    }
+    manifest = ingest_sigmf_capture(tenant, plot, raw, meta, storage_root=tmp_path)
+    data_file = Path(manifest.data_path)
+
+    # 1. Non-default farm namespace: farm-east
+    ns_non_default = PlotNamespace(tenant_id=tenant, farm_id="farm-east", plot_id=plot)
+    pkt = _packet(uri=data_file.as_uri(), digest=manifest.data_sha256)
+
+    # Verifier must reject legacy capture for non-default farm
+    assert not verify_capture_integrity(data_file, expected_namespace=ns_non_default, storage_root=tmp_path)
+    assert not verify_native_capture_for_plot(pkt, ns_non_default, storage_root=tmp_path)
+
+    # Bridge admission must yield INVALIDATED for non-default farm
+    bridge_non_default = MesiaAgriBrainBridge(plot_namespace=ns_non_default, storage_root=tmp_path)
+    rec, ev = bridge_non_default.process_and_admit_observation(pkt, is_calibration_valid=True, is_epoch_active=True)
+    assert rec.status == EvidenceAdmissionStatus.INVALIDATED
+
+    # In-situ scanner must not find or use legacy capture for non-default farm
+    scan_res = MesiaProductionService._process_real_in_situ_wifi_csi(plot_namespace=ns_non_default, storage_root=tmp_path)
+    assert scan_res["status"] == "AWAITING_FIELD_RECEIVER_STREAM"
+
+    # 2. Positive control: Authenticated default_farm request accepts the legacy capture
+    ns_default = PlotNamespace(tenant_id=tenant, farm_id="default_farm", plot_id=plot)
+    assert verify_capture_integrity(data_file, expected_namespace=ns_default, storage_root=tmp_path)
+    assert verify_native_capture_for_plot(pkt, ns_default, storage_root=tmp_path)

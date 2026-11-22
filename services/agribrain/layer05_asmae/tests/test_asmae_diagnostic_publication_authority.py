@@ -625,3 +625,100 @@ def test_adversarial_tampered_diagnostic_snapshot_with_numerical_digest_quaranti
     assert admission["status"] == "quarantined"
     assert "authorityAgreementValid" in admission["invalid_integrity_flags"]
 
+
+def test_adversarial_contained_proposal_with_numerical_record_quarantined():
+    """P1 Regression: Contained proposals enforce authority agreement and reject numerical claims/records."""
+    ns = PlotNamespace(tenant_id="tenant-cp", farm_id="farm-cp", plot_id="parcel-cp-1")
+
+    # 1. Publication time: Attempting to publish CONTAINED_PROPOSAL with numerical records fails
+    snap_id = "ASMAE-SNAPSHOT-cp-001"
+    res_num = _base_diagnostic_asmae_result(plot_id="parcel-cp-1")
+    res_num["snapshot_id"] = snap_id
+    res_num["asmae_numerical_digest"] = "sha256:unauthorized_digest_in_proposal"
+    fe_num = _base_diagnostic_frontend_payload(snap_id, plot_id="parcel-cp-1")
+
+    with pytest.raises(ValueError, match="contradicts certified numerical posterior"):
+        plot_snapshot_store.publish_canonical_plot_snapshot(
+            namespace=ns,
+            geometry_hash="geom-cp",
+            snapshot_id=snap_id,
+            asmae_result=res_num,
+            frontend_payload=fe_num,
+            job_id="job-cp-1",
+            manifest_hash="manifest-cp-1",
+            publication_authority="CONTAINED_PROPOSAL",
+        )
+
+    # 2. Admission predicate: CONTAINED_PROPOSAL with authorityAgreementValid=False is quarantined
+    tampered_snap = {
+        "publication_authority": "CONTAINED_PROPOSAL",
+        "validation": {
+            "nodeValid": True,
+            "publicationValid": True,
+            "receiptValid": True,
+            "inventoryValid": True,
+            "bindingValid": True,
+            "lineageValid": True,
+            "temporalBindingValid": True,
+            "authorityAgreementValid": False,
+            "schemaValid": True,
+            "contractValid": True,
+            "publicationStatusValid": True,
+        },
+        "frontend_payload": {"publication_authority": "CONTAINED_PROPOSAL"},
+    }
+    adm = plot_snapshot_store.evaluate_snapshot_admission(tampered_snap, ns)
+    assert adm["is_valid"] is False
+    assert adm["status"] == "quarantined"
+    assert "authorityAgreementValid" in adm["invalid_integrity_flags"]
+
+    # 3. Admission predicate: Contradictory numerical digest directly inside scientific_result
+    contradictory_snap = {
+        "publication_authority": "CONTAINED_PROPOSAL",
+        "validation": {
+            "nodeValid": True,
+            "publicationValid": True,
+            "receiptValid": True,
+            "inventoryValid": True,
+            "bindingValid": True,
+            "lineageValid": True,
+            "temporalBindingValid": True,
+            "schemaValid": True,
+            "contractValid": True,
+            "publicationStatusValid": True,
+        },
+        "scientific_result": {
+            "asmae_numerical_digest": "sha256:injected_digest",
+        },
+        "frontend_payload": {"publication_authority": "CONTAINED_PROPOSAL"},
+    }
+    adm_contra = plot_snapshot_store.evaluate_snapshot_admission(contradictory_snap, ns)
+    assert adm_contra["is_valid"] is False
+    assert adm_contra["status"] == "quarantined"
+    assert "authorityAgreementValid" in adm_contra["invalid_integrity_flags"]
+
+    # 4. Positive control: Pure CONTAINED_PROPOSAL without numerical claims admits cleanly
+    clean_snap = {
+        "publication_authority": "CONTAINED_PROPOSAL",
+        "validation": {
+            "nodeValid": True,
+            "publicationValid": True,
+            "receiptValid": True,
+            "inventoryValid": True,
+            "bindingValid": True,
+            "lineageValid": True,
+            "temporalBindingValid": True,
+            "authorityAgreementValid": True,
+            "schemaValid": True,
+            "contractValid": True,
+            "publicationStatusValid": True,
+        },
+        "scientific_result": {"claims_numerical_authority": False},
+        "frontend_payload": {"publication_authority": "CONTAINED_PROPOSAL", "claims_numerical_authority": False},
+    }
+    adm_clean = plot_snapshot_store.evaluate_snapshot_admission(clean_snap, ns)
+    assert adm_clean["is_valid"] is True
+    assert adm_clean["status"] == "admitted"
+    assert adm_clean["publication_authority"] == "CONTAINED_PROPOSAL"
+
+

@@ -229,7 +229,7 @@ def verify_capture_integrity(
             manifest_plot = _sanitize_id(storage_prefix_or_manifest.plot_id, "plot_id")
             if expected_tenant and manifest_tenant != expected_tenant:
                 return False
-            if manifest_farm != "default_farm" and manifest_farm != expected_farm:
+            if expected_farm and expected_farm != "default_farm" and manifest_farm != expected_farm:
                 return False
             if expected_plot and manifest_plot != expected_plot:
                 return False
@@ -343,7 +343,7 @@ def verify_capture_integrity(
             return False
         if expected_plot and manifest_plot != expected_plot:
             return False
-        if manifest_farm != "default_farm" and manifest_farm != expected_farm:
+        if expected_farm and expected_farm != "default_farm" and manifest_farm != expected_farm:
             return False
 
         # Cross-check capture_timestamp_utc with captures[0]["core:datetime"]

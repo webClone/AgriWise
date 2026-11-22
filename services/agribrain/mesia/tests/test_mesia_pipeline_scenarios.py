@@ -651,6 +651,7 @@ class TestScenarioEAgriBrainLayer0Bridge:
         iq_bytes = np.asarray([0.25 + 0.50j] * 8, dtype=np.complex64).tobytes()
         manifest = sigmf_ingest.ingest_sigmf_capture(
             tenant_id="tenant_scenario_e",
+            farm_id="farm_scenario_e",
             plot_id="PLOT_TEST_BRIDGE",
             raw_data_bytes=iq_bytes,
             metadata_dict={

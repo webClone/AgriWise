@@ -852,6 +852,10 @@ def evaluate_snapshot_admission(
         )
     )
 
+    if validation.get("authorityAgreementValid") is False:
+        if "authorityAgreementValid" not in invalid_integrity:
+            invalid_integrity.append("authorityAgreementValid")
+
     if pub_auth == "CERTIFIED_NUMERICAL":
         if validation.get("numericalBindingValid") is not True:
             invalid_integrity.append("numericalBindingValid")
@@ -876,13 +880,11 @@ def evaluate_snapshot_admission(
                         if "numericalBindingValid" not in invalid_integrity:
                             invalid_integrity.append("numericalBindingValid")
                         break
-    elif pub_auth == "DIAGNOSTIC_ONLY":
+    elif pub_auth in ("DIAGNOSTIC_ONLY", "CONTAINED_PROPOSAL"):
         if validation.get("numericalBindingValid") is False:
             invalid_integrity.append("numericalBindingValid")
         if validation.get("nodeAgreementValid") is False:
             invalid_integrity.append("nodeAgreementValid")
-        if validation.get("authorityAgreementValid") is False:
-            invalid_integrity.append("authorityAgreementValid")
         sci_res = snapshot.get("asmae") or snapshot.get("scientific_result") or {}
         if (
             sci_res.get("asmae_numerical_digest")
@@ -894,9 +896,6 @@ def evaluate_snapshot_admission(
         ):
             if "authorityAgreementValid" not in invalid_integrity:
                 invalid_integrity.append("authorityAgreementValid")
-    elif pub_auth == "CONTAINED_PROPOSAL":
-        if validation.get("numericalBindingValid") is False:
-            invalid_integrity.append("numericalBindingValid")
 
     if invalid_integrity:
         return {

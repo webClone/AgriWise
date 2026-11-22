@@ -876,11 +876,10 @@ class MesiaProductionService:
         farm_clean = _sanitize_id(plot_namespace.farm_id, "farm_id") if plot_namespace.farm_id else "default_farm"
         plot_clean = _sanitize_id(plot_namespace.plot_id, "plot_id")
 
-        # Candidate directories in precedence order: farm-isolated then legacy 2-level
-        candidate_dirs = [
-            root / tenant_clean / farm_clean / plot_clean,
-            root / tenant_clean / plot_clean,
-        ]
+        # Candidate directories in precedence order: farm-isolated, with legacy 2-level fallback only for default_farm
+        candidate_dirs = [root / tenant_clean / farm_clean / plot_clean]
+        if farm_clean == "default_farm":
+            candidate_dirs.append(root / tenant_clean / plot_clean)
 
         verified_manifest: Optional[SigMFCaptureManifest] = None
         verified_data_file: Optional[Path] = None
