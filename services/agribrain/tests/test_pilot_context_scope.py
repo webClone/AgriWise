@@ -45,8 +45,23 @@ def payload(snapshot_id, cycle):
 
 
 def test_valid_old_asmae_stays_immutable_but_cannot_block_new_context(tmp_path):
+    from services.agribrain.layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
+
     ns = PlotNamespace(tenant_id="T", farm_id="F", plot_id="P")
     old = payload("ASMAE-SNAPSHOT-old", "CYCLE-A")
+    states = {"root_zone_moisture": 0.365, "canopy_vigor": 0.55}
+    sigmas = {"root_zone_moisture": 0.015, "canopy_vigor": 0.02}
+    vec_hash = compute_asmae_vector_numerical_hash(states, sigmas)
+
+    old["asmae_posterior_numerical_record"] = {
+        "states": states,
+        "sigmas": sigmas,
+        "numerical_vector_hash": vec_hash,
+    }
+    old["asmae_proof"] = {"status": "valid", "numerical_vector_hash": vec_hash}
+    old["scientific_evidence_lineage"]["asmae_posterior_vector_hash"] = vec_hash
+    old["claims_numerical_authority"] = True
+
     lineage = old["scientific_evidence_lineage"]
     science = {
         "snapshot_id": old["intelligence_snapshot_id"],
@@ -54,6 +69,9 @@ def test_valid_old_asmae_stays_immutable_but_cannot_block_new_context(tmp_path):
         **lineage,
         "crop_cycle_id": "CYCLE-A",
         "evidence_cutoff_at": old["evidence_cutoff_at"],
+        "asmae_numerical_digest": vec_hash,
+        "claims_numerical_authority": True,
+        "asmae_posterior_numerical_record": old["asmae_posterior_numerical_record"],
     }
     with patch.object(store, "PLOT_SNAPSHOT_ROOT", tmp_path):
         store.publish_canonical_plot_snapshot(

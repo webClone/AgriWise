@@ -561,7 +561,7 @@ def test_durable_terminal_job_overrides_stale_request_progress(monkeypatch):
         "stage": "reintegration_failed",
         "error": "PlotNamespace mismatch",
     })
-    monkeypatch.setattr(snapshots, "load_latest_plot_snapshot", lambda namespace: {
+    monkeypatch.setattr(snapshots, "load_latest_plot_snapshot", lambda namespace, *args, **kwargs: {
         "snapshot_id": "ASMAE-SNAPSHOT-last-known-good",
     })
 
@@ -596,7 +596,7 @@ def test_request_local_layer10_failure_retains_code_without_fabricating_asmae_jo
     })
     monkeypatch.setattr(jobs, "recover_all_pending_jobs", lambda namespace: 0)
     monkeypatch.setattr(jobs, "latest_job_for_plot", lambda namespace, run_id=None: None)
-    monkeypatch.setattr(snapshots, "load_latest_plot_snapshot", lambda namespace: None)
+    monkeypatch.setattr(snapshots, "load_latest_plot_snapshot", lambda namespace, *args, **kwargs: None)
 
     failure = main._request_failure_from_exception(
         IndexError("index 187 is out of bounds for axis 0 with size 47")
@@ -645,7 +645,7 @@ def test_durable_running_job_overrides_stale_terminal_request_progress(monkeypat
         "stage": "scientific_execution",
         "progress_pct": 15,
     })
-    monkeypatch.setattr(snapshots, "load_latest_plot_snapshot", lambda namespace: None)
+    monkeypatch.setattr(snapshots, "load_latest_plot_snapshot", lambda namespace, *args, **kwargs: None)
 
     response = main.api_v2_progress("plot-a", namespace=namespace)
 
@@ -691,7 +691,7 @@ def test_old_failed_job_is_retry_eligible_after_scientific_source_change(monkeyp
         "scientific_source_digest",
         lambda: "current-source-digest",
     )
-    monkeypatch.setattr(snapshots, "load_latest_plot_snapshot", lambda namespace: None)
+    monkeypatch.setattr(snapshots, "load_latest_plot_snapshot", lambda namespace, *args, **kwargs: None)
 
     response = main.api_v2_progress("plot-a", namespace=namespace)
 
@@ -735,7 +735,7 @@ def test_failed_job_progress_survives_source_digest_read_failure(monkeypatch):
         "scientific_source_digest",
         source_digest_unavailable,
     )
-    monkeypatch.setattr(snapshots, "load_latest_plot_snapshot", lambda namespace: None)
+    monkeypatch.setattr(snapshots, "load_latest_plot_snapshot", lambda namespace, *args, **kwargs: None)
 
     response = main.api_v2_progress("plot-a", namespace=namespace)
 
@@ -816,13 +816,15 @@ def test_stale_integrity_valid_head_requests_refresh_instead_of_becoming_authori
     namespace = PlotNamespace("tenant-a", "farm-a", "plot-a")
     monkeypatch.setattr(
         "services.agribrain.layer05_asmae.plot_snapshot_store.load_latest_plot_snapshot",
-        lambda namespace: {
+        lambda namespace, *args, **kwargs: {
             "snapshot_id": "old-head-a",
             "validation": {
                 "nodeValid": True,
                 "publicationValid": True,
                 "receiptValid": True,
                 "inventoryValid": True,
+                "temporalBindingValid": True,
+                "replayReceiptValid": True,
                 "bindingValid": True,
                 "lineageValid": True,
                 "schemaValid": False,
@@ -857,7 +859,7 @@ def test_snapshot_endpoint_quarantines_integrity_invalid_head_and_retains_last_g
     monkeypatch.setattr(
         snapshots,
         "load_latest_plot_snapshot",
-        lambda namespace: {
+        lambda namespace, *args, **kwargs: {
             "snapshot_id": "ASMAE-SNAPSHOT-corrupt-a",
             "frontend_payload": {
                 "intelligence_snapshot_id": "ASMAE-SNAPSHOT-corrupt-a",
@@ -868,6 +870,10 @@ def test_snapshot_endpoint_quarantines_integrity_invalid_head_and_retains_last_g
                 "publicationValid": True,
                 "receiptValid": True,
                 "inventoryValid": False,
+                "temporalBindingValid": True,
+                "replayReceiptValid": True,
+                "numericalBindingValid": True,
+                "nodeAgreementValid": True,
                 "bindingValid": True,
                 "lineageValid": True,
                 "schemaValid": True,
@@ -914,13 +920,17 @@ def test_snapshot_endpoint_keeps_schema_stale_distinct_from_integrity_quarantine
     monkeypatch.setattr(
         snapshots,
         "load_latest_plot_snapshot",
-        lambda namespace: {
+        lambda namespace, *args, **kwargs: {
             "snapshot_id": "ASMAE-SNAPSHOT-stale-a",
             "validation": {
                 "nodeValid": True,
                 "publicationValid": True,
                 "receiptValid": True,
                 "inventoryValid": True,
+                "temporalBindingValid": True,
+                "replayReceiptValid": True,
+                "numericalBindingValid": True,
+                "nodeAgreementValid": True,
                 "bindingValid": True,
                 "lineageValid": True,
                 "schemaValid": False,

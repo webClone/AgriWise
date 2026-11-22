@@ -93,6 +93,11 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
         self.worldline_root = Path(self.temp_dir) / "worldline"
         self.bootstrap_root = Path(self.temp_dir) / "bootstrap_checkpoints"
 
+        from services.agribrain.layer05_asmae import plot_snapshot_store
+        self.orig_plot_root = plot_snapshot_store.PLOT_SNAPSHOT_ROOT
+        self.snapshot_root = Path(self.temp_dir) / "plot_snapshots"
+        plot_snapshot_store.PLOT_SNAPSHOT_ROOT = self.snapshot_root
+
         os.makedirs(self.cache_dir, exist_ok=True)
         self.worldline = CanonicalWorldlineService(root=self.worldline_root)
 
@@ -108,6 +113,8 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
         }
 
     def tearDown(self):
+        from services.agribrain.layer05_asmae import plot_snapshot_store
+        plot_snapshot_store.PLOT_SNAPSHOT_ROOT = self.orig_plot_root
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_gate_b_01_geotiff_raster_decoding_and_provenance_hashing(self):

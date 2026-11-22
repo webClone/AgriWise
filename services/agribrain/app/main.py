@@ -641,14 +641,13 @@ def api_v2_canonical_plot_snapshot(
         }
     admission = evaluate_snapshot_admission(snapshot, namespace)
     if not admission["is_valid"]:
-        return {
+        quarantine_payload = {
             "available": False,
             "reason": admission["reason"],
             "status": admission["status"],
             "quarantined": admission["quarantined"],
             "refreshRequired": admission["refresh_required"],
             "retainLastKnownGood": True,
-            "invalidIntegrityFlags": admission["invalid_integrity_flags"],
             "plot_id": namespace.plot_id,
             "tenant_id": namespace.tenant_id,
             "farm_id": namespace.farm_id,
@@ -656,6 +655,9 @@ def api_v2_canonical_plot_snapshot(
             "validation": snapshot.get("validation") or {},
             "contract_validation": snapshot.get("contract_validation") or {},
         }
+        if admission["invalid_integrity_flags"]:
+            quarantine_payload["invalidIntegrityFlags"] = admission["invalid_integrity_flags"]
+        return quarantine_payload
 
     cache_key = (
         namespace.stable_key(),
