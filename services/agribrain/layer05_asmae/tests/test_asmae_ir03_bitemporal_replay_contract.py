@@ -126,6 +126,9 @@ class ASMAEIR03BitemporalReplayContractTests(unittest.TestCase):
         self.worldline_root = Path(self.temp_dir) / "worldline"
         self.worldline = CanonicalWorldlineService(root=self.worldline_root)
         self.harness = BitemporalWorldlineHarness(self.worldline)
+        self.snapshot_root = Path(self.temp_dir) / "plot_snapshots"
+        self.orig_plot_root = plot_snapshot_store.PLOT_SNAPSHOT_ROOT
+        plot_snapshot_store.PLOT_SNAPSHOT_ROOT = self.snapshot_root
 
         self.tenant_id = "tenant-algeria-west"
         self.farm_id = "farm-mitidja-01"
@@ -136,6 +139,7 @@ class ASMAEIR03BitemporalReplayContractTests(unittest.TestCase):
         self.base_time = datetime(2026, 5, 1, 0, 0, 0, tzinfo=timezone.utc)
 
     def tearDown(self):
+        plot_snapshot_store.PLOT_SNAPSHOT_ROOT = self.orig_plot_root
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _commit_worldline_event(
