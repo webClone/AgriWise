@@ -589,7 +589,8 @@ class TestScenarioEAgriBrainLayer0Bridge:
 
     def test_bridge_admission_with_valid_and_invalid_calibration(self, tmp_path, monkeypatch):
         """Distinguish invalid capture provenance from verified-capture observation absence."""
-        bridge = MesiaAgriBrainBridge(plot_id="PLOT_TEST_BRIDGE")
+        ns = PlotNamespace(tenant_id="tenant_scenario_e", farm_id="farm_scenario_e", plot_id="PLOT_TEST_BRIDGE")
+        bridge = MesiaAgriBrainBridge(plot_namespace=ns, storage_root=tmp_path)
 
         packet = RadioObservationPacket(
             packet_id="pkt-test-001",

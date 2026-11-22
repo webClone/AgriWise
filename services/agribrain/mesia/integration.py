@@ -7,7 +7,7 @@ evidence spine (Layer 0) and ASMAE state assimilation engine (Layer 05).
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 from .contracts.observation import RadioObservationPacket
 from .contracts.behaviour import BehaviourLikelihood
@@ -27,17 +27,67 @@ from .assimilation.layer0_spine import (
 from .assimilation.capability_governance import CapabilityGovernanceAuthority
 
 
-def verify_native_capture_for_plot(packet: RadioObservationPacket, plot_id: str, storage_root: Any = None) -> bool:
+def verify_native_capture_for_plot(
+    packet: RadioObservationPacket,
+    namespace: Union[PlotNamespace, Mapping[str, Any], str, None],
+    storage_root: Any = None,
+    *,
+    tenant_id: Optional[str] = None,
+    plot_id: Optional[str] = None,
+) -> bool:
     """Accept only actual, SHA-matched tenant/plot-scoped native capture bytes.
 
     A plausible-looking file:// URI or a 64-character hash never constitutes
     native physical evidence. No HTTP, remote, relative, or unscoped file reads.
+    Both tenant and plot directory names must match the authenticated PlotNamespace.
     """
     import hashlib
     from pathlib import Path
     from urllib.parse import urlsplit
     from urllib.request import url2pathname
-    from .ingestion.sigmf_ingest import DEFAULT_STORAGE_ROOT, verify_capture_integrity
+    from services.agribrain.common.plot_namespace import PlotNamespace, _coerce_namespace
+    from .ingestion.sigmf_ingest import DEFAULT_STORAGE_ROOT, verify_capture_integrity, _sanitize_id
+
+    # 1. Enforce authenticated PlotNamespace (D01)
+    target_ns: Optional[PlotNamespace] = None
+    if isinstance(namespace, PlotNamespace):
+        if namespace.is_valid():
+            target_ns = namespace
+    elif isinstance(namespace, Mapping):
+        try:
+            candidate = _coerce_namespace(namespace, tenant_id=tenant_id or "", farm_id="")
+            if candidate.is_valid():
+                target_ns = candidate
+        except (ValueError, TypeError):
+            return False
+    elif isinstance(namespace, str) and namespace.strip():
+        if tenant_id and tenant_id.strip():
+            candidate = PlotNamespace(
+                tenant_id=tenant_id.strip(),
+                farm_id="default_farm",
+                plot_id=namespace.strip(),
+            )
+            if candidate.is_valid():
+                target_ns = candidate
+        elif ":" in namespace:
+            parts = [p.strip() for p in namespace.split(":")]
+            if len(parts) == 3 and all(parts):
+                target_ns = PlotNamespace(tenant_id=parts[0], farm_id=parts[1], plot_id=parts[2])
+    elif plot_id and tenant_id:
+        candidate = PlotNamespace(
+            tenant_id=tenant_id.strip(),
+            farm_id="default_farm",
+            plot_id=plot_id.strip(),
+        )
+        if candidate.is_valid():
+            target_ns = candidate
+
+    # Missing namespace or plot-only string without authenticated tenant fails closed
+    if target_ns is None or not target_ns.is_valid():
+        return False
+
+    target_tenant = _sanitize_id(target_ns.tenant_id, "tenant_id")
+    target_plot = _sanitize_id(target_ns.plot_id, "plot_id")
 
     uri = getattr(packet, "native_data_uri", "") or ""
     expected_hash = getattr(packet, "native_data_hash", "") or ""
@@ -56,19 +106,39 @@ def verify_native_capture_for_plot(packet: RadioObservationPacket, plot_id: str,
         if not candidate.is_absolute():
             return False
         root = Path(storage_root or DEFAULT_STORAGE_ROOT).resolve(strict=True)
-        candidate = candidate.resolve(strict=True)
-        relative = candidate.relative_to(root)
-        if (len(relative.parts) < 3 or relative.parts[1] != plot_id
-                or not candidate.is_file()):
+
+        # Reject symlinks for candidate and parents up to storage root
+        if candidate.is_symlink():
             return False
+        candidate_resolved = candidate.resolve(strict=True)
+        if not candidate_resolved.is_file():
+            return False
+
+        # Verify candidate is under root
+        relative = candidate_resolved.relative_to(root)
+        if len(relative.parts) < 3:
+            return False
+
+        # Exact match tenant and plot directories against authenticated namespace
+        if relative.parts[0] != target_tenant or relative.parts[1] != target_plot:
+            return False
+
+        # Verify no symlink in parent hierarchy between candidate and root
+        cur = candidate.parent
+        while cur != root and cur != cur.parent:
+            if cur.is_symlink():
+                return False
+            cur = cur.parent
+
         sha = hashlib.sha256()
-        with candidate.open("rb") as handle:
+        with candidate_resolved.open("rb") as handle:
             for data in iter(lambda: handle.read(1024 * 1024), b""):
                 sha.update(data)
         if sha.hexdigest().lower() != expected_hash.lower():
             return False
-        if candidate.name.endswith((".sigmf-data", ".sigmf-meta")):
-            return verify_capture_integrity(candidate)
+
+        if candidate_resolved.name.endswith((".sigmf-data", ".sigmf-meta")):
+            return verify_capture_integrity(candidate_resolved, expected_namespace=target_ns, storage_root=root)
         return True
     except (OSError, ValueError, RuntimeError):
         return False
@@ -95,7 +165,12 @@ class MesiaAgriBrainBridge:
 
     def __init__(
         self,
-        plot_id: str = "PLOT_DEFAULT",
+        plot_namespace: Optional[Union[PlotNamespace, Mapping[str, Any], str]] = None,
+        *,
+        plot_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        farm_id: Optional[str] = None,
+        storage_root: Optional[Any] = None,
         target_grid: Optional[Any] = None,
         grid_dim: Optional[Tuple[int, int]] = None,
         cell_size_m: float = 10.0,
@@ -104,7 +179,47 @@ class MesiaAgriBrainBridge:
         crs: Optional[str] = None,
         boundary_mask: Optional[Any] = None,
     ) -> None:
-        self.plot_id = plot_id
+        from services.agribrain.common.plot_namespace import PlotNamespace, _coerce_namespace
+        ns: Optional[PlotNamespace] = None
+        if isinstance(plot_namespace, PlotNamespace):
+            if plot_namespace.is_valid():
+                ns = plot_namespace
+        elif isinstance(plot_namespace, Mapping):
+            try:
+                candidate = _coerce_namespace(plot_namespace, tenant_id=tenant_id or "", farm_id=farm_id or "")
+                if candidate.is_valid():
+                    ns = candidate
+            except (ValueError, TypeError):
+                ns = None
+        elif isinstance(plot_namespace, str) and plot_namespace.strip():
+            if tenant_id and tenant_id.strip():
+                candidate = PlotNamespace(
+                    tenant_id=tenant_id.strip(),
+                    farm_id=(farm_id or "default_farm").strip(),
+                    plot_id=plot_namespace.strip(),
+                )
+                if candidate.is_valid():
+                    ns = candidate
+            elif ":" in plot_namespace:
+                parts = [p.strip() for p in plot_namespace.split(":")]
+                if len(parts) == 3 and all(parts):
+                    ns = PlotNamespace(tenant_id=parts[0], farm_id=parts[1], plot_id=parts[2])
+        elif plot_id and tenant_id:
+            candidate = PlotNamespace(
+                tenant_id=tenant_id.strip(),
+                farm_id=(farm_id or "default_farm").strip(),
+                plot_id=plot_id.strip(),
+            )
+            if candidate.is_valid():
+                ns = candidate
+
+        self.namespace: Optional[PlotNamespace] = ns
+        effective_plot_id = ns.plot_id if ns else (plot_id or (plot_namespace if isinstance(plot_namespace, str) else "PLOT_DEFAULT"))
+        self.plot_id: str = effective_plot_id
+        self.tenant_id: str = ns.tenant_id if ns else (tenant_id or "")
+        self.farm_id: str = ns.farm_id if ns else (farm_id or "")
+        self.storage_root = storage_root
+
         if target_grid is not None:
             n_rows = getattr(target_grid, "n_rows", 5)
             n_cols = getattr(target_grid, "n_cols", 5)
@@ -113,7 +228,7 @@ class MesiaAgriBrainBridge:
             oy = float(getattr(target_grid, "origin_y", origin_y) or origin_y)
             c = getattr(target_grid, "crs", crs)
             self.lattice = SharedBeliefLattice(
-                plot_id=plot_id,
+                plot_id=effective_plot_id,
                 cell_size_m=res_m,
                 grid_dim=(n_rows, n_cols),
                 origin_east_m=ox,
@@ -124,7 +239,7 @@ class MesiaAgriBrainBridge:
             )
         elif grid_dim is not None:
             self.lattice = SharedBeliefLattice(
-                plot_id=plot_id,
+                plot_id=effective_plot_id,
                 cell_size_m=cell_size_m,
                 grid_dim=grid_dim,
                 origin_east_m=origin_x,
@@ -134,7 +249,7 @@ class MesiaAgriBrainBridge:
             )
         else:
             self.lattice = SharedBeliefLattice(
-                plot_id=plot_id,
+                plot_id=effective_plot_id,
                 cell_size_m=cell_size_m,
                 grid_dim=(5, 5),
                 origin_east_m=origin_x,
@@ -184,8 +299,12 @@ class MesiaAgriBrainBridge:
             raise ValueError("Principle P-08 violation: packet authority_scope must be evidence_proposal")
 
         # Recompute physical byte digest, confirm tenant/plot-scoped local path,
-        # and require SigMF metadata where applicable. Missing files always fail.
-        is_hash_valid = verify_native_capture_for_plot(packet, self.plot_id)
+        # and require SigMF metadata where applicable. Missing files or namespaces always fail.
+        is_hash_valid = verify_native_capture_for_plot(
+            packet,
+            namespace=self.namespace,
+            storage_root=self.storage_root,
+        )
         native_uri = getattr(packet, "native_data_uri", "") or ""
 
         if not native_uri.strip() or not is_hash_valid:

@@ -2545,6 +2545,7 @@ class MesiaProductionService:
 
         # Verify optical immunity (Principle P-08), ingest into Layer 0 bridge, and embed TruthEnvelope
         bridge = MesiaAgriBrainBridge(
+            plot_namespace=plot_namespace,
             plot_id=plot_id,
             target_grid=target_grid,
             grid_dim=(grid_dim, grid_dim),
@@ -2648,7 +2649,7 @@ class MesiaProductionService:
             p["is_usable_for_assimilation"] = l0_rec.is_usable_for_assimilation
             # A hash or a plausible file:// URI is not a native capture.
             from services.agribrain.mesia.integration import verify_native_capture_for_plot
-            p["native_capture_present"] = verify_native_capture_for_plot(packet, plot_id)
+            p["native_capture_present"] = verify_native_capture_for_plot(packet, plot_namespace)
             p["asmae_observation_event"] = asmae_event.to_dict() if asmae_event and hasattr(asmae_event, "to_dict") else None
 
             # Route observation event via ASMAEObservationDispatcher (WP07 / Finding #14)
