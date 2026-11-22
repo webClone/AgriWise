@@ -530,3 +530,335 @@ def test_batch_a_d02_manifest_timestamp_mismatch_rejection(tmp_path):
     pkt = _packet(uri=data_file.as_uri(), digest=manifest.data_sha256)
     assert not verify_capture_integrity(data_file, expected_namespace=ns, storage_root=tmp_path)
     assert not verify_native_capture_for_plot(pkt, ns, storage_root=tmp_path)
+
+
+# =============================================================================
+# BATCH B ADVERSARIAL COVERAGE — D03 (Cryptographic Capability Governance)
+# =============================================================================
+
+from dataclasses import replace
+from datetime import timedelta
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from services.agribrain.mesia.contracts.authority import CapabilityAuthorityRecord
+from services.agribrain.mesia.assimilation.capability_governance import (
+    CapabilityGovernanceAuthority,
+    DEFAULT_CAPABILITY_ISSUER,
+    provision_test_capability_issuer_keypair,
+    get_test_capability_private_key,
+    register_trusted_capability_issuer,
+    verify_capability_authority,
+    sign_capability_record,
+    clear_capability_revocations_for_tests,
+)
+
+
+def _valid_d03_capability(**kwargs) -> CapabilityAuthorityRecord:
+    """Helper creating a fully qualified, cryptographically signed CapabilityAuthorityRecord."""
+    params = dict(
+        capability_id="CAP_TEST_SOIL_V1",
+        capability_name="WiFi Soil Moisture",
+        target_variable="root_zone_water",
+        supported_radios=["WIFI_CSI"],
+        supported_soils=["LOAM"],
+        supported_crops=["CITRUS"],
+        gate_repeatability_passed=True,
+        gate_sensitivity_passed=True,
+        gate_specificity_passed=True,
+        gate_observability_passed=True,
+        gate_transfer_passed=True,
+        gate_closure_passed=True,
+        gate_incremental_value_passed=True,
+        gate_governance_passed=True,
+        validation_signature="SIG_AUDIT_APPROVED_2026",
+    )
+    params.update(kwargs)
+    return CapabilityGovernanceAuthority.issue_qualification_record(**params)
+
+
+def test_batch_b_d03_valid_capability_authorizes_and_registers():
+    """D03: Properly qualified, signed, unexpired capability registers successfully."""
+    clear_capability_revocations_for_tests()
+    cap = _valid_d03_capability(capability_id="CAP_VALID_01")
+    assert cap.state == "QUALIFIED"
+    assert cap.signature is not None
+    assert cap.signature.startswith("ed25519:")
+    assert cap.all_gates_passed is True
+
+    is_valid, msg = verify_capability_authority(cap)
+    assert is_valid is True, msg
+
+    bridge = MesiaAgriBrainBridge(plot_id="PLOT_D03_VALID")
+    bridge.register_capability(cap)
+    active = bridge.list_active_capabilities()
+    assert len(active) == 1
+    assert active[0].capability_id == "CAP_VALID_01"
+
+
+def test_batch_b_d03_unsigned_capability_rejected_at_registration():
+    """D03: Unsigned capability authority record fails closed on registration."""
+    clear_capability_revocations_for_tests()
+    cap = _valid_d03_capability(capability_id="CAP_UNSIGNED_01")
+    # Strip signature
+    cap_unsigned = replace(cap, signature=None)
+
+    is_valid, reason = verify_capability_authority(cap_unsigned)
+    assert is_valid is False
+    assert "Missing or invalid Ed25519 signature prefix" in reason
+
+    bridge = MesiaAgriBrainBridge(plot_id="PLOT_D03_UNSIGNED")
+    with pytest.raises(ValueError, match="Capability registration rejected \\(D03\\)"):
+        bridge.register_capability(cap_unsigned)
+
+
+def test_batch_b_d03_forged_or_tampered_signature_rejected():
+    """D03: Tampered Ed25519 signature bytes fail closed."""
+    clear_capability_revocations_for_tests()
+    cap = _valid_d03_capability(capability_id="CAP_FORGED_SIG_01")
+    orig_sig = cap.signature
+    assert orig_sig is not None
+
+    # Tamper with the signature hex by flipping a character
+    tampered_sig = orig_sig[:-2] + ("00" if orig_sig[-2:] != "00" else "ff")
+    cap_forged = replace(cap, signature=tampered_sig)
+
+    is_valid, reason = verify_capability_authority(cap_forged)
+    assert is_valid is False
+    assert "signature verification failed" in reason.lower()
+
+    bridge = MesiaAgriBrainBridge(plot_id="PLOT_D03_FORGED")
+    with pytest.raises(ValueError, match="Capability registration rejected \\(D03\\)"):
+        bridge.register_capability(cap_forged)
+
+
+def test_batch_b_d03_tampered_canonical_payload_rejected():
+    """D03: Valid signature over altered canonical content fails closed."""
+    clear_capability_revocations_for_tests()
+    cap = _valid_d03_capability(capability_id="CAP_TAMPERED_BODY_01")
+
+    # Tamper with target variable after signature was generated
+    cap_tampered = replace(cap, target_variable="salinity_stress")
+
+    is_valid, reason = verify_capability_authority(cap_tampered)
+    assert is_valid is False
+    assert "signature verification failed" in reason.lower()
+
+    bridge = MesiaAgriBrainBridge(plot_id="PLOT_D03_TAMPERED")
+    with pytest.raises(ValueError, match="Capability registration rejected \\(D03\\)"):
+        bridge.register_capability(cap_tampered)
+
+
+def test_batch_b_d03_untrusted_issuer_rejected():
+    """D03: Capability signed by an unprovisioned or untrusted issuer fails closed."""
+    clear_capability_revocations_for_tests()
+    rogue_priv = ed25519.Ed25519PrivateKey.generate()
+    cap_base = _valid_d03_capability(capability_id="CAP_ROGUE_01")
+
+    # Sign with rogue key under untrusted issuer name
+    cap_rogue = sign_capability_record(
+        cap_base, rogue_priv, issuer_id="agriwise:trust:unauthorized_rogue_entity"
+    )
+
+    is_valid, reason = verify_capability_authority(cap_rogue)
+    assert is_valid is False
+    assert "Untrusted or unprovisioned capability issuer" in reason
+
+    bridge = MesiaAgriBrainBridge(plot_id="PLOT_D03_ROGUE")
+    with pytest.raises(ValueError, match="Untrusted or unprovisioned capability issuer"):
+        bridge.register_capability(cap_rogue)
+
+
+def test_batch_b_d03_expired_capability_rejected_and_excluded_from_active():
+    """D03: Expired capability authority is rejected and drops from active enumeration."""
+    clear_capability_revocations_for_tests()
+    now = datetime.now(timezone.utc)
+    expired_time = now - timedelta(days=1)
+    priv = get_test_capability_private_key(DEFAULT_CAPABILITY_ISSUER)
+    assert priv is not None
+
+    cap_base = _valid_d03_capability(capability_id="CAP_EXPIRED_01")
+    cap_expired = sign_capability_record(cap_base, priv, expires_at=expired_time)
+
+    # 1. Registration fails closed for already-expired capability
+    is_valid, reason = verify_capability_authority(cap_expired)
+    assert is_valid is False
+    assert "expired" in reason.lower()
+
+    bridge = MesiaAgriBrainBridge(plot_id="PLOT_D03_EXP")
+    with pytest.raises(ValueError, match="Capability registration rejected \\(D03\\)"):
+        bridge.register_capability(cap_expired)
+
+    # 2. Dynamic runtime expiration exclusion
+    cap_valid = _valid_d03_capability(capability_id="CAP_VALID_EXP_01")
+    bridge.register_capability(cap_valid)
+    assert len(bridge.list_active_capabilities()) == 1
+
+    # Simulate future time past expiration
+    future_time = now + timedelta(days=365)
+    is_still_valid, future_reason = verify_capability_authority(cap_valid, current_time=future_time)
+    assert is_still_valid is False
+    assert "expired" in future_reason.lower()
+
+
+def test_batch_b_d03_future_issuance_rejected():
+    """D03: Capability with post-dated issued_at fails closed."""
+    clear_capability_revocations_for_tests()
+    future_issued = datetime.now(timezone.utc) + timedelta(days=7)
+    priv = get_test_capability_private_key(DEFAULT_CAPABILITY_ISSUER)
+    assert priv is not None
+
+    cap_base = _valid_d03_capability(capability_id="CAP_FUTURE_01")
+    cap_future_unsigned = replace(cap_base, issued_at=future_issued)
+    cap_future = sign_capability_record(cap_future_unsigned, priv)
+
+    is_valid, reason = verify_capability_authority(cap_future)
+    assert is_valid is False
+    assert "in the future" in reason.lower()
+
+    bridge = MesiaAgriBrainBridge(plot_id="PLOT_D03_FUT")
+    with pytest.raises(ValueError, match="Capability registration rejected \\(D03\\)"):
+        bridge.register_capability(cap_future)
+
+
+def test_batch_b_d03_incomplete_gates_rejected_even_if_signed():
+    """D03: Missing even one of the 8 qualification gates fails closed."""
+    clear_capability_revocations_for_tests()
+    priv = get_test_capability_private_key(DEFAULT_CAPABILITY_ISSUER)
+    assert priv is not None
+
+    # gate_closure_passed=False
+    cap_incomplete = CapabilityGovernanceAuthority.issue_qualification_record(
+        capability_id="CAP_INCOMPLETE_GATES_01",
+        capability_name="Incomplete Gates Cap",
+        target_variable="root_zone_water",
+        supported_radios=["WIFI_CSI"],
+        supported_soils=["LOAM"],
+        supported_crops=["CITRUS"],
+        gate_repeatability_passed=True,
+        gate_sensitivity_passed=True,
+        gate_specificity_passed=True,
+        gate_observability_passed=True,
+        gate_transfer_passed=True,
+        gate_closure_passed=False,  # Failed gate!
+        gate_incremental_value_passed=True,
+        gate_governance_passed=True,
+        validation_signature="SIG_AUDIT_APPROVED_2026",
+    )
+    assert cap_incomplete.state == "UNQUALIFIED_PENDING_EVIDENCE"
+    assert cap_incomplete.signature is None
+
+    # Even if an adversary forces state='QUALIFIED' and signs with valid key:
+    cap_forced = replace(cap_incomplete, state="QUALIFIED")
+    cap_forced_signed = sign_capability_record(cap_forced, priv)
+
+    is_valid, reason = verify_capability_authority(cap_forced_signed)
+    assert is_valid is False
+    assert "Not all 8 qualification gates passed" in reason
+
+    bridge = MesiaAgriBrainBridge(plot_id="PLOT_D03_GATES")
+    with pytest.raises(ValueError, match="Not all 8 qualification gates passed"):
+        bridge.register_capability(cap_forced_signed)
+
+
+def test_batch_b_d03_empty_or_wildcard_target_variable_rejected():
+    """D03: Principle P-09: Clusters are never globally certified; empty or wildcard target variable fails closed."""
+    clear_capability_revocations_for_tests()
+    priv = get_test_capability_private_key(DEFAULT_CAPABILITY_ISSUER)
+    assert priv is not None
+
+    for invalid_target in ["", "   ", "*", "ALL", "GLOBAL", "UNSPECIFIED_PENDING_CALIBRATED_OPERATOR"]:
+        cap = _valid_d03_capability(capability_id=f"CAP_INV_TARGET_{hash(invalid_target)}")
+        cap_inv = replace(cap, target_variable=invalid_target)
+        cap_inv_signed = sign_capability_record(cap_inv, priv)
+
+        is_valid, reason = verify_capability_authority(cap_inv_signed)
+        assert is_valid is False, f"Expected invalid for target {invalid_target!r}"
+        assert "explicit target variable required" in reason
+
+        bridge = MesiaAgriBrainBridge(plot_id="PLOT_D03_TARGET")
+        with pytest.raises(ValueError, match="explicit target variable required"):
+            bridge.register_capability(cap_inv_signed)
+
+
+def test_batch_b_d03_prohibited_actuation_use_rejected():
+    """D03: Prohibit autonomous actuation and authoritative state mutation in allowed_uses."""
+    clear_capability_revocations_for_tests()
+    priv = get_test_capability_private_key(DEFAULT_CAPABILITY_ISSUER)
+    assert priv is not None
+
+    for forbidden_use in ["AUTONOMOUS_ACTUATION", "AUTHORITATIVE_STATE_MUTATION", "AUTONOMOUS_IRRIGATION"]:
+        cap = _valid_d03_capability(capability_id=f"CAP_FORBIDDEN_{hash(forbidden_use)}")
+        cap_bad = replace(cap, allowed_uses=["RESEARCH_ONLY", forbidden_use])
+        cap_bad_signed = sign_capability_record(cap_bad, priv)
+
+        is_valid, reason = verify_capability_authority(cap_bad_signed)
+        assert is_valid is False, f"Expected invalid for use {forbidden_use!r}"
+        assert "Forbidden use" in reason
+
+        bridge = MesiaAgriBrainBridge(plot_id="PLOT_D03_USE")
+        with pytest.raises(ValueError, match="Forbidden use"):
+            bridge.register_capability(cap_bad_signed)
+
+
+def test_batch_b_d03_revoked_capability_immediately_withdrawn():
+    """D03 / P-10: Revoking a capability transitions state and excludes it from active enumeration."""
+    clear_capability_revocations_for_tests()
+    cap = _valid_d03_capability(capability_id="CAP_TO_BE_REVOKED_01")
+    bridge = MesiaAgriBrainBridge(plot_id="PLOT_D03_REV")
+    bridge.register_capability(cap)
+    assert len(bridge.list_active_capabilities()) == 1
+
+    rev_event = bridge.revoke_capability("CAP_TO_BE_REVOKED_01", trigger_reason="Closure error threshold exceeded")
+    assert rev_event is not None
+    assert rev_event.new_state == "REVOKED"
+    assert rev_event.capability_authority_ref == "CAP_TO_BE_REVOKED_01"
+
+    # Active capabilities list must immediately be empty
+    assert len(bridge.list_active_capabilities()) == 0
+
+    # Verification must fail closed
+    is_valid, reason = verify_capability_authority(cap)
+    assert is_valid is False
+    assert "revoked" in reason.lower()
+
+
+def test_batch_b_d03_mesia_bridge_withholds_agricultural_state_mutation(tmp_path):
+    """D03: Verified SigMF capture under active capability strictly withholds agricultural state mutation."""
+    clear_capability_revocations_for_tests()
+    tenant = "tenant-d03-assim"
+    plot = "plot-d03-assim"
+    ns = PlotNamespace(tenant_id=tenant, farm_id="farm-d03", plot_id=plot)
+
+    raw = b"physical_radio_csi_iq_bytes_batch_b"
+    meta = {
+        "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe_v2"},
+        "captures": [{
+            "core:datetime": datetime(2026, 11, 22, 16, 0, 0, tzinfo=timezone.utc).isoformat(),
+            "core:frequency": 2.437e9,
+        }],
+        "annotations": [{"core:sample_count": 16}],
+    }
+    manifest = ingest_sigmf_capture(tenant, plot, raw, meta, storage_root=tmp_path)
+    data_file = Path(manifest.data_path)
+    pkt = _packet(uri=data_file.as_uri(), digest=manifest.data_sha256, profile="WIFI_CSI/v2", role="SENSING")
+
+    bridge = MesiaAgriBrainBridge(plot_namespace=ns, storage_root=tmp_path)
+
+    # Register qualified capability for WIFI_CSI root_zone_water
+    cap = _valid_d03_capability(capability_id="CAP_ASSIM_HOLD_01")
+    bridge.register_capability(cap)
+    assert len(bridge.list_active_capabilities()) == 1
+
+    # Ingest packet with valid calibration and epoch
+    l0_rec, asmae_event = bridge.process_and_admit_observation(
+        pkt, is_calibration_valid=True, is_epoch_active=True,
+    )
+
+    # Invariants:
+    # 1. Native capture is physically verified
+    assert verify_native_capture_for_plot(pkt, ns, storage_root=tmp_path) is True
+    # 2. Observation innovation is ABSENT (uncalibrated physical inversion withheld)
+    assert l0_rec.status == EvidenceAdmissionStatus.ABSENT
+    assert l0_rec.is_usable_for_assimilation is False
+    # 3. No agricultural state update authority is granted
+    assert asmae_event is None
+

@@ -262,12 +262,17 @@ class MesiaAgriBrainBridge:
         self._revocation_history: List[RevocationEvent] = []
 
     def register_capability(self, capability: CapabilityAuthorityRecord) -> None:
-        """Register a qualified capability authority record."""
+        """Register a qualified capability authority record with cryptographic verification (D03)."""
+        from .assimilation.capability_governance import verify_capability_authority
+        is_valid, reason = verify_capability_authority(capability)
+        if not is_valid:
+            raise ValueError(f"Capability registration rejected (D03): {reason}")
         self._active_capabilities[capability.capability_id] = capability
 
     def list_active_capabilities(self) -> List[CapabilityAuthorityRecord]:
-        """List all active qualified capabilities."""
-        return [c for c in self._active_capabilities.values() if c.state == "QUALIFIED"]
+        """List all active qualified capabilities, filtering out expired or revoked capabilities at runtime (D03)."""
+        from .assimilation.capability_governance import verify_capability_authority
+        return [c for c in self._active_capabilities.values() if verify_capability_authority(c)[0]]
 
     def process_and_admit_observation(
         self,

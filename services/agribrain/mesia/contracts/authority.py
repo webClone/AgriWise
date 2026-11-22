@@ -72,6 +72,69 @@ class CapabilityAuthorityRecord:
     # Rollback Strategy
     fallback_capability_ref: str = ""
 
+    # Cryptographic & Governance Authority (D03)
+    issuer_id: str = "agriwise:trust:mesia_science_gate"
+    issuer_public_key: Optional[str] = None
+    signature: Optional[str] = None
+    validation_signature: Optional[str] = None
+    qualification_receipt_hash: Optional[str] = None
+
+    def compute_canonical_bytes(self) -> bytes:
+        """Deterministic canonical JSON serialization of authoritative capability fields for signing (D03)."""
+        def _iso_utc(val: Any) -> str:
+            if val is None:
+                return ""
+            if isinstance(val, str):
+                val = val.strip()
+                if not val:
+                    return ""
+                try:
+                    val = datetime.fromisoformat(val)
+                except Exception:
+                    return val
+            if isinstance(val, datetime):
+                from datetime import timezone
+                dt = val if val.tzinfo else val.replace(tzinfo=timezone.utc)
+                return dt.isoformat()
+            return str(val)
+
+        payload = {
+            "allowed_uses": sorted([str(x).strip() for x in self.allowed_uses]),
+            "approved_by": sorted([str(x).strip() for x in self.approved_by]),
+            "capability_id": str(self.capability_id).strip(),
+            "capability_name": str(self.capability_name).strip(),
+            "climate_zones": sorted([str(x).strip() for x in self.climate_zones]),
+            "closure_certificate_ref": str(self.closure_certificate_ref).strip(),
+            "expires_at": _iso_utc(self.expires_at),
+            "fallback_capability_ref": str(self.fallback_capability_ref).strip(),
+            "gate_closure_passed": bool(self.gate_closure_passed),
+            "gate_governance_passed": bool(self.gate_governance_passed),
+            "gate_incremental_value_passed": bool(self.gate_incremental_value_passed),
+            "gate_observability_passed": bool(self.gate_observability_passed),
+            "gate_repeatability_passed": bool(self.gate_repeatability_passed),
+            "gate_sensitivity_passed": bool(self.gate_sensitivity_passed),
+            "gate_specificity_passed": bool(self.gate_specificity_passed),
+            "gate_transfer_passed": bool(self.gate_transfer_passed),
+            "geographic_domain": str(self.geographic_domain).strip(),
+            "issued_at": _iso_utc(self.issued_at),
+            "issuer_id": str(self.issuer_id).strip(),
+            "observability_certificate_ref": str(self.observability_certificate_ref).strip(),
+            "preregistration_ref": str(self.preregistration_ref).strip(),
+            "prohibited_uses": sorted([str(x).strip() for x in self.prohibited_uses]),
+            "qualification_receipt_hash": str(self.qualification_receipt_hash or "").strip(),
+            "renewal_cadence_days": int(self.renewal_cadence_days),
+            "review_board": str(self.review_board).strip(),
+            "state": str(self.state).strip(),
+            "supported_crop_types": sorted([str(x).strip() for x in self.supported_crop_types]),
+            "supported_moisture_range": [float(x) for x in self.supported_moisture_range],
+            "supported_radio_families": sorted([str(x).strip() for x in self.supported_radio_families]),
+            "supported_soil_textures": sorted([str(x).strip() for x in self.supported_soil_textures]),
+            "target_variable": str(self.target_variable).strip(),
+            "version": str(self.version).strip(),
+        }
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return raw.encode("utf-8")
+
     def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {}
         for f in self.__dataclass_fields__:
