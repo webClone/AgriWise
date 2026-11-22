@@ -174,11 +174,14 @@ def test_asmae_raster_matches_ndvi_clean_coverage():
     """Verify that ASMAE diagnostic rasters for plot 6a09d9e91dd0c7ed6fce7d50 completely cover the polygon and match NDVI_CLEAN mask."""
     from services.agribrain.layer05_asmae.plot_snapshot_store import load_latest_plot_snapshot, PlotNamespace
     ns = PlotNamespace(tenant_id="697ddd3bd4195b809226a67b", farm_id="69ad7b6f7e6843e8234afcf6", plot_id="6a09d9e91dd0c7ed6fce7d50")
-    snapshot = load_latest_plot_snapshot(ns)
+    snapshot = load_latest_plot_snapshot(ns, force_verify=True)
     assert snapshot is not None, "Canonical snapshot for plot must exist"
 
     surfaces = snapshot.get("frontend_payload", {}).get("surfaces", [])
-    surface_map = {s.get("type"): s for s in surfaces if isinstance(s, dict)}
+    surface_map = {
+        (s.get("type") or s.get("surface_type") or s.get("semantic_type")): s
+        for s in surfaces if isinstance(s, dict)
+    }
 
     assert "NDVI_CLEAN" in surface_map, "NDVI_CLEAN must be in publication surfaces"
     assert "CANOPY_ASMAE_VIGOR" in surface_map, "CANOPY_ASMAE_VIGOR must be in publication surfaces"

@@ -141,11 +141,21 @@ def setup_empirical_environment(base_dir: Path | None = None) -> Path:
     return base_dir
 
 
+_ORIG_SNAPSHOT_ROOT = asmae_store.PLOT_SNAPSHOT_ROOT
+
+
 def teardown_empirical_environment() -> None:
     """Clean up registrations and in-memory test stores."""
     _DEVICE_REGISTRY.clear()
     tb.clear_sensor_receipts()
     tb.clear_publication_receipts()
+    asmae_store.PLOT_SNAPSHOT_ROOT = _ORIG_SNAPSHOT_ROOT
+    asmae_store._CANONICAL_SNAPSHOT_CACHE.clear()
+    try:
+        from services.agribrain.app.main import _SNAPSHOT_RESPONSE_CACHE
+        _SNAPSHOT_RESPONSE_CACHE.clear()
+    except ImportError:
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -153,7 +163,6 @@ def _setup_empirical_run_environment(tmp_path, monkeypatch):
     """Enforce strict observation-only interlock and isolated runtime stores in pytest."""
     monkeypatch.setenv(ENABLE_FLAG, "false")
     setup_empirical_environment(tmp_path)
-    monkeypatch.setattr(asmae_store, "PLOT_SNAPSHOT_ROOT", tmp_path / "snapshots")
     yield
     teardown_empirical_environment()
 
