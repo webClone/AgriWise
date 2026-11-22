@@ -1079,10 +1079,13 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
         from fastapi.testclient import TestClient
         from services.agribrain.app.main import app
         from services.agribrain.app.internal_service_auth import compute_request_signature
+        from services.agribrain.layer05_asmae import plot_snapshot_store
         from services.agribrain.layer05_asmae.plot_snapshot_store import (
             load_and_validate_plot_snapshot_by_id, evaluate_snapshot_admission,
         )
         import time, uuid
+
+        plot_snapshot_store.PLOT_SNAPSHOT_ROOT = self.orig_plot_root
 
         plot_ns = PlotNamespace(
             tenant_id="697ddd3bd4195b809226a67b",
