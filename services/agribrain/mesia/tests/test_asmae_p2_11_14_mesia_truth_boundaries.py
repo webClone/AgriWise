@@ -438,3 +438,95 @@ def test_batch_a_d02_inconsistent_capture_id_rejection(tmp_path):
     pkt = _packet(uri=data_file.as_uri(), digest=manifest.data_sha256)
     assert not verify_capture_integrity(data_file, expected_namespace=ns, storage_root=tmp_path)
     assert not verify_native_capture_for_plot(pkt, ns, storage_root=tmp_path)
+
+
+def test_batch_a_d01_invalid_namespace_identifiers_fail_closed_without_exception(tmp_path):
+    """D01: Malformed/adversarial namespace identifiers return False without raising."""
+    raw = b"sigmf_iq_data_safe"
+    meta = {
+        "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
+        "captures": [{
+            "core:datetime": datetime(2026, 11, 22, 14, 0, 0, tzinfo=timezone.utc).isoformat(),
+            "core:frequency": 2.45e9,
+        }],
+        "annotations": [{"core:sample_count": 10}],
+    }
+    manifest = ingest_sigmf_capture("tenant-valid", "plot-valid", raw, meta, storage_root=tmp_path)
+    data_file = Path(manifest.data_path)
+    pkt = _packet(uri=data_file.as_uri(), digest=manifest.data_sha256)
+
+    # Various malformed/adversarial namespace inputs that previously could trigger ValueError in _sanitize_id
+    malformed_namespaces = [
+        "",
+        "   ",
+        "../../etc",
+        "tenant/../../escape",
+        {"tenant_id": "../traversal", "farm_id": "f", "plot_id": "p"},
+        {"tenant_id": "t", "farm_id": "f", "plot_id": "p/../escape"},
+        PlotNamespace(tenant_id="../../bad_tenant", farm_id="farm", plot_id="plot"),
+        PlotNamespace(tenant_id="tenant", farm_id="farm", plot_id="bad\x00plot"),
+        None,
+        12345,
+    ]
+
+    for bad_ns in malformed_namespaces:
+        result = verify_native_capture_for_plot(pkt, bad_ns, storage_root=tmp_path)
+        assert result is False, f"Expected False for {bad_ns!r}, got {result}"
+
+
+def test_batch_a_d02_manifest_storage_prefix_mismatch_rejection(tmp_path):
+    """D02: Manifest with mismatched storage_prefix fails closed."""
+    tenant = "tenant-d02-prefix"
+    plot = "plot-d02-prefix"
+    ns = PlotNamespace(tenant_id=tenant, farm_id="farm-1", plot_id=plot)
+
+    raw = b"sigmf_iq_data_prefix_test"
+    meta = {
+        "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
+        "captures": [{
+            "core:datetime": datetime(2026, 11, 22, 14, 0, 0, tzinfo=timezone.utc).isoformat(),
+            "core:frequency": 2.45e9,
+        }],
+        "annotations": [{"core:sample_count": 10}],
+    }
+    manifest = ingest_sigmf_capture(tenant, plot, raw, meta, storage_root=tmp_path)
+    manifest_file = Path(str(manifest.storage_prefix) + ".manifest.json")
+
+    # Tamper storage_prefix in manifest to point elsewhere
+    man_data = json.loads(manifest_file.read_text(encoding="utf-8"))
+    man_data["storage_prefix"] = str(tmp_path / "other_tenant" / "other_plot" / manifest.capture_id)
+    manifest_file.write_text(json.dumps(man_data), encoding="utf-8")
+
+    data_file = Path(manifest.data_path)
+    pkt = _packet(uri=data_file.as_uri(), digest=manifest.data_sha256)
+    assert not verify_capture_integrity(data_file, expected_namespace=ns, storage_root=tmp_path)
+    assert not verify_native_capture_for_plot(pkt, ns, storage_root=tmp_path)
+
+
+def test_batch_a_d02_manifest_timestamp_mismatch_rejection(tmp_path):
+    """D02: Desynchronized capture_timestamp_utc between manifest and SigMF meta fails closed."""
+    tenant = "tenant-d02-time"
+    plot = "plot-d02-time"
+    ns = PlotNamespace(tenant_id=tenant, farm_id="farm-1", plot_id=plot)
+
+    raw = b"sigmf_iq_data_time_test"
+    meta = {
+        "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
+        "captures": [{
+            "core:datetime": datetime(2026, 11, 22, 14, 0, 0, tzinfo=timezone.utc).isoformat(),
+            "core:frequency": 2.45e9,
+        }],
+        "annotations": [{"core:sample_count": 10}],
+    }
+    manifest = ingest_sigmf_capture(tenant, plot, raw, meta, storage_root=tmp_path)
+    manifest_file = Path(str(manifest.storage_prefix) + ".manifest.json")
+
+    # Alter timestamp in manifest while leaving meta unchanged
+    man_data = json.loads(manifest_file.read_text(encoding="utf-8"))
+    man_data["capture_timestamp_utc"] = datetime(2026, 11, 22, 18, 0, 0, tzinfo=timezone.utc).isoformat()
+    manifest_file.write_text(json.dumps(man_data), encoding="utf-8")
+
+    data_file = Path(manifest.data_path)
+    pkt = _packet(uri=data_file.as_uri(), digest=manifest.data_sha256)
+    assert not verify_capture_integrity(data_file, expected_namespace=ns, storage_root=tmp_path)
+    assert not verify_native_capture_for_plot(pkt, ns, storage_root=tmp_path)

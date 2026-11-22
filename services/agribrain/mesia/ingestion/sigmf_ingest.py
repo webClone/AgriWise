@@ -325,6 +325,39 @@ def verify_capture_integrity(
         if expected_plot and manifest_plot != expected_plot:
             return False
 
+        # Cross-check capture_timestamp_utc with captures[0]["core:datetime"]
+        meta_dt_str = str(captures[0].get("core:datetime", "")).strip()
+        manifest_dt_str = str(manifest_dict.get("capture_timestamp_utc", "")).strip()
+        if not meta_dt_str or not manifest_dt_str:
+            return False
+        try:
+            meta_dt = datetime.fromisoformat(meta_dt_str.replace("Z", "+00:00"))
+            manifest_dt = datetime.fromisoformat(manifest_dt_str.replace("Z", "+00:00"))
+            if meta_dt != manifest_dt:
+                return False
+        except (ValueError, TypeError):
+            if meta_dt_str != manifest_dt_str:
+                return False
+
+        # Cross-check manifest storage_prefix against verified capture prefix
+        manifest_storage_prefix = str(manifest_dict.get("storage_prefix", "")).strip()
+        if not manifest_storage_prefix:
+            return False
+        manifest_prefix_path = Path(manifest_storage_prefix)
+        if manifest_prefix_path.name.lower() != computed_capture_id:
+            return False
+        if manifest_prefix_path.is_absolute():
+            try:
+                if manifest_prefix_path.resolve() != prefix.resolve():
+                    return False
+            except (OSError, ValueError):
+                return False
+        else:
+            parts = manifest_prefix_path.parts
+            if len(parts) >= 3:
+                if (parts[-3] != manifest_tenant or parts[-2] != manifest_plot or parts[-1].lower() != computed_capture_id):
+                    return False
+
         # 8. Verify directory namespace hierarchy matches manifest
         resolved_dest = dest_dir.resolve(strict=True)
         if len(resolved_dest.parts) < 2 or resolved_dest.parts[-2] != manifest_tenant or resolved_dest.parts[-1] != manifest_plot:

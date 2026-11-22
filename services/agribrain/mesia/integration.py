@@ -41,61 +41,62 @@ def verify_native_capture_for_plot(
     native physical evidence. No HTTP, remote, relative, or unscoped file reads.
     Both tenant and plot directory names must match the authenticated PlotNamespace.
     """
-    import hashlib
-    from pathlib import Path
-    from urllib.parse import urlsplit
-    from urllib.request import url2pathname
-    from services.agribrain.common.plot_namespace import PlotNamespace, _coerce_namespace
-    from .ingestion.sigmf_ingest import DEFAULT_STORAGE_ROOT, verify_capture_integrity, _sanitize_id
+    try:
+        import hashlib
+        from pathlib import Path
+        from urllib.parse import urlsplit
+        from urllib.request import url2pathname
+        from services.agribrain.common.plot_namespace import PlotNamespace, _coerce_namespace
+        from .ingestion.sigmf_ingest import DEFAULT_STORAGE_ROOT, verify_capture_integrity, _sanitize_id
 
-    # 1. Enforce authenticated PlotNamespace (D01)
-    target_ns: Optional[PlotNamespace] = None
-    if isinstance(namespace, PlotNamespace):
-        if namespace.is_valid():
-            target_ns = namespace
-    elif isinstance(namespace, Mapping):
-        try:
-            candidate = _coerce_namespace(namespace, tenant_id=tenant_id or "", farm_id="")
-            if candidate.is_valid():
-                target_ns = candidate
-        except (ValueError, TypeError):
-            return False
-    elif isinstance(namespace, str) and namespace.strip():
-        if tenant_id and tenant_id.strip():
+        # 1. Enforce authenticated PlotNamespace (D01)
+        target_ns: Optional[PlotNamespace] = None
+        if isinstance(namespace, PlotNamespace):
+            if namespace.is_valid():
+                target_ns = namespace
+        elif isinstance(namespace, Mapping):
+            try:
+                candidate = _coerce_namespace(namespace, tenant_id=tenant_id or "", farm_id="")
+                if candidate.is_valid():
+                    target_ns = candidate
+            except (ValueError, TypeError):
+                return False
+        elif isinstance(namespace, str) and namespace.strip():
+            if tenant_id and tenant_id.strip():
+                candidate = PlotNamespace(
+                    tenant_id=tenant_id.strip(),
+                    farm_id="default_farm",
+                    plot_id=namespace.strip(),
+                )
+                if candidate.is_valid():
+                    target_ns = candidate
+            elif ":" in namespace:
+                parts = [p.strip() for p in namespace.split(":")]
+                if len(parts) == 3 and all(parts):
+                    target_ns = PlotNamespace(tenant_id=parts[0], farm_id=parts[1], plot_id=parts[2])
+        elif plot_id and tenant_id:
             candidate = PlotNamespace(
                 tenant_id=tenant_id.strip(),
                 farm_id="default_farm",
-                plot_id=namespace.strip(),
+                plot_id=plot_id.strip(),
             )
             if candidate.is_valid():
                 target_ns = candidate
-        elif ":" in namespace:
-            parts = [p.strip() for p in namespace.split(":")]
-            if len(parts) == 3 and all(parts):
-                target_ns = PlotNamespace(tenant_id=parts[0], farm_id=parts[1], plot_id=parts[2])
-    elif plot_id and tenant_id:
-        candidate = PlotNamespace(
-            tenant_id=tenant_id.strip(),
-            farm_id="default_farm",
-            plot_id=plot_id.strip(),
-        )
-        if candidate.is_valid():
-            target_ns = candidate
 
-    # Missing namespace or plot-only string without authenticated tenant fails closed
-    if target_ns is None or not target_ns.is_valid():
-        return False
+        # Missing namespace or plot-only string without authenticated tenant fails closed
+        if target_ns is None or not target_ns.is_valid():
+            return False
 
-    target_tenant = _sanitize_id(target_ns.tenant_id, "tenant_id")
-    target_plot = _sanitize_id(target_ns.plot_id, "plot_id")
+        target_tenant = _sanitize_id(target_ns.tenant_id, "tenant_id")
+        target_plot = _sanitize_id(target_ns.plot_id, "plot_id")
 
-    uri = getattr(packet, "native_data_uri", "") or ""
-    expected_hash = getattr(packet, "native_data_hash", "") or ""
-    if (not isinstance(uri, str) or not isinstance(expected_hash, str)
-            or len(expected_hash) != 64
-            or any(c not in "0123456789abcdefABCDEF" for c in expected_hash)):
-        return False
-    try:
+        uri = getattr(packet, "native_data_uri", "") or ""
+        expected_hash = getattr(packet, "native_data_hash", "") or ""
+        if (not isinstance(uri, str) or not isinstance(expected_hash, str)
+                or len(expected_hash) != 64
+                or any(c not in "0123456789abcdefABCDEF" for c in expected_hash)):
+            return False
+
         parsed = urlsplit(uri)
         if (parsed.scheme != "file" or parsed.netloc
                 or parsed.query or parsed.fragment):
@@ -140,7 +141,7 @@ def verify_native_capture_for_plot(
         if candidate_resolved.name.endswith((".sigmf-data", ".sigmf-meta")):
             return verify_capture_integrity(candidate_resolved, expected_namespace=target_ns, storage_root=root)
         return True
-    except (OSError, ValueError, RuntimeError):
+    except (OSError, ValueError, RuntimeError, TypeError, AttributeError, KeyError):
         return False
 
 
