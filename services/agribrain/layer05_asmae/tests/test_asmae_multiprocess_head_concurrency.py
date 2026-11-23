@@ -246,6 +246,24 @@ def test_multiprocess_concurrent_head_supersession_atomic(tmp_path):
     latest = plot_snapshot_store.load_latest_plot_snapshot(ns, force_verify=True)
     assert latest is not None
     assert latest["snapshot_id"] == winning_snap_id
+    assert latest["validation"]["numericalBindingValid"] is True
+
+    # Winning snapshot is retrievable by exact ID
+    exact_winner = plot_snapshot_store.load_and_validate_plot_snapshot_by_id(winning_snap_id, namespace=ns)
+    assert exact_winner is not None
+    assert exact_winner["snapshot_id"] == winning_snap_id
+    assert exact_winner["validation"]["numericalBindingValid"] is True
+
+    # Acceptance Test 2: Exact API requests for the three losing snapshot IDs return unavailable/uncommitted
+    for fail_snap_id, _, _ in failures:
+        exact_loser = plot_snapshot_store.load_and_validate_plot_snapshot_by_id(fail_snap_id, namespace=ns)
+        assert exact_loser is None, f"Losing snapshot {fail_snap_id} must be uncommitted and unavailable via exact lookup"
+
+    # Acceptance Test 3: Previously committed, genuinely superseded snapshot remains retrievable by exact ID
+    exact_superseded = plot_snapshot_store.load_and_validate_plot_snapshot_by_id(initial_snap_id, namespace=ns)
+    assert exact_superseded is not None, "Genuinely superseded initial head must remain retrievable by exact ID"
+    assert exact_superseded["snapshot_id"] == initial_snap_id
+    assert exact_superseded["validation"]["numericalBindingValid"] is True
 
 
 def test_multiprocess_concurrent_initial_head_race_atomic(tmp_path):
@@ -314,3 +332,15 @@ def test_multiprocess_concurrent_initial_head_race_atomic(tmp_path):
     latest = plot_snapshot_store.load_latest_plot_snapshot(ns, force_verify=True)
     assert latest is not None
     assert latest["snapshot_id"] == winning_snap_id
+    assert latest["validation"]["numericalBindingValid"] is True
+
+    # Winning snapshot is retrievable by exact ID
+    exact_winner = plot_snapshot_store.load_and_validate_plot_snapshot_by_id(winning_snap_id, namespace=ns)
+    assert exact_winner is not None
+    assert exact_winner["snapshot_id"] == winning_snap_id
+    assert exact_winner["validation"]["numericalBindingValid"] is True
+
+    # Acceptance Test 2: Exact API requests for the three losing snapshot IDs return unavailable/uncommitted
+    for fail_snap_id, _, _ in failures:
+        exact_loser = plot_snapshot_store.load_and_validate_plot_snapshot_by_id(fail_snap_id, namespace=ns)
+        assert exact_loser is None, f"Losing snapshot {fail_snap_id} must be uncommitted and unavailable via exact lookup"

@@ -174,17 +174,19 @@ def validate_certified_numerical_publication(
     num_rec: Any,
     frontend_payload: Dict[str, Any],
     scientific_result: Dict[str, Any],
+    node: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Validate completeness, physical sanity, and exact cryptographic digest agreement.
 
-    Enforces that before any files are written or head is mutated under CERTIFIED_NUMERICAL:
+    Enforces identical author-time and reader-time verification under CERTIFIED_NUMERICAL:
     1. Complete uncertainty validation passes (keys match, finite, non-negative).
     2. The vector numerical hash is recomputed directly from states and sigmas.
     3. num_rec['numerical_vector_hash'] matches recomputed hash.
-    4. asmae_proof['numerical_vector_hash'] (if present) matches recomputed hash.
-    5. scientific_evidence_lineage['asmae_posterior_vector_hash'] (if present) matches recomputed hash.
+    4. Mandatory asmae_proof['numerical_vector_hash'] matches recomputed hash.
+    5. Mandatory scientific_evidence_lineage['asmae_posterior_vector_hash'] matches recomputed hash.
     6. scientific_result['asmae_numerical_digest'] (if present) matches recomputed hash.
     7. scientific_result.get("asmae", {}).get("asmae_numerical_digest") (if present) matches recomputed hash.
+    8. node numerical digest (if present) matches recomputed hash.
 
     Returns the recomputed actual_num_hash on success; raises ValueError otherwise.
     """
@@ -212,14 +214,24 @@ def validate_certified_numerical_publication(
             f"ASMAE numerical posterior hash mismatch: recomputed {actual_num_hash} != claimed record {claimed_num_hash}"
         )
 
-    claimed_proof_hash = (frontend_payload.get("asmae_proof") or {}).get("numerical_vector_hash")
-    if claimed_proof_hash and claimed_proof_hash != actual_num_hash:
+    proof = frontend_payload.get("asmae_proof")
+    if not isinstance(proof, dict) or not proof.get("numerical_vector_hash"):
+        raise ValueError(
+            "CERTIFIED_NUMERICAL publication requires mandatory frontend_payload['asmae_proof']['numerical_vector_hash']"
+        )
+    claimed_proof_hash = proof.get("numerical_vector_hash")
+    if claimed_proof_hash != actual_num_hash:
         raise ValueError(
             f"ASMAE proof numerical vector hash mismatch: recomputed {actual_num_hash} != claimed asmae_proof {claimed_proof_hash}"
         )
 
-    claimed_lineage_hash = (frontend_payload.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
-    if claimed_lineage_hash and claimed_lineage_hash != actual_num_hash:
+    lineage = frontend_payload.get("scientific_evidence_lineage")
+    if not isinstance(lineage, dict) or not lineage.get("asmae_posterior_vector_hash"):
+        raise ValueError(
+            "CERTIFIED_NUMERICAL publication requires mandatory frontend_payload['scientific_evidence_lineage']['asmae_posterior_vector_hash']"
+        )
+    claimed_lineage_hash = lineage.get("asmae_posterior_vector_hash")
+    if claimed_lineage_hash != actual_num_hash:
         raise ValueError(
             f"ASMAE lineage numerical vector hash mismatch: recomputed {actual_num_hash} != claimed lineage {claimed_lineage_hash}"
         )
@@ -235,6 +247,17 @@ def validate_certified_numerical_publication(
         raise ValueError(
             f"ASMAE scientific result nested numerical digest mismatch: recomputed {actual_num_hash} != claimed digest {sci_asmae_digest}"
         )
+
+    if node:
+        node_num_hash = (
+            (node.get("scientific_result") or {}).get("asmae_numerical_digest")
+            or ((node.get("frontend_payload") or {}).get("asmae_posterior_numerical_record") or {}).get("numerical_vector_hash")
+            or (node.get("asmae") or {}).get("asmae_numerical_digest")
+        )
+        if node_num_hash and node_num_hash != actual_num_hash:
+            raise ValueError(
+                f"ASMAE node numerical digest mismatch: recomputed {actual_num_hash} != claimed node {node_num_hash}"
+            )
 
     return actual_num_hash
 
@@ -660,6 +683,26 @@ def publish_canonical_plot_snapshot(
     hashable_envelope = {k: v for k, v in envelope.items() if not k.endswith("_ref")}
     envelope["node_hash"] = hashlib.sha256(_json_bytes(hashable_envelope)).hexdigest()
 
+    comparable_keys = (
+        (
+            "contract_version", "snapshot_kind", "snapshot_id",
+            "publication_authority",
+            "tenant_id", "farm_id", "plot_id", "geometry_hash",
+            "asmae_content_hash", "crop_posterior_lineage",
+            "crop_worldline_event_id", "phenology_worldline_event_id",
+            "crop_evidence_ledger_hash", "crop_influence_manifest_hash",
+        )
+        if normalized_kind == "asmae"
+        else (
+            "contract_version", "snapshot_kind", "snapshot_id",
+            "publication_authority",
+            "tenant_id", "farm_id", "plot_id", "geometry_hash",
+            "scientific_content_hash", "crop_posterior_lineage",
+            "crop_worldline_event_id", "phenology_worldline_event_id",
+            "crop_evidence_ledger_hash", "crop_influence_manifest_hash",
+        )
+    )
+
     if node_path.exists():
         existing = _read(node_path)
         if not existing:
@@ -668,25 +711,6 @@ def publish_canonical_plot_snapshot(
                 handle.flush()
                 os.fsync(handle.fileno())
             existing = envelope
-        comparable_keys = (
-            (
-                "contract_version", "snapshot_kind", "snapshot_id",
-                "publication_authority",
-                "tenant_id", "farm_id", "plot_id", "geometry_hash",
-                "asmae_content_hash", "crop_posterior_lineage",
-                "crop_worldline_event_id", "phenology_worldline_event_id",
-                "crop_evidence_ledger_hash", "crop_influence_manifest_hash",
-            )
-            if normalized_kind == "asmae"
-            else (
-                "contract_version", "snapshot_kind", "snapshot_id",
-                "publication_authority",
-                "tenant_id", "farm_id", "plot_id", "geometry_hash",
-                "scientific_content_hash", "crop_posterior_lineage",
-                "crop_worldline_event_id", "phenology_worldline_event_id",
-                "crop_evidence_ledger_hash", "crop_influence_manifest_hash",
-            )
-        )
         existing_num_hash = (
             (existing.get("scientific_result") or {}).get("asmae_numerical_digest")
             or ((existing.get("frontend_payload") or {}).get("asmae_posterior_numerical_record") or {}).get("numerical_vector_hash")
@@ -978,6 +1002,64 @@ def publish_canonical_plot_snapshot(
                 elif not prior_head and current_head_check:
                     raise ValueError("concurrent publication collision: head was initialized by another process")
 
+        # ── Publication Commit Ledger (Append-only hash-bound commit index) ──
+        commits_file = directory / "commits.jsonl"
+        existing_commits = []
+        if commits_file.exists():
+            for line in commits_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    try:
+                        existing_commits.append(json.loads(line))
+                    except Exception:
+                        pass
+        elif current_head_check and current_head_check.get("snapshot_id"):
+            # Bootstrap legacy committed head as genesis commit if upgrading existing plot store
+            leg_id = current_head_check.get("snapshot_id")
+            leg_node_hash = current_head_check.get("node_hash")
+            leg_pub_hash = current_head_check.get("frontend_publication_hash")
+            leg_rcpt_hash = current_head_check.get("publication_receipt_hash")
+            if leg_node_hash and leg_pub_hash and leg_rcpt_hash:
+                leg_rec = {
+                    "commit_seq": 1,
+                    "snapshot_id": leg_id,
+                    "node_hash": leg_node_hash,
+                    "frontend_publication_hash": leg_pub_hash,
+                    "publication_receipt_hash": leg_rcpt_hash,
+                    "publication_job_id": str(current_head_check.get("publication_job_id") or ""),
+                    "committed_at": str(current_head_check.get("published_at") or publication_timestamp),
+                    "parent_commit_hash": "0" * 64,
+                }
+                leg_rec["commit_hash"] = hashlib.sha256(_json_bytes({k: v for k, v in leg_rec.items() if k != "commit_hash"})).hexdigest()
+                existing_commits.append(leg_rec)
+
+        commit_seq = len(existing_commits) + 1
+        parent_commit_hash = existing_commits[-1]["commit_hash"] if existing_commits else ("0" * 64)
+        commit_record = {
+            "commit_seq": commit_seq,
+            "snapshot_id": snapshot_id,
+            "node_hash": envelope.get("node_hash"),
+            "frontend_publication_hash": publication.get("publication_hash"),
+            "publication_receipt_hash": receipt.get("receipt_hash"),
+            "publication_job_id": str(job_id),
+            "committed_at": publication_timestamp,
+            "parent_commit_hash": parent_commit_hash,
+        }
+        commit_hash = hashlib.sha256(_json_bytes({k: v for k, v in commit_record.items() if k != "commit_hash"})).hexdigest()
+        commit_record["commit_hash"] = commit_hash
+
+        # Append commit record to commits.jsonl atomically
+        needs_initial_bootstrap = (not commits_file.exists() or commits_file.stat().st_size == 0) and bool(existing_commits)
+        with open(commits_file, "a", encoding="utf-8") as f:
+            if needs_initial_bootstrap:
+                for c in existing_commits:
+                    f.write(json.dumps(c, separators=(",", ":")) + "\n")
+            f.write(json.dumps(commit_record, separators=(",", ":")) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+        head["commit_seq"] = commit_seq
+        head["commit_hash"] = commit_hash
         _atomic(_head_path(ns), head)
         with _SNAPSHOT_CACHE_LOCK:
             keys_to_evict = [k for k in _CANONICAL_SNAPSHOT_CACHE if k[0] == ns.stable_key()]
@@ -1566,46 +1648,32 @@ def load_latest_plot_snapshot(
         )
 
     node_agreement_valid = True
-    if num_rec is not None:
-        if isinstance(num_rec, dict) and "states" in num_rec:
-            is_num_valid, _ = validate_complete_numerical_record(num_rec)
-            if not is_num_valid:
-                numerical_binding_valid = False
-                node_agreement_valid = False
-            else:
-                try:
-                    try:
-                        from services.agribrain.layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
-                    except ImportError:
-                        from layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
-                    states = num_rec.get("states", {})
-                    sigmas = num_rec.get("sigmas", {})
-                    recomputed_num_hash = compute_asmae_vector_numerical_hash(states, sigmas)
-                    claimed_num_hash = num_rec.get("numerical_vector_hash")
-                    claimed_proof_hash = (publication_frontend.get("asmae_proof") or {}).get("numerical_vector_hash")
-                    claimed_lineage_hash = (publication_frontend.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
-
-                    is_valid = (
-                        bool(claimed_num_hash)
-                        and bool(claimed_proof_hash)
-                        and bool(claimed_lineage_hash)
-                        and claimed_num_hash == recomputed_num_hash
-                        and claimed_proof_hash == recomputed_num_hash
-                        and claimed_lineage_hash == recomputed_num_hash
-                    )
-                    if node_num_hash and claimed_num_hash != node_num_hash:
-                        is_valid = False
-                        node_agreement_valid = False
-
-                    numerical_binding_valid = bool(is_valid)
-                except Exception:
-                    numerical_binding_valid = False
-        else:
+    if claims_numerical_authority or fe_pub_auth == "CERTIFIED_NUMERICAL":
+        try:
+            sci_res = node.get("scientific_result") or node.get("asmae") or {}
+            validate_certified_numerical_publication(
+                num_rec=num_rec,
+                frontend_payload=publication_frontend,
+                scientific_result=sci_res,
+                node=node,
+            )
+            numerical_binding_valid = True
+        except ValueError:
             numerical_binding_valid = False
-    elif claims_numerical_authority or fe_pub_auth == "CERTIFIED_NUMERICAL":
-        # Numerical authority claimed but numerical record is missing
-        numerical_binding_valid = False
-        node_agreement_valid = False
+            node_agreement_valid = False
+    elif num_rec is not None:
+        try:
+            sci_res = node.get("scientific_result") or node.get("asmae") or {}
+            validate_certified_numerical_publication(
+                num_rec=num_rec,
+                frontend_payload=publication_frontend,
+                scientific_result=sci_res,
+                node=node,
+            )
+            numerical_binding_valid = True
+        except ValueError:
+            numerical_binding_valid = False
+            node_agreement_valid = False
 
     replay_receipt_valid = True
     if node.get("bitemporal_replay_receipt"):
@@ -1896,6 +1964,98 @@ def load_and_validate_plot_snapshot_by_id(
     if receipt.get("frontend_publication_hash") != publication.get("publication_hash"):
         return None
 
+    # Verify publication commit identity:
+    # A candidate is eligible for historical/exact retrieval if and only if it
+    # won a genuine publication commit recorded in the append-only commit index.
+    # Losing candidates from concurrent publication races remain uncommitted and unavailable.
+    commits_file = directory / "commits.jsonl"
+    commit_record = None
+    existing_commits = []
+    if commits_file.exists():
+        for line in commits_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    rec = json.loads(line)
+                    existing_commits.append(rec)
+                    if rec.get("snapshot_id") == snapshot_id:
+                        commit_record = rec
+                except Exception:
+                    pass
+
+    if commit_record:
+        if (
+            commit_record.get("node_hash") != node.get("node_hash")
+            or commit_record.get("frontend_publication_hash") != publication.get("publication_hash")
+            or commit_record.get("publication_receipt_hash") != receipt.get("receipt_hash")
+        ):
+            return None
+    else:
+        # Check if candidate is an authentic pre-existing legacy snapshot or crash recovery:
+        # A candidate without a commit in commits.jsonl is admitted IF AND ONLY IF:
+        # 1. commits.jsonl does not exist, OR candidate was recorded/published prior to the first commit in commits.jsonl
+        # AND
+        # 2. It is either the current head, or part of a valid supersedes_snapshot_id ancestor/descendant DAG
+        is_legacy_eligible = False
+        if not commits_file.exists() or not existing_commits:
+            is_legacy_eligible = True
+        else:
+            try:
+                first_committed_at_str = existing_commits[0].get("committed_at")
+                first_committed_at = datetime.fromisoformat(str(first_committed_at_str).replace("Z", "+00:00")).astimezone(timezone.utc)
+                cand_time_str = node.get("recorded_at") or node.get("published_at")
+                if cand_time_str:
+                    cand_time = datetime.fromisoformat(str(cand_time_str).replace("Z", "+00:00")).astimezone(timezone.utc)
+                    if cand_time < first_committed_at:
+                        is_legacy_eligible = True
+            except Exception:
+                is_legacy_eligible = False
+
+        if not is_legacy_eligible:
+            return None
+
+        # Verify lineage connection
+        head_file = _head_path(ns)
+        is_legacy_committed = False
+        if head_file.exists():
+            current_head = _read(head_file)
+            if current_head.get("snapshot_id") == snapshot_id:
+                is_legacy_committed = True
+            else:
+                head_node_path = directory / "nodes" / f"{current_head.get('snapshot_id')}.json"
+                if head_node_path.exists():
+                    curr_id = _read(head_node_path).get("supersedes_snapshot_id")
+                    visited = set()
+                    while curr_id and curr_id not in visited:
+                        visited.add(curr_id)
+                        if curr_id == snapshot_id:
+                            is_legacy_committed = True
+                            break
+                        anc_path = directory / "nodes" / f"{curr_id}.json"
+                        if not anc_path.exists():
+                            break
+                        curr_id = _read(anc_path).get("supersedes_snapshot_id")
+
+        if not is_legacy_committed:
+            cand_sup = node.get("supersedes_snapshot_id")
+            if cand_sup:
+                anc_path = directory / "nodes" / f"{cand_sup}.json"
+                if anc_path.exists():
+                    is_legacy_committed = True
+            if not is_legacy_committed:
+                for p in (directory / "nodes").glob("*.json"):
+                    if p.stem != snapshot_id:
+                        try:
+                            other_node = _read(p)
+                            if other_node.get("supersedes_snapshot_id") == snapshot_id:
+                                is_legacy_committed = True
+                                break
+                        except Exception:
+                            pass
+
+        if not is_legacy_committed:
+            return None
+
     publication_frontend = publication.get("frontend_payload") or {}
     payload_surfaces = publication_frontend.get("surfaces") or publication_frontend.get("surface_pack") or []
     try:
@@ -1984,45 +2144,32 @@ def load_and_validate_plot_snapshot_by_id(
         )
     numerical_binding_valid: Optional[bool] = None
     node_agreement_valid = True
-    if num_rec is not None:
-        if isinstance(num_rec, dict) and "states" in num_rec:
-            is_num_valid, _ = validate_complete_numerical_record(num_rec)
-            if not is_num_valid:
-                numerical_binding_valid = False
-                node_agreement_valid = False
-            else:
-                try:
-                    try:
-                        from services.agribrain.layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
-                    except ImportError:
-                        from layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
-                    states = num_rec.get("states", {})
-                    sigmas = num_rec.get("sigmas", {})
-                    recomputed_num_hash = compute_asmae_vector_numerical_hash(states, sigmas)
-                    claimed_num_hash = num_rec.get("numerical_vector_hash")
-                    claimed_proof_hash = (publication_frontend.get("asmae_proof") or {}).get("numerical_vector_hash")
-                    claimed_lineage_hash = (publication_frontend.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
-
-                    is_valid = (
-                        bool(claimed_num_hash)
-                        and bool(claimed_proof_hash)
-                        and bool(claimed_lineage_hash)
-                        and claimed_num_hash == recomputed_num_hash
-                        and claimed_proof_hash == recomputed_num_hash
-                        and claimed_lineage_hash == recomputed_num_hash
-                    )
-                    if node_num_hash and claimed_num_hash != node_num_hash:
-                        is_valid = False
-                        node_agreement_valid = False
-
-                    numerical_binding_valid = bool(is_valid)
-                except Exception:
-                    numerical_binding_valid = False
-        else:
+    if claims_numerical_authority or fe_pub_auth == "CERTIFIED_NUMERICAL":
+        try:
+            sci_res = node.get("scientific_result") or node.get("asmae") or {}
+            validate_certified_numerical_publication(
+                num_rec=num_rec,
+                frontend_payload=publication_frontend,
+                scientific_result=sci_res,
+                node=node,
+            )
+            numerical_binding_valid = True
+        except ValueError:
             numerical_binding_valid = False
-    elif claims_numerical_authority or fe_pub_auth == "CERTIFIED_NUMERICAL":
-        numerical_binding_valid = False
-        node_agreement_valid = False
+            node_agreement_valid = False
+    elif num_rec is not None:
+        try:
+            sci_res = node.get("scientific_result") or node.get("asmae") or {}
+            validate_certified_numerical_publication(
+                num_rec=num_rec,
+                frontend_payload=publication_frontend,
+                scientific_result=sci_res,
+                node=node,
+            )
+            numerical_binding_valid = True
+        except ValueError:
+            numerical_binding_valid = False
+            node_agreement_valid = False
 
     derived_publication_status, contract_reason = classify_surface_publication(publication_frontend)
     declared_status_valid, _, declared_status_reason = validate_declared_publication_status(publication_frontend)

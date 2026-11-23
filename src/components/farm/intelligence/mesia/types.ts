@@ -119,6 +119,12 @@ export interface MesiaData {
     in_situ_wifi_receiver?: {
       status: string;
       physical_waves_measured: boolean;
+      is_active_stream?: boolean;
+      is_fresh?: boolean;
+      freshness?: string;
+      is_calibrated?: boolean;
+      calibration_status?: string;
+      calibration_state_ref?: string;
       receiver_mount?: string;
       antenna_height_m?: number;
       log_source?: string;

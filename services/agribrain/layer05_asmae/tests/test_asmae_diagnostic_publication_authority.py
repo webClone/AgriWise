@@ -800,6 +800,8 @@ def test_malformed_certified_numerical_cannot_supersede_valid_head(tmp_path):
     fe_1["publication_authority"] = "CERTIFIED_NUMERICAL"
     fe_1["claims_numerical_authority"] = True
     fe_1["asmae_posterior_numerical_record"] = valid_rec
+    fe_1["asmae_proof"] = {"status": "valid", "numerical_vector_hash": valid_rec["numerical_vector_hash"]}
+    fe_1["scientific_evidence_lineage"]["asmae_posterior_vector_hash"] = valid_rec["numerical_vector_hash"]
 
     head_1 = plot_snapshot_store.publish_canonical_plot_snapshot(
         namespace=ns,
@@ -892,6 +894,8 @@ def test_concurrent_publication_collision_guard(tmp_path):
         fe["publication_authority"] = "CERTIFIED_NUMERICAL"
         fe["claims_numerical_authority"] = True
         fe["asmae_posterior_numerical_record"] = rec
+        fe["asmae_proof"] = {"status": "valid", "numerical_vector_hash": rec["numerical_vector_hash"]}
+        fe["scientific_evidence_lineage"]["asmae_posterior_vector_hash"] = rec["numerical_vector_hash"]
         return snap_id, res, fe
 
     # 1. Commit initial head: snap_1
@@ -956,6 +960,164 @@ def test_concurrent_publication_collision_guard(tmp_path):
 
     # Head MUST still be snap_2
     assert plot_snapshot_store.load_latest_plot_snapshot(ns)["snapshot_id"] == snap_id_2
+
+
+def test_certified_publication_omitting_required_proof_or_lineage_fails_closed_and_preserves_valid_head():
+    """P1 Resolution: Omitting required proof or lineage hash fails at write boundary and leaves valid head unchanged."""
+    plot_id = "parcel-proof-guard"
+    ns = PlotNamespace(tenant_id="tenant-proof-guard", farm_id="farm-proof-guard", plot_id=plot_id)
+
+    # 1. Establish an initial valid CERTIFIED_NUMERICAL head
+    num_rec_1, vec_hash_1 = _make_certified_numerical_record(0.38)
+    res_1 = _base_diagnostic_asmae_result(plot_id=plot_id)
+    res_1["publication_authority"] = "CERTIFIED_NUMERICAL"
+    res_1["claims_numerical_authority"] = True
+    res_1["asmae_posterior_numerical_record"] = num_rec_1
+    res_1["asmae_numerical_digest"] = vec_hash_1
+    ref_1 = snapshot_store.publish_latest_snapshot(res_1, context_hash="ctx-valid-1", geometry_hash="geom-proof")
+    res_1["snapshot_ref"] = ref_1
+    snap_valid = res_1["snapshot_id"]
+
+    fe_valid = _base_diagnostic_frontend_payload(snap_valid, plot_id=plot_id)
+    fe_valid["publication_authority"] = "CERTIFIED_NUMERICAL"
+    fe_valid["claims_numerical_authority"] = True
+    fe_valid["asmae_posterior_numerical_record"] = num_rec_1
+    fe_valid["asmae_proof"] = {"status": "valid", "numerical_vector_hash": vec_hash_1}
+    fe_valid["scientific_evidence_lineage"]["asmae_posterior_vector_hash"] = vec_hash_1
+
+    head_valid = plot_snapshot_store.publish_canonical_plot_snapshot(
+        namespace=ns,
+        geometry_hash="geom-proof",
+        snapshot_id=snap_valid,
+        asmae_result=res_1,
+        frontend_payload=fe_valid,
+        job_id="job-valid-1",
+        manifest_hash="manifest-valid-1",
+        publication_authority="CERTIFIED_NUMERICAL",
+    )
+    assert head_valid["snapshot_id"] == snap_valid
+
+    # Verify initial valid head is readable via latest, exact, and API
+    latest_initial = plot_snapshot_store.load_latest_plot_snapshot(ns, force_verify=True)
+    assert latest_initial is not None
+    assert latest_initial["snapshot_id"] == snap_valid
+    assert latest_initial["validation"]["numericalBindingValid"] is True
+    assert latest_initial["publication_authority"] == "CERTIFIED_NUMERICAL"
+
+    exact_initial = plot_snapshot_store.load_and_validate_plot_snapshot_by_id(snap_valid, namespace=ns)
+    assert exact_initial is not None
+    assert exact_initial["snapshot_id"] == snap_valid
+    assert exact_initial["validation"]["numericalBindingValid"] is True
+
+    app.dependency_overrides[require_internal_service_request] = lambda: ns
+    try:
+        client = TestClient(app)
+        api_resp = client.get(f"/v2/plots/{plot_id}/snapshot")
+        assert api_resp.status_code == 200
+        assert api_resp.json()["snapshot_id"] == snap_valid
+        assert api_resp.json()["publication_authority"] == "CERTIFIED_NUMERICAL"
+        assert not api_resp.json().get("quarantined")
+    finally:
+        app.dependency_overrides.pop(require_internal_service_request, None)
+
+    # 2. Candidate A: Complete numerical record but MISSING asmae_proof.numerical_vector_hash
+    num_rec_2, vec_hash_2 = _make_certified_numerical_record(0.42)
+    res_2 = _base_diagnostic_asmae_result(plot_id=plot_id)
+    res_2["publication_authority"] = "CERTIFIED_NUMERICAL"
+    res_2["claims_numerical_authority"] = True
+    res_2["asmae_posterior_numerical_record"] = num_rec_2
+    res_2["asmae_numerical_digest"] = vec_hash_2
+    ref_2 = snapshot_store.publish_latest_snapshot(res_2, context_hash="ctx-bad-proof", geometry_hash="geom-proof")
+    res_2["snapshot_ref"] = ref_2
+    snap_bad_proof = res_2["snapshot_id"]
+
+    fe_bad_proof = _base_diagnostic_frontend_payload(snap_bad_proof, plot_id=plot_id)
+    fe_bad_proof["publication_authority"] = "CERTIFIED_NUMERICAL"
+    fe_bad_proof["claims_numerical_authority"] = True
+    fe_bad_proof["asmae_posterior_numerical_record"] = num_rec_2
+    fe_bad_proof["scientific_evidence_lineage"]["asmae_posterior_vector_hash"] = vec_hash_2
+    fe_bad_proof.pop("asmae_proof", None)  # Omit required proof!
+
+    with pytest.raises(ValueError, match="mandatory frontend_payload\\['asmae_proof'\\]\\['numerical_vector_hash'\\]"):
+        plot_snapshot_store.publish_canonical_plot_snapshot(
+            namespace=ns,
+            geometry_hash="geom-proof",
+            snapshot_id=snap_bad_proof,
+            asmae_result=res_2,
+            frontend_payload=fe_bad_proof,
+            job_id="job-bad-proof",
+            manifest_hash="manifest-bad-proof",
+            publication_authority="CERTIFIED_NUMERICAL",
+        )
+
+    # Verify head on disk is UNCHANGED and still points to snap_valid
+    head_after_proof_failure = plot_snapshot_store._read(plot_snapshot_store._head_path(ns))
+    assert head_after_proof_failure["snapshot_id"] == snap_valid
+
+    # Verify head remains fully readable through latest and exact loaders
+    latest_recheck_1 = plot_snapshot_store.load_latest_plot_snapshot(ns, force_verify=True)
+    assert latest_recheck_1["snapshot_id"] == snap_valid
+    assert latest_recheck_1["validation"]["numericalBindingValid"] is True
+
+    exact_recheck_1 = plot_snapshot_store.load_and_validate_plot_snapshot_by_id(snap_valid, namespace=ns)
+    assert exact_recheck_1["snapshot_id"] == snap_valid
+    assert exact_recheck_1["validation"]["numericalBindingValid"] is True
+
+    # 3. Candidate B: Complete numerical record but MISSING scientific_evidence_lineage.asmae_posterior_vector_hash
+    num_rec_3, vec_hash_3 = _make_certified_numerical_record(0.45)
+    res_3 = _base_diagnostic_asmae_result(plot_id=plot_id)
+    res_3["publication_authority"] = "CERTIFIED_NUMERICAL"
+    res_3["claims_numerical_authority"] = True
+    res_3["asmae_posterior_numerical_record"] = num_rec_3
+    res_3["asmae_numerical_digest"] = vec_hash_3
+    ref_3 = snapshot_store.publish_latest_snapshot(res_3, context_hash="ctx-bad-lineage", geometry_hash="geom-proof")
+    res_3["snapshot_ref"] = ref_3
+    snap_bad_lineage = res_3["snapshot_id"]
+
+    fe_bad_lineage = _base_diagnostic_frontend_payload(snap_bad_lineage, plot_id=plot_id)
+    fe_bad_lineage["publication_authority"] = "CERTIFIED_NUMERICAL"
+    fe_bad_lineage["claims_numerical_authority"] = True
+    fe_bad_lineage["asmae_posterior_numerical_record"] = num_rec_3
+    fe_bad_lineage["asmae_proof"] = {"status": "valid", "numerical_vector_hash": vec_hash_3}
+    fe_bad_lineage["scientific_evidence_lineage"].pop("asmae_posterior_vector_hash", None)  # Omit required lineage hash!
+
+    with pytest.raises(ValueError, match="mandatory frontend_payload\\['scientific_evidence_lineage'\\]\\['asmae_posterior_vector_hash'\\]"):
+        plot_snapshot_store.publish_canonical_plot_snapshot(
+            namespace=ns,
+            geometry_hash="geom-proof",
+            snapshot_id=snap_bad_lineage,
+            asmae_result=res_3,
+            frontend_payload=fe_bad_lineage,
+            job_id="job-bad-lineage",
+            manifest_hash="manifest-bad-lineage",
+            publication_authority="CERTIFIED_NUMERICAL",
+        )
+
+    # Verify head on disk is UNCHANGED and still points to snap_valid
+    head_after_lineage_failure = plot_snapshot_store._read(plot_snapshot_store._head_path(ns))
+    assert head_after_lineage_failure["snapshot_id"] == snap_valid
+
+    # Verify head remains fully readable through latest and exact loaders
+    latest_recheck_2 = plot_snapshot_store.load_latest_plot_snapshot(ns, force_verify=True)
+    assert latest_recheck_2["snapshot_id"] == snap_valid
+    assert latest_recheck_2["validation"]["numericalBindingValid"] is True
+
+    exact_recheck_2 = plot_snapshot_store.load_and_validate_plot_snapshot_by_id(snap_valid, namespace=ns)
+    assert exact_recheck_2["snapshot_id"] == snap_valid
+    assert exact_recheck_2["validation"]["numericalBindingValid"] is True
+
+    # Verify API serves valid head with 200 OK
+    app.dependency_overrides[require_internal_service_request] = lambda: ns
+    try:
+        client = TestClient(app)
+        api_final = client.get(f"/v2/plots/{plot_id}/snapshot")
+        assert api_final.status_code == 200
+        assert api_final.json()["snapshot_id"] == snap_valid
+        assert api_final.json()["publication_authority"] == "CERTIFIED_NUMERICAL"
+        assert not api_final.json().get("quarantined")
+    finally:
+        app.dependency_overrides.pop(require_internal_service_request, None)
+
 
 
 

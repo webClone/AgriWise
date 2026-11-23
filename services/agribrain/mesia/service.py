@@ -1005,6 +1005,9 @@ class MesiaProductionService:
                 "subcarriers": subcarrier_records,
                 "amplitudes_linear": amps,
                 "phases_rad": phases,
+                "is_calibrated": False,
+                "calibration_status": "UNCALIBRATED",
+                "calibration_state_ref": "CALIB-UNVERIFIED-DEMONSTRATOR",
             }
         except Exception as err:
             return {
@@ -2110,8 +2113,6 @@ class MesiaProductionService:
         if wifi_acq_dt is not None and wifi_acq_dt.tzinfo is None:
             wifi_acq_dt = wifi_acq_dt.replace(tzinfo=timezone.utc)
 
-        wifi_age_seconds = (now_utc - wifi_acq_dt).total_seconds() if (wifi_acq_dt and isinstance(wifi_acq_dt, datetime)) else None
-        is_wifi_fresh = bool(wifi_age_seconds is None or (-60.0 <= wifi_age_seconds <= 3600.0))
         is_active_wifi_stream = bool(
             has_real_wifi
             and (
@@ -2123,6 +2124,25 @@ class MesiaProductionService:
                 )
             )
         )
+        if wifi_acq_dt is None and is_active_wifi_stream:
+            wifi_acq_dt = now_utc
+
+        wifi_age_seconds = (now_utc - wifi_acq_dt).total_seconds() if (wifi_acq_dt and isinstance(wifi_acq_dt, datetime)) else None
+        is_wifi_fresh = bool(wifi_age_seconds is not None and (-60.0 <= wifi_age_seconds <= 3600.0))
+
+        if has_real_wifi:
+            real_in_situ_wifi["is_active_stream"] = bool(is_active_wifi_stream and is_wifi_fresh)
+            real_in_situ_wifi["is_fresh"] = bool(is_wifi_fresh)
+            real_in_situ_wifi["freshness"] = "FRESH" if is_wifi_fresh else ("STALE" if wifi_age_seconds is not None else "UNKNOWN")
+            real_in_situ_wifi["presentation_state"] = "LIVE" if (is_active_wifi_stream and is_wifi_fresh) else "REPLAY"
+            real_in_situ_wifi["status"] = (
+                "LIVE_CSI_STREAM" if (is_active_wifi_stream and is_wifi_fresh)
+                else ("RECORDED_CAPTURE_AVAILABLE" if is_wifi_fresh else "ARCHIVED_CAPTURE_STALE")
+            )
+            if "is_calibrated" not in real_in_situ_wifi:
+                real_in_situ_wifi["is_calibrated"] = False
+            if "calibration_status" not in real_in_situ_wifi:
+                real_in_situ_wifi["calibration_status"] = "UNCALIBRATED"
 
         # 2. Ingest Open-Meteo NWP model soil moisture strata (NWP_REANALYSIS)
         copernicus = cls._fetch_real_copernicus_soil(centre_lat, centre_lon)
@@ -3269,8 +3289,11 @@ class MesiaProductionService:
                         else ("REPLAY" if has_real_wifi else "SIMULATION")
                     ),
                     "recorded_capture_available": bool(has_real_wifi),
-                    "freshness": "FRESH" if (has_real_wifi and is_wifi_fresh) else ("STALE" if has_real_wifi else "UNKNOWN"),
+                    "freshness": "FRESH" if (has_real_wifi and is_wifi_fresh) else ("STALE" if (has_real_wifi and wifi_age_seconds is not None) else "UNKNOWN"),
                     "is_fresh": bool(has_real_wifi and is_wifi_fresh),
+                    "is_active_stream": bool(is_active_wifi_stream and is_wifi_fresh),
+                    "is_calibrated": bool(real_in_situ_wifi.get("is_calibrated", False)),
+                    "calibration_status": real_in_situ_wifi.get("calibration_status", "UNCALIBRATED"),
                     "canonical_receipt_id": real_in_situ_wifi.get("receipt_id") if has_real_wifi else None,
                     "canonical_receipt": real_in_situ_wifi.get("canonical_receipt") if has_real_wifi else None,
                     "acquisition_time_utc": wifi_acq_dt.isoformat() if wifi_acq_dt else None,

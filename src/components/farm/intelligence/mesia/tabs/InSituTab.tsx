@@ -19,8 +19,61 @@ export default function InSituTab({ data, parameters, onRefresh }: InSituTabProp
 
   const inSituGnss = data.radio_wave_channels?.in_situ_ground_receiver;
   const inSituWifi = data.radio_wave_channels?.in_situ_wifi_receiver;
+  const ambientWifi = (data.signals_of_opportunity as any)?.ambient_wifi_csi;
   const oranData = data.signals_of_opportunity?.cellular_forward_scatter?.oran_e2_telemetry;
   const fleetData = data.fleet_health;
+
+  // Truthful CSI Presentation State (4 distinct states)
+  const hasPhysicalWifi = Boolean(
+    inSituWifi?.physical_waves_measured || ambientWifi?.physical_waves_measured
+  );
+  const isActiveStream = Boolean(
+    inSituWifi?.is_active_stream ||
+    inSituWifi?.status === "LIVE_CSI_STREAM" ||
+    ambientWifi?.status === "LIVE_CSI_STREAM" ||
+    (inSituWifi?.presentation_state === "LIVE" && inSituWifi?.is_active_stream !== false)
+  );
+  const isFresh = Boolean(
+    inSituWifi?.is_fresh ||
+    inSituWifi?.freshness === "FRESH" ||
+    ambientWifi?.is_fresh ||
+    ambientWifi?.freshness === "FRESH"
+  );
+
+  let csiBadgeText = "○ No verified CSI capture";
+  let csiBadgeBg = "rgba(100, 116, 139, 0.2)";
+  let csiBadgeColor = "#94a3b8";
+  let csiBadgeBorder = "rgba(100, 116, 139, 0.4)";
+
+  if (!hasPhysicalWifi) {
+    csiBadgeText = "○ No verified CSI capture";
+  } else if (isActiveStream && isFresh) {
+    csiBadgeText = "● Live CSI stream";
+    csiBadgeBg = "rgba(236, 72, 153, 0.2)";
+    csiBadgeColor = "#f472b6";
+    csiBadgeBorder = "#f472b6";
+  } else if (isFresh) {
+    csiBadgeText = "● Recorded capture";
+    csiBadgeBg = "rgba(56, 189, 248, 0.2)";
+    csiBadgeColor = "#38bdf8";
+    csiBadgeBorder = "#38bdf8";
+  } else {
+    csiBadgeText = "○ Archived capture";
+    csiBadgeBg = "rgba(245, 158, 11, 0.2)";
+    csiBadgeColor = "#f59e0b";
+    csiBadgeBorder = "rgba(245, 158, 11, 0.5)";
+  }
+
+  // Calibration status independent of freshness
+  const isCalibrated = Boolean(
+    inSituWifi?.is_calibrated ||
+    inSituWifi?.calibration_status === "CALIBRATED" ||
+    (inSituWifi?.calibration_state_ref && inSituWifi.calibration_state_ref !== "CALIB-UNVERIFIED-DEMONSTRATOR")
+  );
+  const calBadgeText = isCalibrated ? "✓ CALIBRATED" : "⚠ UNCALIBRATED";
+  const calBadgeBg = isCalibrated ? "rgba(34, 197, 94, 0.15)" : "rgba(245, 158, 11, 0.15)";
+  const calBadgeColor = isCalibrated ? "#4ade80" : "#fbbf24";
+  const calBadgeBorder = isCalibrated ? "rgba(34, 197, 94, 0.4)" : "rgba(245, 158, 11, 0.4)";
 
   // Real-time Fresnel reflection calculation from parcel soil permittivity
   const eps_r = data.dielectric_profile?.mean_dielectric_permittivity_eps_r ?? 14.5;
@@ -189,15 +242,38 @@ export default function InSituTab({ data, parameters, onRefresh }: InSituTabProp
               </div>
               <div style={{ fontSize: "10px", color: "#94a3b8" }}>ESP32-S3 64-Subcarrier OFDM Matrix</div>
             </div>
-            {inSituWifi?.physical_waves_measured ? (
-              <span style={{ fontSize: "9px", padding: "3px 7px", borderRadius: "4px", background: "rgba(236, 72, 153, 0.2)", color: "#f472b6", border: "1px solid #f472b6", fontWeight: 700 }}>
-                ● PHYSICAL CSI ACTIVE
+            <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+              <span
+                data-testid="csi-stream-badge"
+                style={{
+                  fontSize: "9px",
+                  padding: "3px 7px",
+                  borderRadius: "4px",
+                  background: csiBadgeBg,
+                  color: csiBadgeColor,
+                  border: `1px solid ${csiBadgeBorder}`,
+                  fontWeight: 700,
+                }}
+              >
+                {csiBadgeText}
               </span>
-            ) : (
-              <span style={{ fontSize: "9px", padding: "3px 7px", borderRadius: "4px", background: "rgba(100, 116, 139, 0.2)", color: "#94a3b8", border: "1px solid rgba(100, 116, 139, 0.4)", fontWeight: 700 }}>
-                ○ NO CSI CAPTURE
-              </span>
-            )}
+              {hasPhysicalWifi && (
+                <span
+                  data-testid="csi-calibration-badge"
+                  style={{
+                    fontSize: "9px",
+                    padding: "3px 7px",
+                    borderRadius: "4px",
+                    background: calBadgeBg,
+                    color: calBadgeColor,
+                    border: `1px solid ${calBadgeBorder}`,
+                    fontWeight: 700,
+                  }}
+                >
+                  {calBadgeText}
+                </span>
+              )}
+            </div>
           </div>
 
           {inSituWifi?.physical_waves_measured ? (
@@ -209,6 +285,12 @@ export default function InSituTab({ data, parameters, onRefresh }: InSituTabProp
               <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <span>Center Frequency:</span>
                 <strong>{((inSituWifi.center_frequency_hz ?? 2412e6) / 1e6).toFixed(1)} MHz</strong>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span>Calibration Status:</span>
+                <strong style={{ color: isCalibrated ? "#4ade80" : "#fbbf24" }}>
+                  {isCalibrated ? "Calibrated (50Ω Load & Free-Space Baseline)" : "Uncalibrated Demonstrator (Raw Amplitude/Phase)"}
+                </strong>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <span>Amplitude Variance:</span>

@@ -667,3 +667,50 @@ def test_csi_decoding_contract_rejects_unsupported_datatype_and_length(tmp_path)
     assert verify_capture_integrity(data_file, meta_file) is False
 
 
+def test_wifi_capture_missing_datetime_fails_closed_as_unknown_freshness(monkeypatch):
+    """P2 Follow-up: An alternate/incomplete Wi-Fi result with missing acquisition timestamp fails closed as freshness UNKNOWN."""
+    mock_wifi = {
+        "physical_waves_measured": True,
+        "canopy_water_index": 0.42,
+        "native_data_uri": "file://mesia/test.sigmf-data",
+        "receipt_id": "rcpt-test-123",
+        "acquisition_time": None,  # Missing acquisition timestamp!
+        "is_active_stream": False,
+        "presentation_state": "REPLAY",
+        "num_subcarriers": 64,
+        "target_classification": "BACKGROUND",
+        "sha256": "a" * 64,
+    }
+    monkeypatch.setattr(MesiaProductionService, "_process_real_in_situ_wifi_csi", lambda *args, **kwargs: mock_wifi)
+    monkeypatch.setattr(
+        MesiaProductionService,
+        "_fetch_real_copernicus_soil",
+        lambda lat, lon: {
+            "soil_moisture_0_to_1cm": 0.20,
+            "soil_moisture_1_to_3cm": 0.22,
+            "soil_moisture_3_to_9cm": 0.25,
+            "soil_moisture_9_to_27cm": 0.28,
+            "relative_humidity_2m": 65.0,
+            "surface_pressure": 1013.25,
+            "temperature_2m": 22.0,
+            "wind_speed_10m": 3.5,
+        },
+    )
+    monkeypatch.setattr(
+        MesiaProductionService,
+        "_fetch_real_osm_masts",
+        lambda lat, lon, radius_m=8000.0: [],
+    )
+
+    coords = [(34.85, 5.72), (34.85, 5.73), (34.86, 5.73), (34.86, 5.72)]
+    res = MesiaProductionService.scan_plot_spectrum("plot-nodt", polygon_wgs84=coords, soil_type="SAND")
+    soo_wifi = res["signals_of_opportunity"]["ambient_wifi_csi"]
+
+    assert soo_wifi["recorded_capture_available"] is True
+    assert soo_wifi["presentation_state"] == "REPLAY"
+    # Must fail closed as UNKNOWN freshness, NOT fresh!
+    assert soo_wifi["freshness"] == "UNKNOWN"
+    assert soo_wifi["is_fresh"] is False
+
+
+
