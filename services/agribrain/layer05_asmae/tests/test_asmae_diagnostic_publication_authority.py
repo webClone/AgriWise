@@ -328,39 +328,41 @@ def test_certified_numerical_snapshot_with_missing_record_rejected():
     fe_payload["publication_authority"] = "CERTIFIED_NUMERICAL"
     fe_payload["claims_numerical_authority"] = True
 
-    head = plot_snapshot_store.publish_canonical_plot_snapshot(
-        namespace=ns,
-        geometry_hash="geom-neg",
-        snapshot_id=snap_id,
-        asmae_result=res,
-        frontend_payload=fe_payload,
-        job_id="job-neg-1",
-        manifest_hash="manifest-neg-1",
-        publication_authority="CERTIFIED_NUMERICAL",
-    )
+    with pytest.raises(ValueError, match="CERTIFIED_NUMERICAL publication requires complete uncertainty"):
+        plot_snapshot_store.publish_canonical_plot_snapshot(
+            namespace=ns,
+            geometry_hash="geom-neg",
+            snapshot_id=snap_id,
+            asmae_result=res,
+            frontend_payload=fe_payload,
+            job_id="job-neg-1",
+            manifest_hash="manifest-neg-1",
+            publication_authority="CERTIFIED_NUMERICAL",
+        )
 
-    latest = plot_snapshot_store.load_latest_plot_snapshot(ns, force_verify=True)
-    assert latest is not None
-
-    admission = plot_snapshot_store.evaluate_snapshot_admission(latest, ns)
+    # Verify read boundary evaluation also quarantines missing numerical record
+    corrupt_candidate = {
+        "publication_authority": "CERTIFIED_NUMERICAL",
+        "validation": {
+            "nodeValid": True,
+            "publicationValid": True,
+            "receiptValid": True,
+            "inventoryValid": True,
+            "bindingValid": True,
+            "lineageValid": True,
+            "temporalBindingValid": True,
+            "authorityAgreementValid": True,
+            "schemaValid": True,
+            "contractValid": True,
+            "publicationStatusValid": True,
+        },
+        "scientific_result": {"claims_numerical_authority": True},
+        "frontend_payload": {"publication_authority": "CERTIFIED_NUMERICAL", "claims_numerical_authority": True},
+    }
+    admission = plot_snapshot_store.evaluate_snapshot_admission(corrupt_candidate, ns)
     assert admission["is_valid"] is False
     assert admission["status"] == "quarantined"
     assert "numericalBindingValid" in admission["invalid_integrity_flags"]
-
-    app.dependency_overrides[require_internal_service_request] = lambda: ns
-    try:
-        client = TestClient(app)
-        resp_latest = client.get(f"/v2/plots/{plot_id}/snapshot")
-        assert resp_latest.status_code == 200
-        data = resp_latest.json()
-        assert data["available"] is False
-        assert data["status"] == "quarantined"
-        assert "numericalBindingValid" in data["invalidIntegrityFlags"]
-
-        resp_exact = client.get(f"/v2/snapshots/{snap_id}")
-        assert resp_exact.status_code == 409
-    finally:
-        app.dependency_overrides.pop(require_internal_service_request, None)
 
 
 def test_certified_numerical_snapshot_with_non_finite_states_rejected():
@@ -388,21 +390,45 @@ def test_certified_numerical_snapshot_with_non_finite_states_rejected():
     fe_payload["claims_numerical_authority"] = True
     fe_payload["asmae_posterior_numerical_record"] = num_rec
 
-    plot_snapshot_store.publish_canonical_plot_snapshot(
-        namespace=ns,
-        geometry_hash="geom-neg2",
-        snapshot_id=snap_id,
-        asmae_result=res,
-        frontend_payload=fe_payload,
-        job_id="job-neg-2",
-        manifest_hash="manifest-neg-2",
-        publication_authority="CERTIFIED_NUMERICAL",
-    )
+    with pytest.raises(ValueError, match="CERTIFIED_NUMERICAL publication requires complete uncertainty"):
+        plot_snapshot_store.publish_canonical_plot_snapshot(
+            namespace=ns,
+            geometry_hash="geom-neg2",
+            snapshot_id=snap_id,
+            asmae_result=res,
+            frontend_payload=fe_payload,
+            job_id="job-neg-2",
+            manifest_hash="manifest-neg-2",
+            publication_authority="CERTIFIED_NUMERICAL",
+        )
 
-    latest = plot_snapshot_store.load_latest_plot_snapshot(ns, force_verify=True)
-    assert latest is not None
-
-    admission = plot_snapshot_store.evaluate_snapshot_admission(latest, ns)
+    # Verify read boundary evaluation quarantines invalid/negative sigmas
+    corrupt_candidate = {
+        "publication_authority": "CERTIFIED_NUMERICAL",
+        "validation": {
+            "nodeValid": True,
+            "publicationValid": True,
+            "receiptValid": True,
+            "inventoryValid": True,
+            "bindingValid": True,
+            "lineageValid": True,
+            "temporalBindingValid": True,
+            "authorityAgreementValid": True,
+            "schemaValid": True,
+            "contractValid": True,
+            "publicationStatusValid": True,
+        },
+        "scientific_result": {
+            "claims_numerical_authority": True,
+            "asmae_posterior_numerical_record": num_rec,
+        },
+        "frontend_payload": {
+            "publication_authority": "CERTIFIED_NUMERICAL",
+            "claims_numerical_authority": True,
+            "asmae_posterior_numerical_record": num_rec,
+        },
+    }
+    admission = plot_snapshot_store.evaluate_snapshot_admission(corrupt_candidate, ns)
     assert admission["is_valid"] is False
     assert admission["status"] == "quarantined"
     assert "numericalBindingValid" in admission["invalid_integrity_flags"]
@@ -720,5 +746,191 @@ def test_adversarial_contained_proposal_with_numerical_record_quarantined():
     assert adm_clean["is_valid"] is True
     assert adm_clean["status"] == "admitted"
     assert adm_clean["publication_authority"] == "CONTAINED_PROPOSAL"
+
+
+def test_malformed_certified_numerical_cannot_supersede_valid_head(tmp_path):
+    """P1-A: Malformed certified numerical candidates fail closed before head commit.
+    The prior valid head on disk and API retrieval remains strictly intact.
+    """
+    plot_id = "parcel-p1a-supersede"
+    ns = PlotNamespace(tenant_id="tenant-p1a", farm_id="farm-p1a", plot_id=plot_id)
+
+    # 1. Publish valid certified numerical snapshot as initial head
+    valid_rec = {
+        "states": {"root_zone_moisture": 0.28, "canopy_vigor": 0.72},
+        "sigmas": {"root_zone_moisture": 0.02, "canopy_vigor": 0.03},
+    }
+    valid_rec["numerical_vector_hash"] = compute_asmae_vector_numerical_hash(valid_rec["states"], valid_rec["sigmas"])
+
+    res_1 = _base_diagnostic_asmae_result(plot_id=plot_id)
+    res_1["publication_authority"] = "CERTIFIED_NUMERICAL"
+    res_1["claims_numerical_authority"] = True
+    res_1["asmae_posterior_numerical_record"] = valid_rec
+    res_1["asmae_numerical_digest"] = valid_rec["numerical_vector_hash"]
+    ref_1 = snapshot_store.publish_latest_snapshot(res_1, context_hash="ctx-1", geometry_hash="geom-1")
+    res_1["snapshot_ref"] = ref_1
+    snap_id_1 = res_1["snapshot_id"]
+
+    fe_1 = _base_diagnostic_frontend_payload(snap_id_1, plot_id=plot_id)
+    fe_1["publication_authority"] = "CERTIFIED_NUMERICAL"
+    fe_1["claims_numerical_authority"] = True
+    fe_1["asmae_posterior_numerical_record"] = valid_rec
+
+    head_1 = plot_snapshot_store.publish_canonical_plot_snapshot(
+        namespace=ns,
+        geometry_hash="geom-1",
+        snapshot_id=snap_id_1,
+        asmae_result=res_1,
+        frontend_payload=fe_1,
+        job_id="job-1",
+        manifest_hash="manifest-1",
+        publication_authority="CERTIFIED_NUMERICAL",
+    )
+    assert head_1["snapshot_id"] == snap_id_1
+
+    # Verify head on disk is snap_1
+    current_head = plot_snapshot_store.load_latest_plot_snapshot(ns)
+    assert current_head["snapshot_id"] == snap_id_1
+
+    # 2. Adversarial attempts to supersede with malformed certified candidates
+    malformed_records = [
+        # Incomplete sigmas (missing canopy_vigor key)
+        ({"root_zone_moisture": 0.30, "canopy_vigor": 0.65}, {"root_zone_moisture": 0.02}),
+        # Empty states
+        ({}, {}),
+        # Non-finite mean (NaN)
+        ({"root_zone_moisture": float("nan")}, {"root_zone_moisture": 0.02}),
+        # Non-finite mean (inf)
+        ({"root_zone_moisture": float("inf")}, {"root_zone_moisture": 0.02}),
+        # Non-finite sigma (inf)
+        ({"root_zone_moisture": 0.30}, {"root_zone_moisture": float("inf")}),
+        # Negative sigma
+        ({"root_zone_moisture": 0.30}, {"root_zone_moisture": -0.01}),
+        # Boolean disguised as float
+        ({"root_zone_moisture": True}, {"root_zone_moisture": 0.02}),
+        ({"root_zone_moisture": 0.30}, {"root_zone_moisture": False}),
+    ]
+
+    for idx, (bad_states, bad_sigmas) in enumerate(malformed_records):
+        bad_rec = {"states": bad_states, "sigmas": bad_sigmas}
+        res_bad = _base_diagnostic_asmae_result(plot_id=plot_id)
+        res_bad["snapshot_id"] = f"ASMAE-SNAPSHOT-bad-{idx}"
+        res_bad["publication_authority"] = "CERTIFIED_NUMERICAL"
+        res_bad["claims_numerical_authority"] = True
+        res_bad["asmae_posterior_numerical_record"] = bad_rec
+        bad_snap_id = res_bad["snapshot_id"]
+
+        fe_bad = _base_diagnostic_frontend_payload(bad_snap_id, plot_id=plot_id)
+        fe_bad["publication_authority"] = "CERTIFIED_NUMERICAL"
+        fe_bad["claims_numerical_authority"] = True
+        fe_bad["asmae_posterior_numerical_record"] = bad_rec
+
+        with pytest.raises(ValueError, match="CERTIFIED_NUMERICAL publication requires complete uncertainty"):
+            plot_snapshot_store.publish_canonical_plot_snapshot(
+                namespace=ns,
+                geometry_hash="geom-bad",
+                snapshot_id=bad_snap_id,
+                asmae_result=res_bad,
+                frontend_payload=fe_bad,
+                job_id=f"job-bad-{idx}",
+                manifest_hash=f"manifest-bad-{idx}",
+                publication_authority="CERTIFIED_NUMERICAL",
+            )
+
+        # Invariant: Head on disk MUST remain snap_1
+        head_check = plot_snapshot_store.load_latest_plot_snapshot(ns)
+        assert head_check["snapshot_id"] == snap_id_1, f"Failed at malformed case {idx}"
+
+
+def test_concurrent_publication_collision_guard(tmp_path):
+    """P1-A: Racing certified candidate must not overwrite a newer valid head."""
+    plot_id = "parcel-p1a-racing"
+    ns = PlotNamespace(tenant_id="tenant-race", farm_id="farm-race", plot_id=plot_id)
+
+    # Base valid record generator
+    def _make_candidate(snap_suffix: str):
+        rec = {
+            "states": {"root_zone_moisture": 0.30},
+            "sigmas": {"root_zone_moisture": 0.02},
+        }
+        rec["numerical_vector_hash"] = compute_asmae_vector_numerical_hash(rec["states"], rec["sigmas"])
+        res = _base_diagnostic_asmae_result(plot_id=plot_id)
+        res["snapshot_id"] = f"ASMAE-SNAPSHOT-{snap_suffix}"
+        res["publication_authority"] = "CERTIFIED_NUMERICAL"
+        res["claims_numerical_authority"] = True
+        res["asmae_posterior_numerical_record"] = rec
+        res["asmae_numerical_digest"] = rec["numerical_vector_hash"]
+        ref = snapshot_store.publish_latest_snapshot(res, context_hash=f"ctx-{snap_suffix}", geometry_hash="geom-race")
+        res["snapshot_ref"] = ref
+        snap_id = res["snapshot_id"]
+        fe = _base_diagnostic_frontend_payload(snap_id, plot_id=plot_id)
+        fe["publication_authority"] = "CERTIFIED_NUMERICAL"
+        fe["claims_numerical_authority"] = True
+        fe["asmae_posterior_numerical_record"] = rec
+        return snap_id, res, fe
+
+    # 1. Commit initial head: snap_1
+    snap_id_1, res_1, fe_1 = _make_candidate("initial-1")
+    plot_snapshot_store.publish_canonical_plot_snapshot(
+        namespace=ns,
+        geometry_hash="geom-race",
+        snapshot_id=snap_id_1,
+        asmae_result=res_1,
+        frontend_payload=fe_1,
+        job_id="job-1",
+        manifest_hash="manifest-1",
+        publication_authority="CERTIFIED_NUMERICAL",
+    )
+
+    # 2. Writer A commits snap_2
+    snap_id_2, res_2, fe_2 = _make_candidate("winner-2")
+    plot_snapshot_store.publish_canonical_plot_snapshot(
+        namespace=ns,
+        geometry_hash="geom-race",
+        snapshot_id=snap_id_2,
+        asmae_result=res_2,
+        frontend_payload=fe_2,
+        job_id="job-2",
+        manifest_hash="manifest-2",
+        publication_authority="CERTIFIED_NUMERICAL",
+    )
+    assert plot_snapshot_store.load_latest_plot_snapshot(ns)["snapshot_id"] == snap_id_2
+
+    # 3. Simulate Writer B who read snap_1 as prior head and races to commit snap_3 while head advanced to snap_2
+    snap_id_3, res_3, fe_3 = _make_candidate("racer-3")
+
+    read_count = 0
+    real_read = plot_snapshot_store._read
+
+    def mock_racing_read(path):
+        nonlocal read_count
+        if Path(path).name == "head.json":
+            read_count += 1
+            if read_count == 1:
+                # First read at start of publish: prior_head is at version 1
+                return {"snapshot_id": "HEAD-INITIAL-V1"}
+            else:
+                # Second read before atomic commit: current_head has advanced to version 2
+                return {"snapshot_id": "HEAD-RACING-V2"}
+        return real_read(path)
+
+    import unittest.mock
+    with unittest.mock.patch.object(plot_snapshot_store, "_read", side_effect=mock_racing_read):
+        with pytest.raises(ValueError, match="concurrent publication collision"):
+            plot_snapshot_store.publish_canonical_plot_snapshot(
+                namespace=ns,
+                geometry_hash="geom-race",
+                snapshot_id=snap_id_3,
+                asmae_result=res_3,
+                frontend_payload=fe_3,
+                job_id="job-3",
+                manifest_hash="manifest-3",
+                publication_authority="CERTIFIED_NUMERICAL",
+                allow_overwrite=False,
+            )
+
+    # Head MUST still be snap_2
+    assert plot_snapshot_store.load_latest_plot_snapshot(ns)["snapshot_id"] == snap_id_2
+
 
 

@@ -83,6 +83,11 @@ class NativeWifiCsiExtractor:
         return file_hash
 
     @classmethod
+    def extract_csi_subcarriers(cls, file_or_prefix: str) -> Dict[str, Any]:
+        """Extract CSI subcarrier amplitudes and phases from SigMF record."""
+        return cls.read_sigmf(file_or_prefix)
+
+    @classmethod
     def read_sigmf(cls, file_or_prefix: str) -> Dict[str, Any]:
         """Reads a .sigmf-data and matching .sigmf-meta file and unpacks subcarrier amplitudes and phases."""
         p_str = str(file_or_prefix)
@@ -123,11 +128,31 @@ class NativeWifiCsiExtractor:
         capture = (meta.get("captures") or [{}])[0]
         glob = meta.get("global") or {}
 
+        datatype = str(glob.get("core:datatype", "cf32_le")).strip().lower()
+        if datatype not in ("cf32_le", "cf32"):
+            from services.agribrain.mesia.contracts.capture_manifest import QuarantinedCaptureException
+            raise QuarantinedCaptureException(
+                f"Unsupported SigMF core:datatype '{datatype}'. Only cf32_le is supported by native CSI extractor."
+            )
+
+        if not raw_bytes or len(raw_bytes) % 8 != 0:
+            from services.agribrain.mesia.contracts.capture_manifest import QuarantinedCaptureException
+            raise QuarantinedCaptureException(
+                f"SigMF raw payload length {len(raw_bytes)} is invalid (must be non-empty and divisible by 8 for cf32_le)"
+            )
+
+        num_complex = len(raw_bytes) // 8
+        if "core:sample_count" in annot:
+            declared_samples = int(annot["core:sample_count"])
+            if declared_samples != num_complex:
+                from services.agribrain.mesia.contracts.capture_manifest import QuarantinedCaptureException
+                raise QuarantinedCaptureException(
+                    f"Declared core:sample_count {declared_samples} contradicts interpreted sample count {num_complex}"
+                )
+
         capture_dt = capture.get("core:datetime")
 
         # Unpack interleaved complex float32 (<ff)
-        num_floats = len(raw_bytes) // 4
-        num_complex = num_floats // 2
         amplitudes_linear = []
         phases_rad = []
 

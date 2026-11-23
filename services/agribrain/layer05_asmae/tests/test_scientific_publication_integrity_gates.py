@@ -222,23 +222,42 @@ def test_numerical_authority_claimed_without_record_fails_closed():
     frontend["asmae_posterior_numerical_record"] = None
     frontend["claims_numerical_authority"] = True
 
-    plot_snapshot_store.publish_canonical_plot_snapshot(
-        namespace=ns,
-        geometry_hash=geom_hash,
-        snapshot_id=snap_id,
-        asmae_result=science,
-        frontend_payload=frontend,
-        job_id="job-1",
-        manifest_hash="manifest-1",
-    )
+    # P1-A: Write boundary fails closed before canonical head changes
+    with pytest.raises(ValueError, match="CERTIFIED_NUMERICAL publication requires complete uncertainty"):
+        plot_snapshot_store.publish_canonical_plot_snapshot(
+            namespace=ns,
+            geometry_hash=geom_hash,
+            snapshot_id=snap_id,
+            asmae_result=science,
+            frontend_payload=frontend,
+            job_id="job-1",
+            manifest_hash="manifest-1",
+        )
 
-    with plot_snapshot_store._SNAPSHOT_CACHE_LOCK:
-        plot_snapshot_store._CANONICAL_SNAPSHOT_CACHE.clear()
-    loaded = plot_snapshot_store.load_latest_plot_snapshot(ns, geom_hash)
-    assert loaded is not None
-    assert loaded["validation"]["numericalBindingValid"] is False
-    assert loaded["validation"]["bindingValid"] is False
-    assert loaded["contract_validation"]["derived_publication_status"] == "INVALID_NUMERICAL_BINDING"
+    # Read boundary verification also enforces invalid numerical binding
+    candidate_snap = {
+        "publication_authority": "CERTIFIED_NUMERICAL",
+        "validation": {
+            "nodeValid": True,
+            "publicationValid": True,
+            "receiptValid": True,
+            "inventoryValid": True,
+            "temporalBindingValid": True,
+            "numericalBindingValid": False,
+            "nodeAgreementValid": False,
+            "bindingValid": False,
+            "lineageValid": True,
+            "schemaValid": True,
+            "contractValid": True,
+            "publicationStatusValid": True,
+        },
+        "frontend_payload": frontend,
+        "scientific_result": science,
+    }
+    admission = plot_snapshot_store.evaluate_snapshot_admission(candidate_snap, namespace=ns)
+    assert admission["is_valid"] is False
+    assert admission["status"] == "quarantined"
+    assert "numericalBindingValid" in admission["invalid_integrity_flags"]
 
 
 # ── TEST 4: Provider-Only Publication Without Numerical Claim ─────────────────

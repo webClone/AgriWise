@@ -205,7 +205,7 @@ def test_batch_a_d01_cross_tenant_same_plot_rejection(tmp_path):
     tenant_b = "tenant-beta"
     shared_plot = "parcel-shared-42"
 
-    raw_data = b"synthetic_mesia_radio_csi_bytes_tenant_b"
+    raw_data = b"01234567" * 8
     meta = {
         "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_rx_fixture"},
         "captures": [{
@@ -260,7 +260,7 @@ def test_batch_a_d01_cross_tenant_uri_substitution_attack(tmp_path):
     tenant_attacker = "tenant-attacker"
     plot_id = "plot-target"
 
-    raw = b"legitimate_iq_stream_bytes"
+    raw = b"01234567" * 4
     meta = {
         "global": {"core:sample_rate": 10.0e6, "core:hw": "usrp_b210"},
         "captures": [{
@@ -320,7 +320,7 @@ def test_batch_a_d02_tampered_sigmf_metadata_rejection(tmp_path):
     plot = "plot-d02"
     ns = PlotNamespace(tenant_id=tenant, farm_id="farm-1", plot_id=plot)
 
-    raw = b"sigmf_iq_data_for_tamper_test"
+    raw = b"01234567" * 10
     meta = {
         "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
         "captures": [{
@@ -356,7 +356,7 @@ def test_batch_a_d02_stale_data_hash_in_metadata_rejection(tmp_path):
     plot = "plot-d02-stale"
     ns = PlotNamespace(tenant_id=tenant, farm_id="farm-1", plot_id=plot)
 
-    raw = b"sigmf_iq_data_for_stale_test"
+    raw = b"01234567" * 10
     meta = {
         "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
         "captures": [{
@@ -369,7 +369,7 @@ def test_batch_a_d02_stale_data_hash_in_metadata_rejection(tmp_path):
 
     # Tamper data file
     data_path = Path(manifest.data_path)
-    new_data = b"modified_data_bytes_stale_metadata"
+    new_data = b"ABCDEFGH" * 10
     data_path.write_bytes(new_data)
     new_data_sha = hashlib.sha256(new_data).hexdigest()
 
@@ -385,7 +385,7 @@ def test_batch_a_d02_missing_or_corrupted_manifest_rejection(tmp_path):
     plot = "plot-d02-man"
     ns = PlotNamespace(tenant_id=tenant, farm_id="farm-1", plot_id=plot)
 
-    raw = b"sigmf_iq_data_manifest_test"
+    raw = b"01234567" * 10
     meta = {
         "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
         "captures": [{
@@ -418,7 +418,7 @@ def test_batch_a_d02_inconsistent_capture_id_rejection(tmp_path):
     plot = "plot-d02-cid"
     ns = PlotNamespace(tenant_id=tenant, farm_id="farm-1", plot_id=plot)
 
-    raw = b"sigmf_iq_data_cid_test"
+    raw = b"01234567" * 10
     meta = {
         "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
         "captures": [{
@@ -443,7 +443,7 @@ def test_batch_a_d02_inconsistent_capture_id_rejection(tmp_path):
 
 def test_batch_a_d01_invalid_namespace_identifiers_fail_closed_without_exception(tmp_path):
     """D01: Malformed/adversarial namespace identifiers return False without raising."""
-    raw = b"sigmf_iq_data_safe"
+    raw = b"01234567" * 10
     meta = {
         "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
         "captures": [{
@@ -481,7 +481,7 @@ def test_batch_a_d02_manifest_storage_prefix_mismatch_rejection(tmp_path):
     plot = "plot-d02-prefix"
     ns = PlotNamespace(tenant_id=tenant, farm_id="farm-1", plot_id=plot)
 
-    raw = b"sigmf_iq_data_prefix_test"
+    raw = b"01234567" * 10
     meta = {
         "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
         "captures": [{
@@ -510,7 +510,7 @@ def test_batch_a_d02_manifest_timestamp_mismatch_rejection(tmp_path):
     plot = "plot-d02-time"
     ns = PlotNamespace(tenant_id=tenant, farm_id="farm-1", plot_id=plot)
 
-    raw = b"sigmf_iq_data_time_test"
+    raw = b"01234567" * 10
     meta = {
         "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
         "captures": [{
@@ -540,7 +540,7 @@ def test_legacy_capture_rejected_for_non_default_farm(tmp_path):
     tenant = "tenant-legacy-cross"
     plot = "plot-legacy-cross"
     # Legacy ingestion without farm_id (defaults to default_farm, writes to tenant/plot/)
-    raw = b"legacy_sigmf_iq_data_payload_cross_farm"
+    raw = b"01234567" * 10
     meta = {
         "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
         "captures": [{

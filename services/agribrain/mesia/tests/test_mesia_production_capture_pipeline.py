@@ -12,6 +12,7 @@ Validates Lane 1 MESIA Production Capture Remediation:
 """
 
 import base64
+import copy
 import json
 import math
 import uuid
@@ -25,7 +26,7 @@ from fastapi.testclient import TestClient
 from services.agribrain.app.main import app, require_internal_service_request
 from services.agribrain.app.internal_service_auth import compute_request_signature
 from services.agribrain.common.plot_namespace import PlotNamespace
-from services.agribrain.mesia.contracts.capture_manifest import SigMFCaptureManifest
+from services.agribrain.mesia.contracts.capture_manifest import SigMFCaptureManifest, QuarantinedCaptureException
 from services.agribrain.mesia.ingestion import sigmf_ingest
 from services.agribrain.mesia.ingestion.sigmf_ingest import (
     DEFAULT_STORAGE_ROOT,
@@ -93,7 +94,7 @@ def test_authenticated_http_upload_to_storage_to_scan_pipeline(test_storage):
     auth_ns = PlotNamespace(tenant_id=tenant_id, farm_id=farm_id, plot_id=plot_id)
     app.dependency_overrides[require_internal_service_request] = lambda: auth_ns
 
-    capture_time = datetime(2026, 11, 22, 14, 30, 0, tzinfo=timezone.utc)
+    capture_time = datetime.now(timezone.utc) - timedelta(minutes=10)
     raw_bytes, meta_dict = _generate_synthetic_wifi_sigmf(capture_time)
     data_b64 = base64.b64encode(raw_bytes).decode("ascii")
 
@@ -108,7 +109,7 @@ def test_authenticated_http_upload_to_storage_to_scan_pipeline(test_storage):
 
         assert upload_data["status"] == "MEASURED_IN_SITU_RADIO_WAVES"
         assert upload_data["physical_waves_measured"] is True
-        assert upload_data["presentation_state"] == "LIVE"
+        assert upload_data["presentation_state"] == "REPLAY"
         assert upload_data["identity_state"] == "PROTOCOL_CONFIRMED"
 
         receipt_id = upload_data.get("receipt_id")
@@ -163,7 +164,7 @@ def test_authenticated_http_upload_to_storage_to_scan_pipeline(test_storage):
         assert wifi_prop["canonical_receipt"] == canonical_rcpt
         assert wifi_prop["native_capture_present"] is True
         assert wifi_prop["physical_waves_measured"] is True
-        assert wifi_prop["presentation_state"] == "LIVE"
+        assert wifi_prop["presentation_state"] == "REPLAY"
 
         # Verify exact URI referencing verified on-disk capture
         assert wifi_prop["native_artifact_ref"] == data_file.as_uri()
@@ -175,9 +176,18 @@ def test_authenticated_http_upload_to_storage_to_scan_pipeline(test_storage):
         # Verify TruthEnvelope binds canonical receipt and native artifact
         env = wifi_prop["truth_envelope"]
         assert env["source_class"] == SourceClass.PHYSICAL_RECEIVER.value
-        assert env["presentation_state"] == PresentationState.LIVE.value
+        assert env["presentation_state"] == PresentationState.REPLAY.value
+        assert env["calibration_state_ref"] == "CALIB-UNVERIFIED-DEMONSTRATOR"
         assert env["source_receipt_ref"] == receipt_id
         assert env["native_artifact_ref"] == data_file.as_uri()
+
+        # Verify Signals of Opportunity ambient_wifi_csi projection
+        soo_wifi = scan_data["signals_of_opportunity"]["ambient_wifi_csi"]
+        assert soo_wifi["status"] == "RECORDED_CAPTURE_AVAILABLE"
+        assert soo_wifi["presentation_state"] == "REPLAY"
+        assert soo_wifi["canonical_receipt_id"] == receipt_id
+        assert soo_wifi["recorded_capture_available"] is True
+        assert soo_wifi["is_fresh"] is True
 
     finally:
         app.dependency_overrides.clear()
@@ -470,4 +480,179 @@ def test_genuine_signed_internal_service_authentication_pipeline(test_storage):
     # 5. Replay attack with same nonce fails closed (401 Unauthorized)
     resp_replay = client.post(path, content=body_bytes, headers=headers)
     assert resp_replay.status_code == 401
+
+
+def test_canonical_receipt_and_provenance_propagates_across_all_projections(test_storage):
+    """P1-B: Canonical capture receipt, native URI, and provenance propagate consistently across all 3 projections."""
+    client = TestClient(app)
+    tenant_id = "tenant_prop_test"
+    farm_id = "farm_prop_test"
+    plot_id = "parcel_prop_test_01"
+    ns = PlotNamespace(tenant_id=tenant_id, farm_id=farm_id, plot_id=plot_id)
+    app.dependency_overrides[require_internal_service_request] = lambda: ns
+
+    coords = [(34.85, 5.72), (34.85, 5.73), (34.86, 5.73), (34.86, 5.72)]
+    acq_time = datetime.now(timezone.utc) - timedelta(minutes=15)
+
+    try:
+        raw_bytes, meta_dict = _generate_synthetic_wifi_sigmf(acq_time)
+        b64 = base64.b64encode(raw_bytes).decode("ascii")
+        up = client.post("/v2/mesia/ingest-sigmf-csi", json={"data_b64": b64, "meta_json": meta_dict})
+        assert up.status_code == 200
+        up_data = up.json()
+        capture_id = up_data["capture_id"]
+        canonical_receipt_id = up_data["receipt_id"]
+        assert canonical_receipt_id == f"rcpt-sigmf-{capture_id[:16]}"
+        assert not canonical_receipt_id.startswith("rcpt-sigmf-csi-")
+
+        # Scan the plot
+        scan_resp = client.post(
+            f"/v2/mesia/{plot_id}",
+            json={"geo_json": _make_geojson_polygon(coords), "soil_type": "SAND"},
+        )
+        assert scan_resp.status_code == 200
+        scan_data = scan_resp.json()
+
+        # 1. Wi-Fi evidence proposal projection
+        proposals = scan_data.get("evidence_proposals", [])
+        wifi_prop = next((p for p in proposals if p["feature"] == "mesia_wifi_csi_canopy_foliar"), None)
+        assert wifi_prop is not None
+        assert wifi_prop["receipt_id"] == canonical_receipt_id
+        assert not wifi_prop["receipt_id"].startswith("rcpt-sigmf-csi-")
+        assert wifi_prop["native_data_uri"].startswith("file:///")
+        assert not wifi_prop["native_data_uri"].startswith("file://mesia/evidence/")
+        assert wifi_prop["presentation_state"] == "REPLAY"
+
+        # 2. ambient_wifi_csi TruthEnvelope projection
+        truth_envelopes = scan_data.get("truth_envelopes", {})
+        assert "ambient_wifi_csi" in truth_envelopes
+        wifi_envelope = truth_envelopes["ambient_wifi_csi"]
+        assert wifi_envelope["source_receipt_ref"] == canonical_receipt_id
+        assert not wifi_envelope["source_receipt_ref"].startswith("rcpt-sigmf-csi-")
+        assert wifi_envelope["native_artifact_ref"].startswith("file:///")
+        assert not wifi_envelope["native_artifact_ref"].startswith("file://mesia/evidence/")
+        assert wifi_envelope["calibration_state_ref"] == "CALIB-UNVERIFIED-DEMONSTRATOR"
+        assert wifi_envelope["presentation_state"] == "REPLAY"
+
+        # 3. Signals of opportunity projection
+        soo = scan_data.get("signals_of_opportunity", {})
+        assert "ambient_wifi_csi" in soo
+        soo_wifi = soo["ambient_wifi_csi"]
+        assert soo_wifi["canonical_receipt_id"] == canonical_receipt_id
+        assert not soo_wifi["canonical_receipt_id"].startswith("rcpt-sigmf-csi-")
+        assert soo_wifi["native_data_uri"].startswith("file:///")
+        assert not soo_wifi["native_data_uri"].startswith("file://mesia/evidence/")
+        assert soo_wifi["recorded_capture_available"] is True
+        assert soo_wifi["presentation_state"] == "REPLAY"
+        assert soo_wifi["status"] == "RECORDED_CAPTURE_AVAILABLE"
+        assert soo_wifi["is_fresh"] is True
+        assert soo_wifi["freshness"] == "FRESH"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_archived_capture_cannot_claim_live_and_stale_capture_marked_stale(test_storage):
+    """P1-B: Stored capture cannot claim LIVE, and capture >3600s is marked ARCHIVED_CAPTURE_STALE."""
+    client = TestClient(app)
+    tenant_id = "tenant_stale_test"
+    farm_id = "farm_stale_test"
+    plot_id = "parcel_stale_test_01"
+    ns = PlotNamespace(tenant_id=tenant_id, farm_id=farm_id, plot_id=plot_id)
+    app.dependency_overrides[require_internal_service_request] = lambda: ns
+
+    coords = [(34.85, 5.72), (34.85, 5.73), (34.86, 5.73), (34.86, 5.72)]
+    # Ingest capture from 3 hours ago (> 3600s)
+    stale_time = datetime.now(timezone.utc) - timedelta(hours=3)
+
+    try:
+        raw_bytes, meta_dict = _generate_synthetic_wifi_sigmf(stale_time)
+        b64 = base64.b64encode(raw_bytes).decode("ascii")
+        up = client.post("/v2/mesia/ingest-sigmf-csi", json={"data_b64": b64, "meta_json": meta_dict})
+        assert up.status_code == 200
+
+        # Scan the plot
+        scan_resp = client.post(
+            f"/v2/mesia/{plot_id}",
+            json={"geo_json": _make_geojson_polygon(coords), "soil_type": "SAND"},
+        )
+        assert scan_resp.status_code == 200
+        scan_data = scan_resp.json()
+
+        # Proposal must NOT claim LIVE
+        proposals = scan_data.get("evidence_proposals", [])
+        wifi_prop = next((p for p in proposals if p["feature"] == "mesia_wifi_csi_canopy_foliar"), None)
+        assert wifi_prop is not None
+        assert wifi_prop["presentation_state"] == "REPLAY"
+        assert wifi_prop["presentation_state"] != "LIVE"
+
+        # TruthEnvelope must NOT claim LIVE
+        truth_envelopes = scan_data.get("truth_envelopes", {})
+        wifi_envelope = truth_envelopes["ambient_wifi_csi"]
+        assert wifi_envelope["presentation_state"] == "REPLAY"
+        assert wifi_envelope["presentation_state"] != "LIVE"
+
+        # Signals of Opportunity must be marked ARCHIVED_CAPTURE_STALE and STALE
+        soo = scan_data.get("signals_of_opportunity", {})
+        soo_wifi = soo["ambient_wifi_csi"]
+        assert soo_wifi["status"] == "ARCHIVED_CAPTURE_STALE"
+        assert soo_wifi["freshness"] == "STALE"
+        assert soo_wifi["is_fresh"] is False
+        assert soo_wifi["recorded_capture_available"] is True
+        assert soo_wifi["presentation_state"] == "REPLAY"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_csi_decoding_contract_rejects_unsupported_datatype_and_length(tmp_path):
+    """P1-B: CSI decoding contract strictly enforces cf32_le, length divisible by 8, and sample count agreement."""
+    # 1. Test ingest_sigmf_capture datatype rejection
+    valid_payload = b"01234567" * 8  # 64 bytes = 8 samples
+    valid_meta = {
+        "global": {"core:datatype": "cf64_le", "core:sample_rate": 20.0e6, "core:hw": "iwlwifi"},
+        "captures": [{"core:datetime": "2026-11-23T12:00:00+00:00", "core:frequency": 2.437e9}],
+        "annotations": [{"core:sample_count": 8, "core:sample_start": 0}],
+    }
+    with pytest.raises(QuarantinedCaptureException, match="Unsupported SigMF core:datatype"):
+        ingest_sigmf_capture("t1", "p1", valid_payload, copy.deepcopy(valid_meta), storage_root=tmp_path)
+
+    # 2. Test ingest_sigmf_capture length not divisible by 8
+    bad_length_payload = b"012345678"  # 9 bytes
+    valid_meta_cf32 = copy.deepcopy(valid_meta)
+    valid_meta_cf32["global"]["core:datatype"] = "cf32_le"
+    with pytest.raises(QuarantinedCaptureException, match="not divisible by 8"):
+        ingest_sigmf_capture("t1", "p1", bad_length_payload, valid_meta_cf32, storage_root=tmp_path)
+
+    # 3. Test ingest_sigmf_capture sample count mismatch
+    mismatch_meta = copy.deepcopy(valid_meta_cf32)
+    mismatch_meta["annotations"][0]["core:sample_count"] = 100  # 100 != 8 samples
+    with pytest.raises(QuarantinedCaptureException, match="Declared core:sample_count 100 does not reconcile"):
+        ingest_sigmf_capture("t1", "p1", valid_payload, mismatch_meta, storage_root=tmp_path)
+
+    # 4. Test NativeWifiCsiExtractor.read_sigmf / extract_csi_subcarriers rejection
+    data_file = tmp_path / "test_csi.sigmf-data"
+    meta_file = tmp_path / "test_csi.sigmf-meta"
+
+    # Unsupported datatype
+    bad_datatype_meta = copy.deepcopy(valid_meta)
+    bad_datatype_meta["global"]["core:datatype"] = "ri16_le"
+    data_file.write_bytes(valid_payload)
+    meta_file.write_text(json.dumps(bad_datatype_meta), encoding="utf-8")
+    with pytest.raises(QuarantinedCaptureException, match="Unsupported SigMF core:datatype"):
+        NativeWifiCsiExtractor.read_sigmf(str(data_file))
+
+    # Indivisible length
+    meta_file.write_text(json.dumps(valid_meta_cf32), encoding="utf-8")
+    data_file.write_bytes(bad_length_payload)
+    with pytest.raises(QuarantinedCaptureException, match="divisible by 8"):
+        NativeWifiCsiExtractor.extract_csi_subcarriers(str(data_file))
+
+    # Sample count mismatch
+    data_file.write_bytes(valid_payload)
+    meta_file.write_text(json.dumps(mismatch_meta), encoding="utf-8")
+    with pytest.raises(QuarantinedCaptureException, match="contradicts interpreted sample count"):
+        NativeWifiCsiExtractor.read_sigmf(str(data_file))
+
+    # 5. Test verify_capture_integrity returns False for invalid capture
+    assert verify_capture_integrity(data_file, meta_file) is False
+
 

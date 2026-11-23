@@ -107,15 +107,33 @@ def ingest_sigmf_capture(
     raw_dt = first_capture.get("core:datetime")
     capture_timestamp = parse_capture_timestamp(raw_dt)
 
-    # 2. Extract radio profile
+    if len(raw_data_bytes) % 8 != 0:
+        raise QuarantinedCaptureException(f"Binary payload length {len(raw_data_bytes)} is not divisible by 8 (cf32_le)")
+
+    # 2. Extract radio profile and validate datatype / sample count
     glob = metadata_dict.get("global", {})
+    if "core:datatype" in glob:
+        dt_val = str(glob["core:datatype"]).strip().lower()
+        if dt_val not in ("cf32_le", "cf32"):
+            raise QuarantinedCaptureException(f"Unsupported SigMF core:datatype '{dt_val}'. Only cf32_le is supported.")
+    else:
+        metadata_dict.setdefault("global", {})["core:datatype"] = "cf32_le"
+
     frequency_hz = float(first_capture.get("core:frequency", 0.0))
     sample_rate_hz = float(glob.get("core:sample_rate", 0.0))
     hw_driver = str(glob.get("core:hw", "UNKNOWN"))
 
     annot = (metadata_dict.get("annotations") or [{}])[0]
     rx_gain = float(annot.get("mesia:agc_gain_db", 0.0))
-    num_samples = int(annot.get("core:sample_count", len(raw_data_bytes) // 8))
+    if "core:sample_count" in annot:
+        declared_samples = int(annot["core:sample_count"])
+        if declared_samples * 8 != len(raw_data_bytes):
+            raise QuarantinedCaptureException(
+                f"Declared core:sample_count {declared_samples} does not reconcile with data bytes {len(raw_data_bytes)}"
+            )
+        num_samples = declared_samples
+    else:
+        num_samples = len(raw_data_bytes) // 8
 
     radio_profile = RadioProfile(
         family="WIFI_CSI" if "wifi" in hw_driver.lower() or "csi" in hw_driver.lower() else "RADIO_SENSING",
@@ -229,7 +247,7 @@ def verify_capture_integrity(
             manifest_plot = _sanitize_id(storage_prefix_or_manifest.plot_id, "plot_id")
             if expected_tenant and manifest_tenant != expected_tenant:
                 return False
-            if expected_farm and expected_farm != "default_farm" and manifest_farm != expected_farm:
+            if expected_farm and manifest_farm != expected_farm:
                 return False
             if expected_plot and manifest_plot != expected_plot:
                 return False
@@ -316,6 +334,25 @@ def verify_capture_integrity(
         if not captures[0].get("core:datetime"):
             return False
 
+        # Validate SigMF datatype and sample count if present
+        glob = metadata_dict.get("global") or {}
+        if "core:datatype" in glob:
+            dt_val = str(glob["core:datatype"]).strip().lower()
+            if dt_val not in ("cf32_le", "cf32"):
+                return False
+
+        if not data_file.exists() or data_file.stat().st_size == 0 or data_file.stat().st_size % 8 != 0:
+            return False
+
+        annot = (metadata_dict.get("annotations") or [{}])[0]
+        if "core:sample_count" in annot:
+            try:
+                declared_samples = int(annot["core:sample_count"])
+                if declared_samples * 8 != data_file.stat().st_size:
+                    return False
+            except (ValueError, TypeError):
+                return False
+
         # 7. Parse and validate manifest dictionary
         try:
             manifest_dict = json.loads(manifest_file.read_text(encoding="utf-8"))
@@ -343,7 +380,7 @@ def verify_capture_integrity(
             return False
         if expected_plot and manifest_plot != expected_plot:
             return False
-        if expected_farm and expected_farm != "default_farm" and manifest_farm != expected_farm:
+        if expected_farm and manifest_farm != expected_farm:
             return False
 
         # Cross-check capture_timestamp_utc with captures[0]["core:datetime"]

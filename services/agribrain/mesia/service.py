@@ -977,7 +977,8 @@ class MesiaProductionService:
                 "source_class": "PHYSICAL_RECEIVER",
                 "processing_level": "FEATURE",
                 "identity_state": "PROTOCOL_CONFIRMED",
-                "presentation_state": "LIVE",
+                "presentation_state": "REPLAY",
+                "is_active_stream": False,
                 "receiver_mount": "IOT_CANOPY_ANCHOR_OR_SOIL_POST",
                 "antenna_height_m": 1.2,
                 "log_source": verified_data_file.name,
@@ -2095,6 +2096,28 @@ class MesiaProductionService:
         else:
             real_in_situ_wifi = cls._process_real_in_situ_wifi_csi(plot_namespace or plot_id)
         has_real_wifi = bool(real_in_situ_wifi.get("physical_waves_measured"))
+        wifi_acq_dt = real_in_situ_wifi.get("acquisition_time") if has_real_wifi else None
+        if isinstance(wifi_acq_dt, str):
+            try:
+                wifi_acq_dt = datetime.fromisoformat(wifi_acq_dt)
+            except Exception:
+                wifi_acq_dt = None
+        if wifi_acq_dt is not None and wifi_acq_dt.tzinfo is None:
+            wifi_acq_dt = wifi_acq_dt.replace(tzinfo=timezone.utc)
+
+        wifi_age_seconds = (now_utc - wifi_acq_dt).total_seconds() if (wifi_acq_dt and isinstance(wifi_acq_dt, datetime)) else None
+        is_wifi_fresh = bool(wifi_age_seconds is None or (-60.0 <= wifi_age_seconds <= 3600.0))
+        is_active_wifi_stream = bool(
+            has_real_wifi
+            and (
+                real_in_situ_wifi.get("is_active_stream") is True
+                or real_in_situ_wifi.get("status") == "LIVE_CSI_STREAM"
+                or (
+                    real_in_situ_wifi.get("presentation_state") == "LIVE"
+                    and real_in_situ_wifi.get("is_active_stream") is not False
+                )
+            )
+        )
 
         # 2. Ingest Open-Meteo NWP model soil moisture strata (NWP_REANALYSIS)
         copernicus = cls._fetch_real_copernicus_soil(centre_lat, centre_lon)
@@ -2677,6 +2700,7 @@ class MesiaProductionService:
         if has_real_wifi:
             wifi_cwi = float(real_in_situ_wifi["canopy_water_index"])
             wifi_receipt = real_in_situ_wifi.get("canonical_receipt")
+            wifi_pres_state = "LIVE" if (is_active_wifi_stream and is_wifi_fresh) else "REPLAY"
             proposals.append({
                 "proposal_id": f"innov-wifi-{plot_id}-{now_utc.strftime('%H%M')}",
                 "feature": "mesia_wifi_csi_canopy_foliar",
@@ -2690,7 +2714,7 @@ class MesiaProductionService:
                 "confidence_support": 0.95,
                 "authority_scope": "evidence_proposal",
                 "authority_state": "RESEARCH_ONLY",
-                "presentation_state": "LIVE",
+                "presentation_state": wifi_pres_state,
                 "decision_eligible": False,
                 "evidence_class": "DERIVED_MODEL_INFERRED",
                 "truth_classification": "DERIVED_MODEL_INFERRED",
@@ -2707,6 +2731,7 @@ class MesiaProductionService:
                 "receipt_id": real_in_situ_wifi.get("receipt_id"),
                 "capture_id": real_in_situ_wifi.get("capture_id"),
                 "native_artifact_ref": real_in_situ_wifi.get("native_data_uri"),
+                "native_data_uri": real_in_situ_wifi.get("native_data_uri"),
             })
             lane_packet_configs.append((
                 "mesia_wifi_csi_canopy_foliar",
@@ -2836,8 +2861,12 @@ class MesiaProductionService:
                 processing_level=ProcessingLevel.DERIVED,
                 identity_state=IdentityState.PROTOCOL_CONFIRMED if is_p_live else IdentityState.UNKNOWN,
                 authority_state=AuthorityState.RESEARCH_ONLY,
-                presentation_state=PresentationState.LIVE if is_p_live else PresentationState.SIMULATION,
-                native_artifact_ref=packet.native_data_uri if is_p_live else None,
+                presentation_state=(
+                    PresentationState(p["presentation_state"])
+                    if p.get("presentation_state") in ("LIVE", "REPLAY", "SIMULATION", "DEMO_PLACEHOLDER")
+                    else (PresentationState.LIVE if is_p_live else PresentationState.SIMULATION)
+                ),
+                native_artifact_ref=p.get("native_artifact_ref") or (packet.native_data_uri if is_p_live else None),
                 # The Tier-2 biological inference depends on the actual Layer0
                 # evaluation receipt (including rejection), not an invented
                 # physically measured biological truth.
@@ -2939,12 +2968,22 @@ class MesiaProductionService:
                 processing_level=ProcessingLevel.FEATURE,
                 identity_state=IdentityState.PROTOCOL_CONFIRMED if has_real_wifi else IdentityState.UNKNOWN,
                 authority_state=AuthorityState.RESEARCH_ONLY if has_real_wifi else AuthorityState.QUARANTINED,
-                presentation_state=PresentationState.LIVE if has_real_wifi else PresentationState.DEMO_PLACEHOLDER,
-                native_artifact_ref=f"file://mesia/evidence/{plot_id}/{real_in_situ_wifi.get('log_source', 'in_situ_wifi.sigmf-data')}" if has_real_wifi else None,
-                source_receipt_ref=f"rcpt-sigmf-csi-{plot_id}" if has_real_wifi else None,
-                calibration_state_ref="CALIB-VERIFIED-DEMONSTRATOR" if has_real_wifi else None,
+                presentation_state=(
+                    PresentationState.LIVE
+                    if (is_active_wifi_stream and is_wifi_fresh)
+                    else (PresentationState.REPLAY if has_real_wifi else PresentationState.DEMO_PLACEHOLDER)
+                ),
+                native_artifact_ref=(
+                    real_in_situ_wifi.get("native_data_uri")
+                    or f"file://mesia/evidence/{plot_id}/{real_in_situ_wifi.get('log_source', 'in_situ_wifi.sigmf-data')}"
+                ) if has_real_wifi else None,
+                source_receipt_ref=(
+                    real_in_situ_wifi.get("receipt_id")
+                    or f"rcpt-sigmf-csi-{plot_id}"
+                ) if has_real_wifi else None,
+                calibration_state_ref="CALIB-UNVERIFIED-DEMONSTRATOR" if has_real_wifi else None,
                 software_epoch_ref="mesia-r6.1",
-                observed_at=now_dt,
+                observed_at=wifi_acq_dt if wifi_acq_dt else now_dt,
                 valid_for_seconds=3600.0,
                 uncertainty=0.012 if has_real_wifi else 1.0,
                 decision_eligible=False,
@@ -3209,11 +3248,40 @@ class MesiaProductionService:
                 },
                 "ambient_wifi_csi": {
                     "lane_id": "LANE_WIFI_80211BF_SUB7",
-                    "status": "LIVE_CSI_STREAM" if has_real_wifi else "UNOBSERVED_OUT_OF_RANGE",
+                    "status": (
+                        "LIVE_CSI_STREAM"
+                        if (is_active_wifi_stream and is_wifi_fresh)
+                        else (
+                            "RECORDED_CAPTURE_AVAILABLE"
+                            if (has_real_wifi and is_wifi_fresh)
+                            else (
+                                "ARCHIVED_CAPTURE_STALE"
+                                if has_real_wifi
+                                else "UNOBSERVED_OUT_OF_RANGE"
+                            )
+                        )
+                    ),
                     "signal_detected": has_real_wifi,
                     "physical_waves_measured": has_real_wifi,
                     "source_class": "PHYSICAL_RECEIVER" if has_real_wifi else "SIMULATOR",
-                    "presentation_state": "LIVE" if has_real_wifi else "SIMULATION",
+                    "presentation_state": (
+                        "LIVE"
+                        if (is_active_wifi_stream and is_wifi_fresh)
+                        else ("REPLAY" if has_real_wifi else "SIMULATION")
+                    ),
+                    "recorded_capture_available": bool(has_real_wifi),
+                    "freshness": "FRESH" if (has_real_wifi and is_wifi_fresh) else ("STALE" if has_real_wifi else "UNKNOWN"),
+                    "is_fresh": bool(has_real_wifi and is_wifi_fresh),
+                    "canonical_receipt_id": (
+                        real_in_situ_wifi.get("receipt_id")
+                        or f"rcpt-sigmf-csi-{plot_id}"
+                    ) if has_real_wifi else None,
+                    "canonical_receipt": real_in_situ_wifi.get("canonical_receipt") if has_real_wifi else None,
+                    "acquisition_time_utc": wifi_acq_dt.isoformat() if wifi_acq_dt else None,
+                    "native_data_uri": (
+                        real_in_situ_wifi.get("native_data_uri")
+                        or f"file://mesia/evidence/{plot_id}/{real_in_situ_wifi.get('log_source', 'in_situ_wifi.sigmf-data')}"
+                    ) if has_real_wifi else None,
                     "frequency_bands": ["2.4 GHz (ISM)", "5.1-5.8 GHz (UNII)"],
                     "path_loss_threshold_db": -95.0,
                     "effective_sensing_radius_m": 120.0,

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import copy
+import hashlib
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -134,6 +136,38 @@ def clear_canonical_snapshot_cache() -> None:
     """Clear memory snapshot cache across all namespaces."""
     with _SNAPSHOT_CACHE_LOCK:
         _CANONICAL_SNAPSHOT_CACHE.clear()
+
+
+def validate_complete_numerical_record(num_rec: Any) -> Tuple[bool, Optional[str]]:
+    """Validate completeness and physical sanity of an ASMAE posterior numerical record.
+
+    Invariant:
+        keys(states) == keys(sigmas), |states| > 0
+        Every mean must be finite (not bool, int/float, math.isfinite)
+        Every sigma must be finite and non-negative (not bool, int/float, math.isfinite, >= 0.0)
+    """
+    if not isinstance(num_rec, dict):
+        return False, "numerical record must be a dict"
+    states = num_rec.get("states")
+    sigmas = num_rec.get("sigmas")
+    if not isinstance(states, dict) or not states:
+        return False, "states dictionary is missing, not a dict, or empty"
+    if not isinstance(sigmas, dict) or not sigmas:
+        return False, "sigmas dictionary is missing, not a dict, or empty"
+    if set(states) != set(sigmas):
+        return False, f"mismatched states and sigmas keys: {set(states) ^ set(sigmas)}"
+    for key, mean in states.items():
+        if not isinstance(key, str) or not key.strip():
+            return False, f"invalid state key {key!r}"
+        sigma = sigmas[key]
+        for val_name, val in (("mean", mean), ("sigma", sigma)):
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                return False, f"{val_name} for {key} is not numeric ({type(val).__name__})"
+            if not math.isfinite(float(val)):
+                return False, f"{val_name} for {key} is not finite ({val})"
+        if float(sigma) < 0.0:
+            return False, f"sigma for {key} is negative ({sigma})"
+    return True, None
 
 
 def _plot_key(namespace: PlotNamespace) -> str:
@@ -318,6 +352,13 @@ def publish_canonical_plot_snapshot(
         immutable_frontend_payload["claims_numerical_authority"] = False
         scientific_result["claims_numerical_authority"] = False
     elif pub_auth == "CERTIFIED_NUMERICAL":
+        num_rec = (
+            immutable_frontend_payload.get("asmae_posterior_numerical_record")
+            or scientific_result.get("asmae_posterior_numerical_record")
+        )
+        is_num_valid, num_err = validate_complete_numerical_record(num_rec)
+        if not is_num_valid:
+            raise ValueError(f"CERTIFIED_NUMERICAL publication requires complete uncertainty: {num_err}")
         immutable_frontend_payload["claims_numerical_authority"] = True
         scientific_result["claims_numerical_authority"] = True
     elif pub_auth == "CONTAINED_PROPOSAL":
@@ -791,6 +832,11 @@ def publish_canonical_plot_snapshot(
         head["bitemporal_replay_receipt"] = envelope["bitemporal_replay_receipt"]
         head["evidence_set_digest"] = envelope.get("evidence_set_digest")
 
+    current_head_check = _read(_head_path(ns))
+    if current_head_check and prior_head:
+        if current_head_check.get("snapshot_id") != prior_head.get("snapshot_id") and not allow_overwrite:
+            raise ValueError("concurrent publication collision: head was superseded by another process")
+
     _atomic(_head_path(ns), head)
     with _SNAPSHOT_CACHE_LOCK:
         keys_to_evict = [k for k in _CANONICAL_SNAPSHOT_CACHE if k[0] == ns.stable_key()]
@@ -861,25 +907,16 @@ def evaluate_snapshot_admission(
             invalid_integrity.append("numericalBindingValid")
         if validation.get("nodeAgreementValid") is not True:
             invalid_integrity.append("nodeAgreementValid")
-        num_rec = fe_payload.get("asmae_posterior_numerical_record")
-        if isinstance(num_rec, dict) and "states" in num_rec and "sigmas" in num_rec:
-            import math
-            states = num_rec.get("states", {})
-            sigmas = num_rec.get("sigmas", {})
-            if not isinstance(states, dict) or not isinstance(sigmas, dict) or not states:
+        num_rec = (
+            fe_payload.get("asmae_posterior_numerical_record")
+            or (snapshot.get("scientific_result") or {}).get("asmae_posterior_numerical_record")
+            or (snapshot.get("asmae") or {}).get("asmae_posterior_numerical_record")
+        )
+        if num_rec is not None:
+            is_num_valid, _ = validate_complete_numerical_record(num_rec)
+            if not is_num_valid:
                 if "numericalBindingValid" not in invalid_integrity:
                     invalid_integrity.append("numericalBindingValid")
-            else:
-                for k, v in states.items():
-                    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(float(v)):
-                        if "numericalBindingValid" not in invalid_integrity:
-                            invalid_integrity.append("numericalBindingValid")
-                        break
-                for k, v in sigmas.items():
-                    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(float(v)) or float(v) < 0.0:
-                        if "numericalBindingValid" not in invalid_integrity:
-                            invalid_integrity.append("numericalBindingValid")
-                        break
     elif pub_auth in ("DIAGNOSTIC_ONLY", "CONTAINED_PROPOSAL"):
         if validation.get("numericalBindingValid") is False:
             invalid_integrity.append("numericalBindingValid")
@@ -1390,36 +1427,41 @@ def load_latest_plot_snapshot(
     node_agreement_valid = True
     if num_rec is not None:
         if isinstance(num_rec, dict) and "states" in num_rec:
-            try:
-                try:
-                    from services.agribrain.layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
-                except ImportError:
-                    from layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
-                states = num_rec.get("states", {})
-                sigmas = num_rec.get("sigmas", {})
-                recomputed_num_hash = compute_asmae_vector_numerical_hash(states, sigmas)
-                claimed_num_hash = num_rec.get("numerical_vector_hash")
-                claimed_proof_hash = (publication_frontend.get("asmae_proof") or {}).get("numerical_vector_hash")
-                claimed_lineage_hash = (publication_frontend.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
-
-                is_valid = (
-                    bool(claimed_num_hash)
-                    and bool(claimed_proof_hash)
-                    and bool(claimed_lineage_hash)
-                    and claimed_num_hash == recomputed_num_hash
-                    and claimed_proof_hash == recomputed_num_hash
-                    and claimed_lineage_hash == recomputed_num_hash
-                )
-                if node_num_hash and claimed_num_hash != node_num_hash:
-                    is_valid = False
-                    node_agreement_valid = False
-
-                numerical_binding_valid = bool(is_valid)
-            except Exception:
+            is_num_valid, _ = validate_complete_numerical_record(num_rec)
+            if not is_num_valid:
                 numerical_binding_valid = False
+                node_agreement_valid = False
+            else:
+                try:
+                    try:
+                        from services.agribrain.layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
+                    except ImportError:
+                        from layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
+                    states = num_rec.get("states", {})
+                    sigmas = num_rec.get("sigmas", {})
+                    recomputed_num_hash = compute_asmae_vector_numerical_hash(states, sigmas)
+                    claimed_num_hash = num_rec.get("numerical_vector_hash")
+                    claimed_proof_hash = (publication_frontend.get("asmae_proof") or {}).get("numerical_vector_hash")
+                    claimed_lineage_hash = (publication_frontend.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
+
+                    is_valid = (
+                        bool(claimed_num_hash)
+                        and bool(claimed_proof_hash)
+                        and bool(claimed_lineage_hash)
+                        and claimed_num_hash == recomputed_num_hash
+                        and claimed_proof_hash == recomputed_num_hash
+                        and claimed_lineage_hash == recomputed_num_hash
+                    )
+                    if node_num_hash and claimed_num_hash != node_num_hash:
+                        is_valid = False
+                        node_agreement_valid = False
+
+                    numerical_binding_valid = bool(is_valid)
+                except Exception:
+                    numerical_binding_valid = False
         else:
             numerical_binding_valid = False
-    elif claims_numerical_authority:
+    elif claims_numerical_authority or fe_pub_auth == "CERTIFIED_NUMERICAL":
         # Numerical authority claimed but numerical record is missing
         numerical_binding_valid = False
         node_agreement_valid = False
@@ -1803,36 +1845,41 @@ def load_and_validate_plot_snapshot_by_id(
     node_agreement_valid = True
     if num_rec is not None:
         if isinstance(num_rec, dict) and "states" in num_rec:
-            try:
-                try:
-                    from services.agribrain.layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
-                except ImportError:
-                    from layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
-                states = num_rec.get("states", {})
-                sigmas = num_rec.get("sigmas", {})
-                recomputed_num_hash = compute_asmae_vector_numerical_hash(states, sigmas)
-                claimed_num_hash = num_rec.get("numerical_vector_hash")
-                claimed_proof_hash = (publication_frontend.get("asmae_proof") or {}).get("numerical_vector_hash")
-                claimed_lineage_hash = (publication_frontend.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
-
-                is_valid = (
-                    bool(claimed_num_hash)
-                    and bool(claimed_proof_hash)
-                    and bool(claimed_lineage_hash)
-                    and claimed_num_hash == recomputed_num_hash
-                    and claimed_proof_hash == recomputed_num_hash
-                    and claimed_lineage_hash == recomputed_num_hash
-                )
-                if node_num_hash and claimed_num_hash != node_num_hash:
-                    is_valid = False
-                    node_agreement_valid = False
-
-                numerical_binding_valid = bool(is_valid)
-            except Exception:
+            is_num_valid, _ = validate_complete_numerical_record(num_rec)
+            if not is_num_valid:
                 numerical_binding_valid = False
+                node_agreement_valid = False
+            else:
+                try:
+                    try:
+                        from services.agribrain.layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
+                    except ImportError:
+                        from layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
+                    states = num_rec.get("states", {})
+                    sigmas = num_rec.get("sigmas", {})
+                    recomputed_num_hash = compute_asmae_vector_numerical_hash(states, sigmas)
+                    claimed_num_hash = num_rec.get("numerical_vector_hash")
+                    claimed_proof_hash = (publication_frontend.get("asmae_proof") or {}).get("numerical_vector_hash")
+                    claimed_lineage_hash = (publication_frontend.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
+
+                    is_valid = (
+                        bool(claimed_num_hash)
+                        and bool(claimed_proof_hash)
+                        and bool(claimed_lineage_hash)
+                        and claimed_num_hash == recomputed_num_hash
+                        and claimed_proof_hash == recomputed_num_hash
+                        and claimed_lineage_hash == recomputed_num_hash
+                    )
+                    if node_num_hash and claimed_num_hash != node_num_hash:
+                        is_valid = False
+                        node_agreement_valid = False
+
+                    numerical_binding_valid = bool(is_valid)
+                except Exception:
+                    numerical_binding_valid = False
         else:
             numerical_binding_valid = False
-    elif claims_numerical_authority:
+    elif claims_numerical_authority or fe_pub_auth == "CERTIFIED_NUMERICAL":
         numerical_binding_valid = False
         node_agreement_valid = False
 

@@ -33,22 +33,8 @@ def _complete_uncertainty_for_states(states: Any, sigmas: Any) -> bool:
     mislabeled as standard deviations cannot be promoted into a numerical
     record. Zero is allowed only when explicitly supplied, never invented.
     """
-    if not isinstance(states, dict) or not states or not isinstance(sigmas, dict):
-        return False
-    if set(states) != set(sigmas):
-        return False
-    for key, mean in states.items():
-        sigma = sigmas[key]
-        if not isinstance(key, str) or not key:
-            return False
-        for value in (mean, sigma):
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                return False
-            if not math.isfinite(float(value)):
-                return False
-        if float(sigma) < 0.0:
-            return False
-    return True
+    from services.agribrain.layer05_asmae.plot_snapshot_store import validate_complete_numerical_record
+    return validate_complete_numerical_record({"states": states, "sigmas": sigmas})[0]
 
 
 def _canonical_worldline_namespace(
