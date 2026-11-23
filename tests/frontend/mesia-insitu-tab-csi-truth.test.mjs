@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { computeCsiTruthBadges } from "../../src/lib/agribrain/csi-truth.mjs";
 
 const root = process.cwd();
 const inSituTabSrc = readFileSync(
@@ -9,154 +10,113 @@ const inSituTabSrc = readFileSync(
   "utf8"
 );
 
-// Pure helper replicating the presentation logic in InSituTab.tsx
-function computeCsiBadges(inSituWifi, ambientWifi) {
-  const hasPhysicalWifi = Boolean(
-    inSituWifi?.physical_waves_measured || ambientWifi?.physical_waves_measured
-  );
-  const isActiveStream = Boolean(
-    inSituWifi?.is_active_stream ?? ambientWifi?.is_active_stream ?? false
-  );
-  const isFresh = Boolean(
-    inSituWifi?.is_fresh ||
-    inSituWifi?.freshness === "FRESH" ||
-    ambientWifi?.is_fresh ||
-    ambientWifi?.freshness === "FRESH"
-  );
-
-  let csiBadgeText = "○ No verified CSI capture";
-  let csiBadgeBg = "rgba(100, 116, 139, 0.2)";
-  let csiBadgeColor = "#94a3b8";
-  let csiBadgeBorder = "rgba(100, 116, 139, 0.4)";
-
-  if (!hasPhysicalWifi) {
-    csiBadgeText = "○ No verified CSI capture";
-  } else if (isActiveStream && isFresh) {
-    csiBadgeText = "● Live CSI stream";
-    csiBadgeBg = "rgba(236, 72, 153, 0.2)";
-    csiBadgeColor = "#f472b6";
-    csiBadgeBorder = "#f472b6";
-  } else if (isFresh) {
-    csiBadgeText = "● Recorded capture";
-    csiBadgeBg = "rgba(56, 189, 248, 0.2)";
-    csiBadgeColor = "#38bdf8";
-    csiBadgeBorder = "#38bdf8";
-  } else {
-    csiBadgeText = "○ Archived capture";
-    csiBadgeBg = "rgba(245, 158, 11, 0.2)";
-    csiBadgeColor = "#f59e0b";
-    csiBadgeBorder = "rgba(245, 158, 11, 0.5)";
-  }
-
-  const isCalibrated = Boolean(
-    inSituWifi?.is_calibrated ||
-    inSituWifi?.calibration_status === "CALIBRATED" ||
-    (inSituWifi?.calibration_state_ref && inSituWifi.calibration_state_ref !== "CALIB-UNVERIFIED-DEMONSTRATOR")
-  );
-  const calBadgeText = isCalibrated ? "✓ CALIBRATED" : "⚠ UNCALIBRATED";
-  const calBadgeBg = isCalibrated ? "rgba(34, 197, 94, 0.15)" : "rgba(245, 158, 11, 0.15)";
-  const calBadgeColor = isCalibrated ? "#4ade80" : "#fbbf24";
-  const calBadgeBorder = isCalibrated ? "rgba(34, 197, 94, 0.4)" : "rgba(245, 158, 11, 0.4)";
-
-  return {
-    hasPhysicalWifi,
-    csiBadgeText,
-    csiBadgeColor,
-    isCalibrated,
-    calBadgeText,
-    calBadgeColor,
-  };
-}
-
-test("MESIA-CSI-01: InSituTab source code defines 4 distinct truthful CSI presentation states", () => {
-  assert.match(inSituTabSrc, /"● Live CSI stream"/);
-  assert.match(inSituTabSrc, /"● Recorded capture"/);
-  assert.match(inSituTabSrc, /"○ Archived capture"/);
-  assert.match(inSituTabSrc, /"○ No verified CSI capture"/);
-  assert.doesNotMatch(inSituTabSrc, /"● PHYSICAL CSI ACTIVE"/);
-});
-
-test("MESIA-CSI-02: InSituTab source code decouples calibration status from freshness", () => {
-  assert.match(inSituTabSrc, /"✓ CALIBRATED"/);
-  assert.match(inSituTabSrc, /"⚠ UNCALIBRATED"/);
+test("MESIA-CSI-01: InSituTab source code imports canonical computeCsiTruthBadges authority", () => {
+  assert.match(inSituTabSrc, /import\s*\{\s*computeCsiTruthBadges\s*\}\s*from\s*["']@\/lib\/agribrain\/csi-truth\.mjs["']/);
+  assert.match(inSituTabSrc, /const\s*\{\s*hasPhysicalWifi,\s*csiBadgeText,/);
   assert.match(inSituTabSrc, /data-testid="csi-stream-badge"/);
   assert.match(inSituTabSrc, /data-testid="csi-calibration-badge"/);
-  assert.match(inSituTabSrc, /CALIB-UNVERIFIED-DEMONSTRATOR/);
 });
 
-test("MESIA-CSI-03: No physical capture displays '○ No verified CSI capture'", () => {
-  const result = computeCsiBadges(null, null);
-  assert.equal(result.hasPhysicalWifi, false);
-  assert.equal(result.csiBadgeText, "○ No verified CSI capture");
-  assert.equal(result.csiBadgeColor, "#94a3b8");
+test("MESIA-CSI-02: Absent physical waves strictly yields '○ No verified CSI capture'", () => {
+  const resultNull = computeCsiTruthBadges(null, null);
+  assert.equal(resultNull.hasPhysicalWifi, false);
+  assert.equal(resultNull.csiBadgeText, "○ No verified CSI capture");
+  assert.equal(resultNull.csiBadgeColor, "#94a3b8");
 
-  const unmeasured = computeCsiBadges({ physical_waves_measured: false }, {});
-  assert.equal(unmeasured.hasPhysicalWifi, false);
-  assert.equal(unmeasured.csiBadgeText, "○ No verified CSI capture");
+  const resultUnmeasured = computeCsiTruthBadges({ physical_waves_measured: false }, null);
+  assert.equal(resultUnmeasured.hasPhysicalWifi, false);
+  assert.equal(resultUnmeasured.csiBadgeText, "○ No verified CSI capture");
 });
 
-test("MESIA-CSI-04: Active fresh stream displays '● Live CSI stream'", () => {
-  const result = computeCsiBadges(
-    { physical_waves_measured: true, is_active_stream: true, is_fresh: true },
-    null
-  );
+test("MESIA-CSI-03: Explicit is_active_stream=false overrides conflicting LIVE status (F04 fail-closed)", () => {
+  // Contradictory fixture: status claims LIVE_CSI_STREAM but is_active_stream is explicitly false
+  const contradictoryFixture = {
+    physical_waves_measured: true,
+    is_active_stream: false,
+    status: "LIVE_CSI_STREAM",
+    presentation_state: "LIVE",
+    is_fresh: true,
+    freshness: "FRESH",
+  };
+  const result = computeCsiTruthBadges(contradictoryFixture, null);
   assert.equal(result.hasPhysicalWifi, true);
+  assert.equal(result.isActiveStream, false, "Explicit is_active_stream=false must strictly win over status string");
+  assert.equal(result.csiBadgeText, "● Recorded capture", "Must report recorded capture, never false live stream");
+  assert.equal(result.csiBadgeColor, "#38bdf8");
+});
+
+test("MESIA-CSI-04: Explicit is_calibrated=false overrides arbitrary calibration reference (F04 fail-closed)", () => {
+  // Contradictory fixture: calibration_state_ref is present, but is_calibrated is explicitly false
+  const uncalibratedFixture = {
+    physical_waves_measured: true,
+    is_active_stream: false,
+    is_fresh: true,
+    is_calibrated: false,
+    calibration_status: "UNCALIBRATED",
+    calibration_state_ref: "CALIB-PROD-50OHM-ANECHOIC-V1",
+  };
+  const result = computeCsiTruthBadges(uncalibratedFixture, null);
+  assert.equal(result.isCalibrated, false, "Explicit is_calibrated=false must not be overridden by calibration_state_ref");
+  assert.equal(result.calBadgeText, "⚠ UNCALIBRATED");
+  assert.equal(result.calBadgeColor, "#fbbf24");
+});
+
+test("MESIA-CSI-05: Non-calibrated status overrides non-empty calibration reference (F04 fail-closed)", () => {
+  const uncalibratedStatusFixture = {
+    physical_waves_measured: true,
+    is_active_stream: false,
+    is_fresh: true,
+    is_calibrated: true, // Inconsistent positive flag
+    calibration_status: "UNCALIBRATED", // Explicit negative status
+    calibration_state_ref: "CALIB-PROD-50OHM-ANECHOIC-V1",
+  };
+  const result = computeCsiTruthBadges(uncalibratedStatusFixture, null);
+  assert.equal(result.isCalibrated, false, "calibration_status=UNCALIBRATED must fail closed");
+  assert.equal(result.calBadgeText, "⚠ UNCALIBRATED");
+});
+
+test("MESIA-CSI-06: Verified active fresh stream displays '● Live CSI stream'", () => {
+  const liveFixture = {
+    physical_waves_measured: true,
+    is_active_stream: true,
+    status: "LIVE_CSI_STREAM",
+    is_fresh: true,
+    freshness: "FRESH",
+  };
+  const result = computeCsiTruthBadges(liveFixture, null);
+  assert.equal(result.hasPhysicalWifi, true);
+  assert.equal(result.isActiveStream, true);
+  assert.equal(result.isFresh, true);
   assert.equal(result.csiBadgeText, "● Live CSI stream");
   assert.equal(result.csiBadgeColor, "#f472b6");
 });
 
-test("MESIA-CSI-05: Stored physical capture with fresh acquisition displays '● Recorded capture'", () => {
-  const result = computeCsiBadges(
-    { physical_waves_measured: true, is_active_stream: false, is_fresh: true },
-    null
-  );
+test("MESIA-CSI-07: Stale acquisition displays '○ Archived capture' even if active was claimed", () => {
+  const staleFixture = {
+    physical_waves_measured: true,
+    is_active_stream: true,
+    status: "LIVE_CSI_STREAM",
+    is_fresh: false,
+    freshness: "STALE",
+  };
+  const result = computeCsiTruthBadges(staleFixture, null);
   assert.equal(result.hasPhysicalWifi, true);
-  assert.equal(result.csiBadgeText, "● Recorded capture");
-  assert.equal(result.csiBadgeColor, "#38bdf8");
-});
-
-test("MESIA-CSI-06: Stored physical capture with stale acquisition displays '○ Archived capture'", () => {
-  const result = computeCsiBadges(
-    { physical_waves_measured: true, is_active_stream: false, is_fresh: false },
-    null
-  );
-  assert.equal(result.hasPhysicalWifi, true);
-  assert.equal(result.csiBadgeText, "○ Archived capture");
+  assert.equal(result.isFresh, false);
+  assert.equal(result.csiBadgeText, "○ Archived capture", "Stale stream must downgrade to archived capture");
   assert.equal(result.csiBadgeColor, "#f59e0b");
 });
 
-test("MESIA-CSI-07: Calibration is independently verified and false for unverified demonstrator", () => {
-  // Fresh recorded capture that is uncalibrated demonstrator
-  const uncalibrated = computeCsiBadges(
-    {
-      physical_waves_measured: true,
-      is_active_stream: false,
-      is_fresh: true,
-      is_calibrated: false,
-      calibration_status: "UNCALIBRATED",
-      calibration_state_ref: "CALIB-UNVERIFIED-DEMONSTRATOR",
-    },
-    null
-  );
-  assert.equal(uncalibrated.csiBadgeText, "● Recorded capture");
-  assert.equal(uncalibrated.isCalibrated, false);
-  assert.equal(uncalibrated.calBadgeText, "⚠ UNCALIBRATED");
-  assert.equal(uncalibrated.calBadgeColor, "#fbbf24");
-
-  // Calibrated capture
-  const calibrated = computeCsiBadges(
-    {
-      physical_waves_measured: true,
-      is_active_stream: false,
-      is_fresh: true,
-      is_calibrated: true,
-      calibration_status: "CALIBRATED",
-      calibration_state_ref: "CALIB-ANECHOIC-50OHM-V1",
-    },
-    null
-  );
-  assert.equal(calibrated.csiBadgeText, "● Recorded capture");
-  assert.equal(calibrated.isCalibrated, true);
-  assert.equal(calibrated.calBadgeText, "✓ CALIBRATED");
-  assert.equal(calibrated.calBadgeColor, "#4ade80");
+test("MESIA-CSI-08: Fully qualified calibrated capture displays '✓ CALIBRATED'", () => {
+  const calibratedFixture = {
+    physical_waves_measured: true,
+    is_active_stream: false,
+    is_fresh: true,
+    is_calibrated: true,
+    calibration_status: "CALIBRATED",
+    calibration_state_ref: "CALIB-PROD-50OHM-ANECHOIC-V1",
+  };
+  const result = computeCsiTruthBadges(calibratedFixture, null);
+  assert.equal(result.isCalibrated, true);
+  assert.equal(result.calBadgeText, "✓ CALIBRATED");
+  assert.equal(result.calBadgeColor, "#4ade80");
 });

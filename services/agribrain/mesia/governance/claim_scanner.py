@@ -1,7 +1,8 @@
-"""Automated Scientific Claim Scanner for MESIA Governance (R6 / P-01..P-10).
+"""Bounded Source-Text Scientific-Claims Scanner for MESIA Governance (R6 / P-01..P-10).
 
-Recursively scans code, UI templates, test fixtures, and documentation to enforce
-zero unreviewed or deceptive claims of physical measurement, zero synthetic,
+Bounded source-text scientific-claims scanner (regex and lexical pattern scanner across
+source files, UI templates, test fixtures, and documentation rather than an AST parser)
+to enforce zero unreviewed or deceptive claims of physical measurement, zero synthetic,
 dual closure verified, or ground truth.
 """
 

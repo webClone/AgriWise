@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -187,10 +188,25 @@ def publish_latest_snapshot(
     temporary = path.with_suffix(
         path.suffix + f".{os.getpid()}.{uuid.uuid4().hex}.tmp"
     )
-    temporary.write_text(
-        json.dumps(head_envelope, sort_keys=True, default=str), encoding="utf-8"
-    )
-    os.replace(temporary, path)
+    try:
+        temporary.write_text(
+            json.dumps(head_envelope, sort_keys=True, default=str), encoding="utf-8"
+        )
+        last_error = None
+        for attempt in range(8):
+            try:
+                os.replace(temporary, path)
+                break
+            except OSError as exc:
+                last_error = exc
+                if attempt == 7:
+                    raise
+                time.sleep(0.01 * (2 ** attempt))
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
     return str(node_path)
 
 

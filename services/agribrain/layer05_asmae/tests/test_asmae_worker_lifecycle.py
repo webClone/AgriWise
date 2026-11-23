@@ -226,7 +226,11 @@ class WorkerLifecycleTests(unittest.TestCase):
                 deadline = time.monotonic() + 15.0
                 stored = {}
                 while time.monotonic() < deadline:
-                    stored = json.loads(job_path.read_text(encoding='utf-8'))
+                    try:
+                        stored = json.loads(job_path.read_text(encoding='utf-8'))
+                    except (OSError, json.JSONDecodeError):
+                        time.sleep(0.05)
+                        continue
                     claim_path = job_path.with_suffix('.lock')
                     if stored.get('status') == 'failed' and not claim_path.exists():
                         break

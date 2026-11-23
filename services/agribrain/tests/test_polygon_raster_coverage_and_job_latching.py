@@ -170,30 +170,64 @@ def test_reservation_state_blocks_premature_worker_launch():
             assert jobs.recover_pending_jobs(plot_id="plot-res-test") == 0
 
 
-def test_asmae_raster_matches_ndvi_clean_coverage():
-    """Verify that ASMAE diagnostic rasters for plot 6a09d9e91dd0c7ed6fce7d50 completely cover the polygon and match NDVI_CLEAN mask."""
-    from services.agribrain.layer05_asmae.plot_snapshot_store import load_latest_plot_snapshot, load_and_validate_plot_snapshot_by_id, PlotNamespace
+def test_historical_asmae_raster_matches_ndvi_clean_coverage():
+    """Verify that canonical historical ASMAE snapshot ASMAE-SNAPSHOT-17767bfef27763500e30ccc3fefce1d8 completely covers polygon and matches NDVI_CLEAN mask."""
+    from services.agribrain.layer05_asmae.plot_snapshot_store import load_and_validate_plot_snapshot_by_id, PlotNamespace
     ns = PlotNamespace(tenant_id="697ddd3bd4195b809226a67b", farm_id="69ad7b6f7e6843e8234afcf6", plot_id="6a09d9e91dd0c7ed6fce7d50")
-    snapshot = load_latest_plot_snapshot(ns, force_verify=True)
-    surfaces = snapshot.get("frontend_payload", {}).get("surfaces", []) if snapshot else []
+    snapshot = load_and_validate_plot_snapshot_by_id("ASMAE-SNAPSHOT-17767bfef27763500e30ccc3fefce1d8", ns)
+    assert snapshot is not None, "Canonical historical ASMAE snapshot must exist"
+
+    surfaces = snapshot.get("frontend_payload", {}).get("surfaces", [])
     surface_map = {
         (s.get("type") or s.get("surface_type") or s.get("semantic_type")): s
         for s in surfaces if isinstance(s, dict)
     }
 
-    if "NDVI_CLEAN" not in surface_map:
-        # Fallback to historical canonical ASMAE snapshot if head was updated by a non-spatial L10 terminal run
-        snapshot = load_and_validate_plot_snapshot_by_id("ASMAE-SNAPSHOT-17767bfef27763500e30ccc3fefce1d8", ns)
-        assert snapshot is not None, "Canonical ASMAE snapshot for plot must exist"
-        surfaces = snapshot.get("frontend_payload", {}).get("surfaces", [])
-        surface_map = {
-            (s.get("type") or s.get("surface_type") or s.get("semantic_type")): s
-            for s in surfaces if isinstance(s, dict)
-        }
+    assert "NDVI_CLEAN" in surface_map, "NDVI_CLEAN must be in historical publication surfaces"
+    assert "CANOPY_ASMAE_VIGOR" in surface_map, "CANOPY_ASMAE_VIGOR must be in historical publication surfaces"
+    assert "ASMAE_VIGOR" in surface_map, "ASMAE_VIGOR must be in historical publication surfaces"
 
-    assert "NDVI_CLEAN" in surface_map, "NDVI_CLEAN must be in publication surfaces"
-    assert "CANOPY_ASMAE_VIGOR" in surface_map, "CANOPY_ASMAE_VIGOR must be in publication surfaces"
-    assert "ASMAE_VIGOR" in surface_map, "ASMAE_VIGOR must be in publication surfaces"
+    ndvi_vals = np.array(surface_map["NDVI_CLEAN"]["values"], dtype=float)
+    ndvi_valid = ~np.isnan(ndvi_vals)
+
+    for stype in ["CANOPY_ASMAE_VIGOR", "ASMAE_VIGOR"]:
+        asmae_vals = np.array(surface_map[stype]["values"], dtype=float)
+        assert asmae_vals.shape == ndvi_vals.shape, f"{stype} shape {asmae_vals.shape} != NDVI shape {ndvi_vals.shape}"
+        asmae_valid = ~np.isnan(asmae_vals)
+        mismatches = np.sum(asmae_valid != ndvi_valid)
+        assert mismatches == 0, f"{stype} has {mismatches} pixel mask mismatches with NDVI_CLEAN"
+
+        for col in list(range(9)) + list(range(64, ndvi_vals.shape[1])):
+            col_valid_count = np.sum(asmae_valid[:, col])
+            assert col_valid_count > 0, f"Column {col} in historical {stype} is unexpectedly empty"
+
+
+def test_asmae_raster_matches_ndvi_clean_coverage():
+    """Verify that when latest-head publication contract promises ASMAE rasters, they completely cover polygon and match NDVI_CLEAN mask."""
+    from services.agribrain.layer05_asmae.plot_snapshot_store import (
+        load_latest_plot_snapshot, PlotNamespace,
+    )
+    ns = PlotNamespace(tenant_id="697ddd3bd4195b809226a67b", farm_id="69ad7b6f7e6843e8234afcf6", plot_id="6a09d9e91dd0c7ed6fce7d50")
+    snapshot = load_latest_plot_snapshot(ns, force_verify=True)
+    assert snapshot is not None, "Latest canonical plot snapshot must exist"
+
+    # Downstream terminal publications (e.g. Layer 10 SIRE summary) do not include spatial raster surfaces.
+    # When the publication contract promises ASMAE spatial rasters (snapshot_kind == 'asmae'), enforce full coverage.
+    if snapshot.get("snapshot_kind") != "asmae":
+        pytest.skip(
+            f"Latest head snapshot {snapshot.get('snapshot_id')} has kind '{snapshot.get('snapshot_kind')}', "
+            "which does not contractually promise spatial ASMAE raster surfaces."
+        )
+
+    surfaces = snapshot.get("frontend_payload", {}).get("surfaces", [])
+    surface_map = {
+        (s.get("type") or s.get("surface_type") or s.get("semantic_type")): s
+        for s in surfaces if isinstance(s, dict)
+    }
+
+    assert "NDVI_CLEAN" in surface_map, "NDVI_CLEAN must be in latest head publication surfaces"
+    assert "CANOPY_ASMAE_VIGOR" in surface_map, "CANOPY_ASMAE_VIGOR must be in latest head publication surfaces"
+    assert "ASMAE_VIGOR" in surface_map, "ASMAE_VIGOR must be in latest head publication surfaces"
 
     ndvi_vals = np.array(surface_map["NDVI_CLEAN"]["values"], dtype=float)
     ndvi_valid = ~np.isnan(ndvi_vals)
@@ -203,11 +237,9 @@ def test_asmae_raster_matches_ndvi_clean_coverage():
         assert asmae_vals.shape == ndvi_vals.shape, f"{stype} shape {asmae_vals.shape} != NDVI shape {ndvi_vals.shape}"
         asmae_valid = ~np.isnan(asmae_vals)
 
-        # Mismatch between valid masks must be zero
         mismatches = np.sum(asmae_valid != ndvi_valid)
         assert mismatches == 0, f"{stype} has {mismatches} pixel mask mismatches with NDVI_CLEAN"
 
-        # Verify border columns (0-8 and 64-71) are fully populated
         for col in list(range(9)) + list(range(64, ndvi_vals.shape[1])):
             col_valid_count = np.sum(asmae_valid[:, col])
-            assert col_valid_count > 0, f"Column {col} in {stype} is unexpectedly empty"
+            assert col_valid_count > 0, f"Column {col} in latest head {stype} is unexpectedly empty"

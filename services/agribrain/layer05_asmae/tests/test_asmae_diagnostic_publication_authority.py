@@ -887,6 +887,10 @@ def test_concurrent_publication_collision_guard(tmp_path):
         res["claims_numerical_authority"] = True
         res["asmae_posterior_numerical_record"] = rec
         res["asmae_numerical_digest"] = rec["numerical_vector_hash"]
+        res["content_hash"] = hashlib.sha256(f"content-{snap_suffix}".encode()).hexdigest()
+        res["crop_posterior_lineage"] = f"lineage-{snap_suffix}"
+        res["crop_worldline_event_id"] = f"evt-{snap_suffix}"
+        res["phenology_worldline_event_id"] = f"evt-p{snap_suffix}"
         ref = snapshot_store.publish_latest_snapshot(res, context_hash=f"ctx-{snap_suffix}", geometry_hash="geom-race")
         res["snapshot_ref"] = ref
         snap_id = res["snapshot_id"]
@@ -896,6 +900,9 @@ def test_concurrent_publication_collision_guard(tmp_path):
         fe["asmae_posterior_numerical_record"] = rec
         fe["asmae_proof"] = {"status": "valid", "numerical_vector_hash": rec["numerical_vector_hash"]}
         fe["scientific_evidence_lineage"]["asmae_posterior_vector_hash"] = rec["numerical_vector_hash"]
+        fe["scientific_evidence_lineage"]["crop_posterior_lineage"] = f"lineage-{snap_suffix}"
+        fe["scientific_evidence_lineage"]["crop_worldline_event_id"] = f"evt-{snap_suffix}"
+        fe["scientific_evidence_lineage"]["phenology_worldline_event_id"] = f"evt-p{snap_suffix}"
         return snap_id, res, fe
 
     # 1. Commit initial head: snap_1

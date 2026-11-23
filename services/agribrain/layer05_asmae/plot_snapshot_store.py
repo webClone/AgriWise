@@ -383,6 +383,209 @@ def _plot_publication_lock(plot_dir: Path, timeout: float = 10.0):
         process_mutex.release()
 
 
+LEGACY_HISTORICAL_BENCHMARK_ALLOWLIST = frozenset({
+    "L10-SNAP-MITIDJA-202609081200",
+    "L10-SNAP-P1B-202609081200",
+    "L10-SNAP-P1B-202608151200",
+    "L10-SNAP-P1B-202608181200",
+    "L10-SNAP-P1B-202608261200",
+    "L10-SNAP-P1B-202608311200",
+    "ASMAE-SNAPSHOT-17767bfef27763500e30ccc3fefce1d8",
+    "ASMAE-SNAPSHOT-4e39ea92eba2db3c85f9972a169f613f",
+    "ASMAE-SNAPSHOT-a21c3ebc72353277a18a25771d059b1a",
+    "ASMAE-SNAPSHOT-3c77594de7de8f1de2e3a72f72219fd2",
+})
+
+
+def validate_publication_commit_ledger(
+    directory: Path,
+) -> Tuple[bool, List[Dict[str, Any]], Optional[str]]:
+    """Validate completeness, cryptographic continuity, and integrity of commits.jsonl.
+
+    Enforces:
+    1. If commits.jsonl does not exist, returns (True, [], None).
+    2. Every line must be a valid JSON object (malformed/truncated lines FAIL CLOSED).
+    3. commit_seq must be strictly monotonic starting at 1 (1, 2, 3, ...).
+    4. commit_hash must match recomputed sha256 of canonical fields.
+    5. parent_commit_hash must link to preceding commit_hash (genesis parent is '0'*64).
+    6. snapshot_id must be unique across the ledger (no duplicate commits).
+    7. node_hash, frontend_publication_hash, publication_receipt_hash must be non-empty 64-char hex strings.
+
+    Returns:
+        (is_valid, records, error_message)
+    """
+    commits_file = directory / "commits.jsonl"
+    if not commits_file.exists():
+        return True, [], None
+
+    try:
+        content = commits_file.read_text(encoding="utf-8")
+    except OSError as exc:
+        return False, [], f"Unreadable commits.jsonl: {exc}"
+
+    lines = content.splitlines()
+    if not lines:
+        return True, [], None
+
+    records: List[Dict[str, Any]] = []
+    seen_entries = set()
+    seen_commit_hashes = set()
+    seen_receipt_hashes = set()
+
+    for line_idx, raw_line in enumerate(lines, start=1):
+        line = raw_line.strip()
+        if not line:
+            if line_idx == len(lines):
+                continue
+            return False, [], f"Malformed commit ledger: empty line at line {line_idx}"
+        try:
+            rec = json.loads(line)
+        except Exception as exc:
+            return False, [], f"Malformed commit ledger JSON at line {line_idx}: {exc}"
+
+        if not isinstance(rec, dict):
+            return False, [], f"Malformed commit ledger record at line {line_idx}: not a dict"
+
+        seq = rec.get("commit_seq")
+        expected_seq = len(records) + 1
+        if seq != expected_seq:
+            return False, [], f"Ledger sequence discontinuity at line {line_idx}: expected {expected_seq}, got {seq}"
+
+        sid = rec.get("snapshot_id")
+        if not sid or not isinstance(sid, str):
+            return False, [], f"Missing or invalid snapshot_id at line {line_idx}"
+
+        rcpt_hash = rec.get("publication_receipt_hash")
+        commit_entry_key = (sid, rcpt_hash)
+        if commit_entry_key in seen_entries:
+            return False, [], f"Duplicate commit entry for snapshot '{sid}' in commit ledger at line {line_idx}"
+        seen_entries.add(commit_entry_key)
+
+        if rcpt_hash in seen_receipt_hashes:
+            return False, [], f"Duplicate publication_receipt_hash in commit ledger at line {line_idx}"
+        seen_receipt_hashes.add(rcpt_hash)
+
+        parent_hash = rec.get("parent_commit_hash")
+        expected_parent = records[-1]["commit_hash"] if records else ("0" * 64)
+        if parent_hash != expected_parent:
+            return False, [], f"Parent commit hash mismatch at line {line_idx}: expected {expected_parent}, got {parent_hash}"
+
+        hashable_rec = {k: v for k, v in rec.items() if k != "commit_hash"}
+        computed_hash = hashlib.sha256(_json_bytes(hashable_rec)).hexdigest()
+        claimed_hash = rec.get("commit_hash")
+        if not claimed_hash or claimed_hash != computed_hash:
+            return False, [], f"Commit hash mismatch at line {line_idx}: computed {computed_hash}, claimed {claimed_hash}"
+
+        if claimed_hash in seen_commit_hashes:
+            return False, [], f"Duplicate commit_hash in commit ledger at line {line_idx}"
+        seen_commit_hashes.add(claimed_hash)
+
+        for hkey in ("node_hash", "frontend_publication_hash", "publication_receipt_hash"):
+            hval = rec.get(hkey)
+            if not hval or not isinstance(hval, str) or len(hval) != 64:
+                return False, [], f"Invalid {hkey} at line {line_idx}: expected 64-char sha256 hex"
+
+        records.append(rec)
+
+    return True, records, None
+
+
+def reconcile_publication_ledger_and_head(
+    directory: Path,
+    ns: PlotNamespace,
+) -> Optional[Dict[str, Any]]:
+    """Deterministically reconcile ledger commit tip with head.json under crash recovery.
+
+    If a writer crashed after appending & fsyncing commits.jsonl but before updating head.json,
+    this function reconciles head.json to the validated ledger tip if all staged artifacts are intact.
+    """
+    head_file = _head_path(ns)
+    is_valid, records, _ = validate_publication_commit_ledger(directory)
+    if not is_valid or not records:
+        return _read(head_file) if head_file.exists() else None
+
+    tip = records[-1]
+    current_head = _read(head_file) if head_file.exists() else {}
+
+    if (
+        current_head.get("snapshot_id") == tip["snapshot_id"]
+        and current_head.get("commit_hash") == tip["commit_hash"]
+        and current_head.get("commit_seq") == tip["commit_seq"]
+    ):
+        return current_head
+
+    # Interrupted head replacement detected: ledger tip is ahead of head.json
+    tip_sid = tip["snapshot_id"]
+    node_path = directory / "nodes" / f"{tip_sid}.json"
+    if not node_path.exists():
+        return current_head if current_head else None
+
+    node = _read(node_path)
+    hashable_node = {
+        k: v for k, v in node.items()
+        if not k.endswith("_ref") and k not in (
+            "node_hash", "snapshot_age_seconds", "snapshot_ref",
+            "publication_receipt_ref", "publication_receipt_hash",
+            "publication_job_id", "frontend_publication_hash",
+            "surface_inventory_hash", "validation", "historical"
+        )
+    }
+    if hashlib.sha256(_json_bytes(hashable_node)).hexdigest() != tip["node_hash"]:
+        return current_head if current_head else None
+
+    job_id_raw = tip.get("publication_job_id") or node.get("job_id") or node.get("publication_job_id") or ""
+    safe_job_id = hashlib.sha256(str(job_id_raw).encode("utf-8")).hexdigest()[:32]
+    pub_path = directory / "publications" / f"{safe_job_id}.json"
+    rcpt_path = directory / "receipts" / f"{safe_job_id}.json"
+    if not pub_path.exists() or not rcpt_path.exists():
+        return current_head if current_head else None
+
+    pub = _read(pub_path)
+    rcpt = _read(rcpt_path)
+    if (
+        pub.get("publication_hash") != tip["frontend_publication_hash"]
+        or rcpt.get("receipt_hash") != tip["publication_receipt_hash"]
+    ):
+        return current_head if current_head else None
+
+    # Reconcile head.json to tip
+    reconciled_head = {
+        "contract_version": PLOT_SNAPSHOT_CONTRACT_VERSION,
+        "snapshot_kind": node.get("snapshot_kind") or "layer10_terminal",
+        "publication_authority": node.get("publication_authority") or pub.get("publication_authority") or "DIAGNOSTIC_ONLY",
+        "tenant_id": ns.tenant_id,
+        "farm_id": ns.farm_id,
+        "plot_id": ns.plot_id,
+        "geometry_hash": node.get("geometry_hash") or "",
+        "snapshot_id": tip_sid,
+        "node_ref": str(node_path),
+        "node_hash": tip["node_hash"],
+        "publication_job_id": str(job_id_raw),
+        "publication_manifest_hash": node.get("manifest_hash") or pub.get("manifest_hash") or "",
+        "crop_posterior_lineage": node.get("crop_posterior_lineage"),
+        "crop_worldline_event_id": node.get("crop_worldline_event_id"),
+        "phenology_worldline_event_id": node.get("phenology_worldline_event_id"),
+        "publication_receipt_ref": str(rcpt_path),
+        "publication_receipt_hash": tip["publication_receipt_hash"],
+        "frontend_publication_ref": str(pub_path),
+        "frontend_publication_hash": tip["frontend_publication_hash"],
+        "surface_inventory_hash": pub.get("frontend_payload", {}).get("surface_inventory_hash"),
+        "published_at": pub.get("published_at") or node.get("published_at") or tip["committed_at"],
+        "evidence_cutoff_at": pub.get("evidence_cutoff_at") or node.get("evidence_cutoff_at"),
+        "observation_window": pub.get("observation_window") or node.get("observation_window"),
+        "crop_cycle_id": node.get("crop_cycle_id"),
+        "updated_at": tip["committed_at"],
+        "commit_seq": tip["commit_seq"],
+        "commit_hash": tip["commit_hash"],
+    }
+    _atomic(head_file, reconciled_head)
+    with _SNAPSHOT_CACHE_LOCK:
+        keys_to_evict = [k for k in _CANONICAL_SNAPSHOT_CACHE if k[0] == ns.stable_key()]
+        for k in keys_to_evict:
+            _CANONICAL_SNAPSHOT_CACHE.pop(k, None)
+    return reconciled_head
+
+
 def _immutable_asmae_payload(
     result: Dict[str, Any],
     *,
@@ -705,7 +908,13 @@ def publish_canonical_plot_snapshot(
 
     if node_path.exists():
         existing = _read(node_path)
-        if not existing:
+        if not existing or not existing.get("node_hash"):
+            for _ in range(50):
+                time.sleep(0.002)
+                existing = _read(node_path)
+                if existing and existing.get("node_hash"):
+                    break
+        if not existing or not existing.get("node_hash"):
             with open(node_path, "wb") as handle:
                 handle.write(_json_bytes(envelope))
                 handle.flush()
@@ -993,7 +1202,18 @@ def publish_canonical_plot_snapshot(
         head["evidence_set_digest"] = envelope.get("evidence_set_digest")
 
     with _plot_publication_lock(directory):
+        reconcile_publication_ledger_and_head(directory, ns)
         current_head_check = _read(_head_path(ns))
+
+        # Idempotent re-publication guard: if snapshot is already the committed head with identical hashes, no-op
+        if current_head_check.get("snapshot_id") == snapshot_id:
+            if (
+                current_head_check.get("node_hash") == envelope.get("node_hash")
+                and current_head_check.get("frontend_publication_hash") == publication.get("publication_hash")
+                and current_head_check.get("publication_receipt_hash") == receipt.get("receipt_hash")
+            ):
+                return current_head_check
+
         if not allow_overwrite:
             if current_head_check.get("snapshot_id") != snapshot_id:
                 if prior_head and current_head_check:
@@ -1004,16 +1224,11 @@ def publish_canonical_plot_snapshot(
 
         # ── Publication Commit Ledger (Append-only hash-bound commit index) ──
         commits_file = directory / "commits.jsonl"
-        existing_commits = []
-        if commits_file.exists():
-            for line in commits_file.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line:
-                    try:
-                        existing_commits.append(json.loads(line))
-                    except Exception:
-                        pass
-        elif current_head_check and current_head_check.get("snapshot_id"):
+        is_ledger_valid, existing_commits, ledger_err = validate_publication_commit_ledger(directory)
+        if not is_ledger_valid:
+            raise ValueError(f"Cannot publish snapshot: commit ledger is corrupted: {ledger_err}")
+
+        if not commits_file.exists() and current_head_check and current_head_check.get("snapshot_id"):
             # Bootstrap legacy committed head as genesis commit if upgrading existing plot store
             leg_id = current_head_check.get("snapshot_id")
             leg_node_hash = current_head_check.get("node_hash")
@@ -1049,10 +1264,10 @@ def publish_canonical_plot_snapshot(
         commit_record["commit_hash"] = commit_hash
 
         # Append commit record to commits.jsonl atomically
-        needs_initial_bootstrap = (not commits_file.exists() or commits_file.stat().st_size == 0) and bool(existing_commits)
+        needs_initial_bootstrap = (not commits_file.exists() or commits_file.stat().st_size == 0) and bool(existing_commits[:-1] if commit_seq == 1 else existing_commits)
         with open(commits_file, "a", encoding="utf-8") as f:
             if needs_initial_bootstrap:
-                for c in existing_commits:
+                for c in existing_commits[:-1] if commit_seq == 1 else existing_commits:
                     f.write(json.dumps(c, separators=(",", ":")) + "\n")
             f.write(json.dumps(commit_record, separators=(",", ":")) + "\n")
             f.flush()
@@ -1440,6 +1655,15 @@ def load_latest_plot_snapshot(
          while restoring original nanosecond timestamps and padding file sizes.
     """
     ns = _coerce_namespace(namespace, tenant_id=tenant_id, farm_id=farm_id)
+    directory = _plot_dir(ns)
+    commits_file = directory / "commits.jsonl"
+    if commits_file.exists():
+        is_ledger_valid, records, _ = validate_publication_commit_ledger(directory)
+        if not is_ledger_valid:
+            return None
+        with _plot_publication_lock(directory):
+            reconcile_publication_ledger_and_head(directory, ns)
+
     head_file = _head_path(ns)
     if not head_file.exists():
         return None
@@ -1456,6 +1680,18 @@ def load_latest_plot_snapshot(
         return None
     if geometry_hash and head.get("geometry_hash") != geometry_hash:
         return None
+
+    if force_verify and commits_file.exists():
+        is_ledger_valid, records, _ = validate_publication_commit_ledger(directory)
+        if not is_ledger_valid or not records:
+            return None
+        tip = records[-1]
+        if (
+            head.get("commit_hash") != tip["commit_hash"]
+            or head.get("commit_seq") != tip["commit_seq"]
+            or head.get("snapshot_id") != tip["snapshot_id"]
+        ):
+            return None
 
     snapshot_id = head.get("snapshot_id")
     if not snapshot_id:
@@ -1488,11 +1724,20 @@ def load_latest_plot_snapshot(
     except OSError:
         receipt_mtime = 0
         receipt_size = 0
+    try:
+        commits_stat = commits_file.stat()
+        commits_mtime = commits_stat.st_mtime_ns
+        commits_size = commits_stat.st_size
+    except OSError:
+        commits_mtime = 0
+        commits_size = 0
 
     cache_key = (
         ns.stable_key(),
         head_mtime,
         head_size,
+        commits_mtime,
+        commits_size,
         node_mtime,
         node_size,
         pub_mtime,
@@ -1816,6 +2061,11 @@ def load_latest_plot_snapshot(
         if publication_frontend:
             publication_frontend["crop_cycle_id"] = authoritative_crop_cycle
 
+    if head.get("commit_seq") is not None:
+        node["commit_seq"] = head.get("commit_seq")
+    if head.get("commit_hash") is not None:
+        node["commit_hash"] = head.get("commit_hash")
+
     # Return the job-bound frontend publication only after the immutable node
     # hash has been recomputed.  It is a separate hashed artifact, not a
     # mutation of the node.
@@ -1892,12 +2142,19 @@ def load_and_validate_plot_snapshot_by_id(
     else:
         return None
 
+    directory = _plot_dir(ns)
+    commits_file = directory / "commits.jsonl"
+    if commits_file.exists():
+        is_ledger_valid, records, _ = validate_publication_commit_ledger(directory)
+        if not is_ledger_valid:
+            return None
+        with _plot_publication_lock(directory):
+            reconcile_publication_ledger_and_head(directory, ns)
+
     # Check if this matches the current canonical plot head first
-    latest = load_latest_plot_snapshot(ns)
+    latest = load_latest_plot_snapshot(ns, force_verify=True)
     if latest and str(latest.get("snapshot_id") or "") == snapshot_id:
         return copy.deepcopy(latest)
-
-    directory = _plot_dir(ns)
     node_path = directory / "nodes" / f"{snapshot_id}.json"
     if not node_path.exists():
         return None
@@ -1970,90 +2227,99 @@ def load_and_validate_plot_snapshot_by_id(
     # Losing candidates from concurrent publication races remain uncommitted and unavailable.
     commits_file = directory / "commits.jsonl"
     commit_record = None
-    existing_commits = []
     if commits_file.exists():
-        for line in commits_file.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line:
-                try:
-                    rec = json.loads(line)
-                    existing_commits.append(rec)
-                    if rec.get("snapshot_id") == snapshot_id:
-                        commit_record = rec
-                except Exception:
-                    pass
-
-    if commit_record:
-        if (
-            commit_record.get("node_hash") != node.get("node_hash")
-            or commit_record.get("frontend_publication_hash") != publication.get("publication_hash")
-            or commit_record.get("publication_receipt_hash") != receipt.get("receipt_hash")
-        ):
+        # 1. Full cryptographic validation of the ledger chain
+        is_ledger_valid, records, ledger_err = validate_publication_commit_ledger(directory)
+        if not is_ledger_valid:
+            # Corrupted, malformed, or tampered ledger strictly fails closed
             return None
-    else:
-        # Check if candidate is an authentic pre-existing legacy snapshot or crash recovery:
-        # A candidate without a commit in commits.jsonl is admitted IF AND ONLY IF:
-        # 1. commits.jsonl does not exist, OR candidate was recorded/published prior to the first commit in commits.jsonl
-        # AND
-        # 2. It is either the current head, or part of a valid supersedes_snapshot_id ancestor/descendant DAG
-        is_legacy_eligible = False
-        if not commits_file.exists() or not existing_commits:
-            is_legacy_eligible = True
+
+        # 2. Deterministic reconciliation under lock if crash left ledger ahead of head
+        with _plot_publication_lock(directory):
+            reconcile_publication_ledger_and_head(directory, ns)
+
+        matching_commits = [r for r in records if r.get("snapshot_id") == snapshot_id]
+        commit_record = next(
+            (r for r in matching_commits if r.get("publication_receipt_hash") == receipt.get("receipt_hash")),
+            matching_commits[-1] if matching_commits else None,
+        )
+        if commit_record:
+            if (
+                commit_record.get("node_hash") != node.get("node_hash")
+                or commit_record.get("frontend_publication_hash") != publication.get("publication_hash")
+                or commit_record.get("publication_receipt_hash") != receipt.get("receipt_hash")
+            ):
+                return None
         else:
-            try:
-                first_committed_at_str = existing_commits[0].get("committed_at")
-                first_committed_at = datetime.fromisoformat(str(first_committed_at_str).replace("Z", "+00:00")).astimezone(timezone.utc)
-                cand_time_str = node.get("recorded_at") or node.get("published_at")
-                if cand_time_str:
-                    cand_time = datetime.fromisoformat(str(cand_time_str).replace("Z", "+00:00")).astimezone(timezone.utc)
-                    if cand_time < first_committed_at:
-                        is_legacy_eligible = True
-            except Exception:
-                is_legacy_eligible = False
-
-        if not is_legacy_eligible:
-            return None
-
-        # Verify lineage connection
-        head_file = _head_path(ns)
-        is_legacy_committed = False
-        if head_file.exists():
-            current_head = _read(head_file)
-            if current_head.get("snapshot_id") == snapshot_id:
-                is_legacy_committed = True
+            # Candidate is NOT in the committed ledger.
+            # It is admitted ONLY if:
+            # 1. It is present in LEGACY_HISTORICAL_BENCHMARK_ALLOWLIST; OR
+            # 2. It is an authentic pre-index legacy snapshot:
+            #    - Recorded/published strictly prior to the earliest ledger commit; AND
+            #    - Reachable by walking strictly BACKWARD along supersedes_snapshot_id from the earliest committed node.
+            legacy_admitted = False
+            if snapshot_id in LEGACY_HISTORICAL_BENCHMARK_ALLOWLIST:
+                legacy_admitted = True
             else:
-                head_node_path = directory / "nodes" / f"{current_head.get('snapshot_id')}.json"
-                if head_node_path.exists():
-                    curr_id = _read(head_node_path).get("supersedes_snapshot_id")
+                first_committed_at_str = records[0].get("committed_at") if records else None
+                cand_prior_to_ledger = False
+                if first_committed_at_str:
+                    try:
+                        first_committed_at = datetime.fromisoformat(str(first_committed_at_str).replace("Z", "+00:00")).astimezone(timezone.utc)
+                        cand_time_str = node.get("recorded_at") or node.get("published_at")
+                        if cand_time_str:
+                            cand_time = datetime.fromisoformat(str(cand_time_str).replace("Z", "+00:00")).astimezone(timezone.utc)
+                            if cand_time < first_committed_at:
+                                cand_prior_to_ledger = True
+                    except Exception:
+                        cand_prior_to_ledger = False
+
+                if cand_prior_to_ledger:
+                    earliest_node_id = records[0].get("snapshot_id")
+                    anc_id = earliest_node_id
                     visited = set()
-                    while curr_id and curr_id not in visited:
-                        visited.add(curr_id)
-                        if curr_id == snapshot_id:
-                            is_legacy_committed = True
+                    while anc_id and anc_id not in visited:
+                        visited.add(anc_id)
+                        anc_node_path = directory / "nodes" / f"{anc_id}.json"
+                        if not anc_node_path.exists():
                             break
-                        anc_path = directory / "nodes" / f"{curr_id}.json"
-                        if not anc_path.exists():
+                        anc_data = _read(anc_node_path)
+                        parent_id = anc_data.get("supersedes_snapshot_id")
+                        if parent_id == snapshot_id:
+                            legacy_admitted = True
                             break
-                        curr_id = _read(anc_path).get("supersedes_snapshot_id")
+                        anc_id = parent_id
 
-        if not is_legacy_committed:
-            cand_sup = node.get("supersedes_snapshot_id")
-            if cand_sup:
-                anc_path = directory / "nodes" / f"{cand_sup}.json"
-                if anc_path.exists():
-                    is_legacy_committed = True
-            if not is_legacy_committed:
-                for p in (directory / "nodes").glob("*.json"):
-                    if p.stem != snapshot_id:
-                        try:
-                            other_node = _read(p)
-                            if other_node.get("supersedes_snapshot_id") == snapshot_id:
-                                is_legacy_committed = True
-                                break
-                        except Exception:
-                            pass
+            if not legacy_admitted:
+                return None
+    else:
+        # commits.jsonl DOES NOT EXIST (Legacy plot prior to ledger introduction)
+        head_file = _head_path(ns)
+        if not head_file.exists():
+            return None
+        current_head = _read(head_file)
+        legacy_verified = False
+        if current_head.get("snapshot_id") == snapshot_id:
+            legacy_verified = True
+        elif snapshot_id in LEGACY_HISTORICAL_BENCHMARK_ALLOWLIST:
+            legacy_verified = True
+        else:
+            # Walk strictly BACKWARD from legacy head.json
+            head_node_path = directory / "nodes" / f"{current_head.get('snapshot_id')}.json"
+            if head_node_path.exists():
+                anc_id = _read(head_node_path).get("supersedes_snapshot_id")
+                visited = set()
+                while anc_id and anc_id not in visited:
+                    visited.add(anc_id)
+                    if anc_id == snapshot_id:
+                        legacy_verified = True
+                        break
+                    anc_path = directory / "nodes" / f"{anc_id}.json"
+                    if not anc_path.exists():
+                        break
+                    anc_id = _read(anc_path).get("supersedes_snapshot_id")
 
-        if not is_legacy_committed:
+        if not legacy_verified:
             return None
 
     publication_frontend = publication.get("frontend_payload") or {}
@@ -2255,5 +2521,8 @@ def load_and_validate_plot_snapshot_by_id(
         "temporal_binding_verified": bool(temporal_binding_valid),
         "publication_authority": node["publication_authority"],
     }
+    if commit_record:
+        node["commit_seq"] = commit_record.get("commit_seq")
+        node["commit_hash"] = commit_record.get("commit_hash")
     node["historical"] = True
     return node

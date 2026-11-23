@@ -1,6 +1,7 @@
 "use client";
 import React, { useState, useRef } from "react";
 import { MesiaData, MesiaParameters } from "../types";
+import { computeCsiTruthBadges } from "@/lib/agribrain/csi-truth.mjs";
 
 interface InSituTabProps {
   data: MesiaData;
@@ -23,57 +24,19 @@ export default function InSituTab({ data, parameters, onRefresh }: InSituTabProp
   const oranData = data.signals_of_opportunity?.cellular_forward_scatter?.oran_e2_telemetry;
   const fleetData = data.fleet_health;
 
-  // Truthful CSI Presentation State (4 distinct states)
-  const hasPhysicalWifi = Boolean(
-    inSituWifi?.physical_waves_measured || ambientWifi?.physical_waves_measured
-  );
-  const isActiveStream = Boolean(
-    inSituWifi?.is_active_stream ||
-    inSituWifi?.status === "LIVE_CSI_STREAM" ||
-    ambientWifi?.status === "LIVE_CSI_STREAM" ||
-    (inSituWifi?.presentation_state === "LIVE" && inSituWifi?.is_active_stream !== false)
-  );
-  const isFresh = Boolean(
-    inSituWifi?.is_fresh ||
-    inSituWifi?.freshness === "FRESH" ||
-    ambientWifi?.is_fresh ||
-    ambientWifi?.freshness === "FRESH"
-  );
-
-  let csiBadgeText = "○ No verified CSI capture";
-  let csiBadgeBg = "rgba(100, 116, 139, 0.2)";
-  let csiBadgeColor = "#94a3b8";
-  let csiBadgeBorder = "rgba(100, 116, 139, 0.4)";
-
-  if (!hasPhysicalWifi) {
-    csiBadgeText = "○ No verified CSI capture";
-  } else if (isActiveStream && isFresh) {
-    csiBadgeText = "● Live CSI stream";
-    csiBadgeBg = "rgba(236, 72, 153, 0.2)";
-    csiBadgeColor = "#f472b6";
-    csiBadgeBorder = "#f472b6";
-  } else if (isFresh) {
-    csiBadgeText = "● Recorded capture";
-    csiBadgeBg = "rgba(56, 189, 248, 0.2)";
-    csiBadgeColor = "#38bdf8";
-    csiBadgeBorder = "#38bdf8";
-  } else {
-    csiBadgeText = "○ Archived capture";
-    csiBadgeBg = "rgba(245, 158, 11, 0.2)";
-    csiBadgeColor = "#f59e0b";
-    csiBadgeBorder = "rgba(245, 158, 11, 0.5)";
-  }
-
-  // Calibration status independent of freshness
-  const isCalibrated = Boolean(
-    inSituWifi?.is_calibrated ||
-    inSituWifi?.calibration_status === "CALIBRATED" ||
-    (inSituWifi?.calibration_state_ref && inSituWifi.calibration_state_ref !== "CALIB-UNVERIFIED-DEMONSTRATOR")
-  );
-  const calBadgeText = isCalibrated ? "✓ CALIBRATED" : "⚠ UNCALIBRATED";
-  const calBadgeBg = isCalibrated ? "rgba(34, 197, 94, 0.15)" : "rgba(245, 158, 11, 0.15)";
-  const calBadgeColor = isCalibrated ? "#4ade80" : "#fbbf24";
-  const calBadgeBorder = isCalibrated ? "rgba(34, 197, 94, 0.4)" : "rgba(245, 158, 11, 0.4)";
+  // Truthful CSI Presentation State (4 distinct fail-closed states)
+  const {
+    hasPhysicalWifi,
+    csiBadgeText,
+    csiBadgeBg,
+    csiBadgeColor,
+    csiBadgeBorder,
+    isCalibrated,
+    calBadgeText,
+    calBadgeBg,
+    calBadgeColor,
+    calBadgeBorder,
+  } = computeCsiTruthBadges(inSituWifi, ambientWifi);
 
   // Real-time Fresnel reflection calculation from parcel soil permittivity
   const eps_r = data.dielectric_profile?.mean_dielectric_permittivity_eps_r ?? 14.5;
