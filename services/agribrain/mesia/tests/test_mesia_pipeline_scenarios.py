@@ -655,7 +655,7 @@ class TestScenarioEAgriBrainLayer0Bridge:
             plot_id="PLOT_TEST_BRIDGE",
             raw_data_bytes=iq_bytes,
             metadata_dict={
-                "global": {"core:sample_rate": 1000000.0, "core:hw": "wifi_csi_test_fixture"},
+                "global": {"core:datatype": "cf32_le", "core:sample_rate": 1000000.0, "core:hw": "wifi_csi_test_fixture"},
                 "captures": [{
                     "core:datetime": datetime.now(timezone.utc).isoformat(),
                     "core:frequency": 2.45e9,
@@ -1210,6 +1210,8 @@ class TestScenarioMMultiLaneWifiCsiAndTargetClassification:
             "receiver_mount": "IOT_CANOPY_ANCHOR_OR_SOIL_POST",
             "antenna_height_m": 1.2,
             "log_source": "plot_wifi_01_real_field_csi.sigmf-data",
+            "native_data_uri": "file://mesia/evidence/tenant_scenarios/farm_scenarios/plot_scenario_wifi_01/plot_wifi_01_real_field_csi.sigmf-data",
+            "receipt_id": "rcpt-wifi-scenario-001",
             "sha256": "f" * 64,
             "file_size_bytes": 512,
             "num_subcarriers": 64,

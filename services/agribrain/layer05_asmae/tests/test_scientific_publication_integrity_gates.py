@@ -130,7 +130,7 @@ def test_snapshot_identity_reuse_with_differing_numerical_vector_fails_closed():
     conflicting_science["snapshot_ref"] = ref
     conflicting_frontend = _base_frontend_payload(snap_id, num_val=0.800)
 
-    with pytest.raises(ValueError, match="immutable plot snapshot collision: numerical record mismatch"):
+    with pytest.raises(ValueError, match="numerical record mismatch|numerical digest mismatch"):
         plot_snapshot_store.publish_canonical_plot_snapshot(
             namespace=ns,
             geometry_hash=geom_hash,

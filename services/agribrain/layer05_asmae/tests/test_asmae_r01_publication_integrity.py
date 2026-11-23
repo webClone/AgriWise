@@ -259,9 +259,26 @@ class ASMAER01PublicationIntegrityTests(unittest.TestCase):
         manifest_hash = "manifest-c2"
         asmae_result, frontend = self._generate_valid_worker_payload(snapshot_id, job_id, manifest_hash)
 
-        # Tamper with the states without updating the vector hash
-        frontend["asmae_posterior_numerical_record"]["states"]["root_zone_moisture"] = 0.999
+        # 1. Write boundary: Tampering states without updating vector hash must be rejected at pre-commit
+        frontend_tampered = copy.deepcopy(frontend)
+        frontend_tampered["asmae_posterior_numerical_record"]["states"]["root_zone_moisture"] = 0.999
+        with self.assertRaises(ValueError):
+            publish_canonical_plot_snapshot(
+                namespace=self.ns,
+                plot_id=self.plot_id,
+                tenant_id=self.tenant_id,
+                farm_id=self.farm_id,
+                geometry_hash=self.geometry_hash,
+                snapshot_id=snapshot_id,
+                asmae_result=asmae_result,
+                frontend_payload=frontend_tampered,
+                job_id=job_id,
+                manifest_hash=manifest_hash,
+                execution_identity={"crop_cycle_id": self.crop_cycle_id},
+                allow_overwrite=False,
+            )
 
+        # 2. Read boundary: Publish legitimate record, then tamper on disk to test API admission quarantine
         head = publish_canonical_plot_snapshot(
             namespace=self.ns,
             plot_id=self.plot_id,
@@ -277,10 +294,17 @@ class ASMAER01PublicationIntegrityTests(unittest.TestCase):
             allow_overwrite=False,
         )
 
+        # Simulate on-disk file corruption/tampering
+        safe_job_id = hashlib.sha256(str(job_id).encode("utf-8")).hexdigest()[:32]
+        pub_file = self.snapshot_root / plot_snapshot_store._plot_key(self.ns) / "publications" / f"{safe_job_id}.json"
+        pub_data = json.loads(pub_file.read_text(encoding="utf-8"))
+        pub_data["frontend_payload"]["asmae_posterior_numerical_record"]["states"]["root_zone_moisture"] = 0.999
+        pub_file.write_text(json.dumps(pub_data), encoding="utf-8")
+
         with plot_snapshot_store._SNAPSHOT_CACHE_LOCK:
             plot_snapshot_store._CANONICAL_SNAPSHOT_CACHE.clear()
 
-        latest_node = load_latest_plot_snapshot(self.ns, self.geometry_hash)
+        latest_node = load_latest_plot_snapshot(self.ns, self.geometry_hash, force_verify=True)
         self.assertIsNotNone(latest_node)
         self.assertFalse(latest_node["validation"]["numericalBindingValid"])
 
@@ -295,11 +319,9 @@ class ASMAER01PublicationIntegrityTests(unittest.TestCase):
     # =========================================================================
     def test_case_03_corrupt_asmae_head_does_not_suppress_provider_fallback(self):
         """A quarantined ASMAE head must not suppress subsequent Layer 10 fallback publication."""
-        # 1. Publish invalid ASMAE head
+        # 1. Publish valid ASMAE head, then corrupt on-disk proof hash so head becomes quarantined
         asmae_id = "ASMAE-SNAPSHOT-CASE03-BAD"
         asmae_result, frontend = self._generate_valid_worker_payload(asmae_id, "job-c3-bad", "man-c3-bad")
-        # Corrupt the proof hash so numerical binding fails
-        frontend["asmae_proof"]["numerical_vector_hash"] = "corrupt-hash-0000"
 
         publish_canonical_plot_snapshot(
             namespace=self.ns,
@@ -315,6 +337,12 @@ class ASMAER01PublicationIntegrityTests(unittest.TestCase):
             execution_identity={"crop_cycle_id": self.crop_cycle_id},
             allow_overwrite=False,
         )
+
+        safe_job_id = hashlib.sha256(b"job-c3-bad").hexdigest()[:32]
+        pub_file = self.snapshot_root / plot_snapshot_store._plot_key(self.ns) / "publications" / f"{safe_job_id}.json"
+        pub_data = json.loads(pub_file.read_text(encoding="utf-8"))
+        pub_data["frontend_payload"]["asmae_proof"]["numerical_vector_hash"] = "corrupt-hash-0000"
+        pub_file.write_text(json.dumps(pub_data), encoding="utf-8")
 
         # 2. Attempt terminal Layer 10 fallback publication
         layer10_payload = {

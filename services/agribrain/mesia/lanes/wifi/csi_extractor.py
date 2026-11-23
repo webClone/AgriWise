@@ -128,7 +128,10 @@ class NativeWifiCsiExtractor:
         capture = (meta.get("captures") or [{}])[0]
         glob = meta.get("global") or {}
 
-        datatype = str(glob.get("core:datatype", "cf32_le")).strip().lower()
+        if "core:datatype" not in glob:
+            from services.agribrain.mesia.contracts.capture_manifest import QuarantinedCaptureException
+            raise QuarantinedCaptureException("Missing mandatory SigMF core:datatype in metadata global segment")
+        datatype = str(glob["core:datatype"]).strip().lower()
         if datatype not in ("cf32_le", "cf32"):
             from services.agribrain.mesia.contracts.capture_manifest import QuarantinedCaptureException
             raise QuarantinedCaptureException(

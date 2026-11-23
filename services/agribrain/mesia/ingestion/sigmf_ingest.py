@@ -112,12 +112,11 @@ def ingest_sigmf_capture(
 
     # 2. Extract radio profile and validate datatype / sample count
     glob = metadata_dict.get("global", {})
-    if "core:datatype" in glob:
-        dt_val = str(glob["core:datatype"]).strip().lower()
-        if dt_val not in ("cf32_le", "cf32"):
-            raise QuarantinedCaptureException(f"Unsupported SigMF core:datatype '{dt_val}'. Only cf32_le is supported.")
-    else:
-        metadata_dict.setdefault("global", {})["core:datatype"] = "cf32_le"
+    if "core:datatype" not in glob:
+        raise QuarantinedCaptureException("Missing mandatory SigMF core:datatype in metadata global segment")
+    dt_val = str(glob["core:datatype"]).strip().lower()
+    if dt_val not in ("cf32_le", "cf32"):
+        raise QuarantinedCaptureException(f"Unsupported SigMF core:datatype '{dt_val}'. Only cf32_le is supported.")
 
     frequency_hz = float(first_capture.get("core:frequency", 0.0))
     sample_rate_hz = float(glob.get("core:sample_rate", 0.0))
@@ -334,12 +333,13 @@ def verify_capture_integrity(
         if not captures[0].get("core:datetime"):
             return False
 
-        # Validate SigMF datatype and sample count if present
+        # Validate mandatory SigMF datatype
         glob = metadata_dict.get("global") or {}
-        if "core:datatype" in glob:
-            dt_val = str(glob["core:datatype"]).strip().lower()
-            if dt_val not in ("cf32_le", "cf32"):
-                return False
+        if "core:datatype" not in glob:
+            return False
+        dt_val = str(glob["core:datatype"]).strip().lower()
+        if dt_val not in ("cf32_le", "cf32"):
+            return False
 
         if not data_file.exists() or data_file.stat().st_size == 0 or data_file.stat().st_size % 8 != 0:
             return False

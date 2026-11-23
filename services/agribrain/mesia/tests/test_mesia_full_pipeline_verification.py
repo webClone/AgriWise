@@ -135,6 +135,8 @@ class TestFullPipelineMultiRadioExecution:
             "snr_db": 32.5,
             "sha256": "fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321",
             "log_source": "anchor_csi_capture_01.sigmf-data",
+            "native_data_uri": "file://mesia/evidence/tenant-default/farm-default/plot_test_1/anchor_csi_capture_01.sigmf-data",
+            "receipt_id": "rcpt-wifi-live-test-001",
             "cfo_ppm": 0.42,
         }
 

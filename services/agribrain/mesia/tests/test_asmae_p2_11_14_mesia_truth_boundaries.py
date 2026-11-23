@@ -207,7 +207,7 @@ def test_batch_a_d01_cross_tenant_same_plot_rejection(tmp_path):
 
     raw_data = b"01234567" * 8
     meta = {
-        "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_rx_fixture"},
+        "global": {"core:datatype": "cf32_le", "core:sample_rate": 20.0e6, "core:hw": "wifi_csi_rx_fixture"},
         "captures": [{
             "core:datetime": datetime(2026, 11, 22, 12, 0, 0, tzinfo=timezone.utc).isoformat(),
             "core:frequency": 2.437e9,
@@ -262,7 +262,7 @@ def test_batch_a_d01_cross_tenant_uri_substitution_attack(tmp_path):
 
     raw = b"01234567" * 4
     meta = {
-        "global": {"core:sample_rate": 10.0e6, "core:hw": "usrp_b210"},
+        "global": {"core:datatype": "cf32_le", "core:sample_rate": 10.0e6, "core:hw": "usrp_b210"},
         "captures": [{
             "core:datetime": datetime(2026, 11, 22, 10, 0, 0, tzinfo=timezone.utc).isoformat(),
             "core:frequency": 5.18e9,
@@ -322,7 +322,7 @@ def test_batch_a_d02_tampered_sigmf_metadata_rejection(tmp_path):
 
     raw = b"01234567" * 10
     meta = {
-        "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
+        "global": {"core:datatype": "cf32_le", "core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
         "captures": [{
             "core:datetime": datetime(2026, 11, 22, 14, 0, 0, tzinfo=timezone.utc).isoformat(),
             "core:frequency": 2.45e9,
@@ -358,7 +358,7 @@ def test_batch_a_d02_stale_data_hash_in_metadata_rejection(tmp_path):
 
     raw = b"01234567" * 10
     meta = {
-        "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
+        "global": {"core:datatype": "cf32_le", "core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
         "captures": [{
             "core:datetime": datetime(2026, 11, 22, 14, 0, 0, tzinfo=timezone.utc).isoformat(),
             "core:frequency": 2.45e9,
@@ -387,7 +387,7 @@ def test_batch_a_d02_missing_or_corrupted_manifest_rejection(tmp_path):
 
     raw = b"01234567" * 10
     meta = {
-        "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
+        "global": {"core:datatype": "cf32_le", "core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
         "captures": [{
             "core:datetime": datetime(2026, 11, 22, 14, 0, 0, tzinfo=timezone.utc).isoformat(),
             "core:frequency": 2.45e9,
@@ -420,7 +420,7 @@ def test_batch_a_d02_inconsistent_capture_id_rejection(tmp_path):
 
     raw = b"01234567" * 10
     meta = {
-        "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
+        "global": {"core:datatype": "cf32_le", "core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
         "captures": [{
             "core:datetime": datetime(2026, 11, 22, 14, 0, 0, tzinfo=timezone.utc).isoformat(),
             "core:frequency": 2.45e9,
@@ -445,7 +445,7 @@ def test_batch_a_d01_invalid_namespace_identifiers_fail_closed_without_exception
     """D01: Malformed/adversarial namespace identifiers return False without raising."""
     raw = b"01234567" * 10
     meta = {
-        "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
+        "global": {"core:datatype": "cf32_le", "core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
         "captures": [{
             "core:datetime": datetime(2026, 11, 22, 14, 0, 0, tzinfo=timezone.utc).isoformat(),
             "core:frequency": 2.45e9,
@@ -483,7 +483,7 @@ def test_batch_a_d02_manifest_storage_prefix_mismatch_rejection(tmp_path):
 
     raw = b"01234567" * 10
     meta = {
-        "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
+        "global": {"core:datatype": "cf32_le", "core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
         "captures": [{
             "core:datetime": datetime(2026, 11, 22, 14, 0, 0, tzinfo=timezone.utc).isoformat(),
             "core:frequency": 2.45e9,
@@ -512,7 +512,7 @@ def test_batch_a_d02_manifest_timestamp_mismatch_rejection(tmp_path):
 
     raw = b"01234567" * 10
     meta = {
-        "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
+        "global": {"core:datatype": "cf32_le", "core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
         "captures": [{
             "core:datetime": datetime(2026, 11, 22, 14, 0, 0, tzinfo=timezone.utc).isoformat(),
             "core:frequency": 2.45e9,
@@ -542,7 +542,7 @@ def test_legacy_capture_rejected_for_non_default_farm(tmp_path):
     # Legacy ingestion without farm_id (defaults to default_farm, writes to tenant/plot/)
     raw = b"01234567" * 10
     meta = {
-        "global": {"core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
+        "global": {"core:datatype": "cf32_le", "core:sample_rate": 20.0e6, "core:hw": "wifi_csi_probe"},
         "captures": [{
             "core:datetime": datetime(2026, 11, 22, 14, 0, 0, tzinfo=timezone.utc).isoformat(),
             "core:frequency": 2.45e9,

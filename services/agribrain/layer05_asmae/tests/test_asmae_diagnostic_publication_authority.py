@@ -497,21 +497,46 @@ def test_negative_control_tampered_numerical_hash_rejected():
     fe_payload["claims_numerical_authority"] = True
     fe_payload["asmae_posterior_numerical_record"] = num_rec
 
-    plot_snapshot_store.publish_canonical_plot_snapshot(
-        namespace=ns,
-        geometry_hash="geom-tamper",
-        snapshot_id=snap_id,
-        asmae_result=res,
-        frontend_payload=fe_payload,
-        job_id="job-tamper-1",
-        manifest_hash="manifest-tamper-1",
-        publication_authority="CERTIFIED_NUMERICAL",
-    )
+    # 1. Write boundary: Attempting to publish certified snapshot with tampered hash fails closed immediately
+    with pytest.raises(ValueError, match="ASMAE numerical posterior hash mismatch"):
+        plot_snapshot_store.publish_canonical_plot_snapshot(
+            namespace=ns,
+            geometry_hash="geom-tamper",
+            snapshot_id=snap_id,
+            asmae_result=res,
+            frontend_payload=fe_payload,
+            job_id="job-tamper-1",
+            manifest_hash="manifest-tamper-1",
+            publication_authority="CERTIFIED_NUMERICAL",
+        )
 
-    latest = plot_snapshot_store.load_latest_plot_snapshot(ns, force_verify=True)
-    assert latest is not None
+    # Valid head was not published or altered
+    assert plot_snapshot_store.load_latest_plot_snapshot(ns) is None
 
-    admission = plot_snapshot_store.evaluate_snapshot_admission(latest, ns)
+    # 2. Read boundary: If a tampered snapshot ever existed on disk, admission quarantines it
+    synthetic_quarantined_snapshot = {
+        "contract_version": plot_snapshot_store.PLOT_SNAPSHOT_CONTRACT_VERSION,
+        "publication_authority": "CERTIFIED_NUMERICAL",
+        "claims_numerical_authority": True,
+        "validation": {
+            "nodeValid": True,
+            "publicationValid": True,
+            "receiptValid": True,
+            "inventoryValid": True,
+            "bindingValid": True,
+            "lineageValid": True,
+            "temporalBindingValid": True,
+            "schemaValid": True,
+            "contractValid": True,
+            "publicationStatusValid": True,
+            "numericalBindingValid": False,  # Fails verification on read
+            "nodeAgreementValid": True,
+        },
+        "frontend_payload": fe_payload,
+        "scientific_result": res,
+    }
+
+    admission = plot_snapshot_store.evaluate_snapshot_admission(synthetic_quarantined_snapshot, ns)
     assert admission["is_valid"] is False
     assert admission["status"] == "quarantined"
     assert "numericalBindingValid" in admission["invalid_integrity_flags"]

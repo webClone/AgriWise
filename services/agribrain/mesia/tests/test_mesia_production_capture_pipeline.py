@@ -615,6 +615,12 @@ def test_csi_decoding_contract_rejects_unsupported_datatype_and_length(tmp_path)
     with pytest.raises(QuarantinedCaptureException, match="Unsupported SigMF core:datatype"):
         ingest_sigmf_capture("t1", "p1", valid_payload, copy.deepcopy(valid_meta), storage_root=tmp_path)
 
+    # Missing mandatory core:datatype in metadata global segment
+    missing_dt_meta = copy.deepcopy(valid_meta)
+    missing_dt_meta["global"].pop("core:datatype", None)
+    with pytest.raises(QuarantinedCaptureException, match="Missing mandatory SigMF core:datatype"):
+        ingest_sigmf_capture("t1", "p1", valid_payload, missing_dt_meta, storage_root=tmp_path)
+
     # 2. Test ingest_sigmf_capture length not divisible by 8
     bad_length_payload = b"012345678"  # 9 bytes
     valid_meta_cf32 = copy.deepcopy(valid_meta)
@@ -638,6 +644,11 @@ def test_csi_decoding_contract_rejects_unsupported_datatype_and_length(tmp_path)
     data_file.write_bytes(valid_payload)
     meta_file.write_text(json.dumps(bad_datatype_meta), encoding="utf-8")
     with pytest.raises(QuarantinedCaptureException, match="Unsupported SigMF core:datatype"):
+        NativeWifiCsiExtractor.read_sigmf(str(data_file))
+
+    # Missing datatype in read_sigmf
+    meta_file.write_text(json.dumps(missing_dt_meta), encoding="utf-8")
+    with pytest.raises(QuarantinedCaptureException, match="Missing mandatory SigMF core:datatype"):
         NativeWifiCsiExtractor.read_sigmf(str(data_file))
 
     # Indivisible length

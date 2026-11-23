@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
+import contextlib
 import copy
 import hashlib
 import json
@@ -170,6 +170,75 @@ def validate_complete_numerical_record(num_rec: Any) -> Tuple[bool, Optional[str
     return True, None
 
 
+def validate_certified_numerical_publication(
+    num_rec: Any,
+    frontend_payload: Dict[str, Any],
+    scientific_result: Dict[str, Any],
+) -> str:
+    """Validate completeness, physical sanity, and exact cryptographic digest agreement.
+
+    Enforces that before any files are written or head is mutated under CERTIFIED_NUMERICAL:
+    1. Complete uncertainty validation passes (keys match, finite, non-negative).
+    2. The vector numerical hash is recomputed directly from states and sigmas.
+    3. num_rec['numerical_vector_hash'] matches recomputed hash.
+    4. asmae_proof['numerical_vector_hash'] (if present) matches recomputed hash.
+    5. scientific_evidence_lineage['asmae_posterior_vector_hash'] (if present) matches recomputed hash.
+    6. scientific_result['asmae_numerical_digest'] (if present) matches recomputed hash.
+    7. scientific_result.get("asmae", {}).get("asmae_numerical_digest") (if present) matches recomputed hash.
+
+    Returns the recomputed actual_num_hash on success; raises ValueError otherwise.
+    """
+    if num_rec is None:
+        raise ValueError("CERTIFIED_NUMERICAL publication requires complete uncertainty: missing numerical posterior record")
+
+    is_num_valid, num_err = validate_complete_numerical_record(num_rec)
+    if not is_num_valid:
+        raise ValueError(f"CERTIFIED_NUMERICAL publication requires complete uncertainty: {num_err}")
+
+    try:
+        try:
+            from services.agribrain.layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
+        except ImportError:
+            from layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
+        states = num_rec.get("states", {})
+        sigmas = num_rec.get("sigmas", {})
+        actual_num_hash = compute_asmae_vector_numerical_hash(states, sigmas)
+    except Exception as exc:
+        raise ValueError(f"Failed to compute ASMAE vector numerical hash: {exc}") from exc
+
+    claimed_num_hash = num_rec.get("numerical_vector_hash")
+    if not claimed_num_hash or claimed_num_hash != actual_num_hash:
+        raise ValueError(
+            f"ASMAE numerical posterior hash mismatch: recomputed {actual_num_hash} != claimed record {claimed_num_hash}"
+        )
+
+    claimed_proof_hash = (frontend_payload.get("asmae_proof") or {}).get("numerical_vector_hash")
+    if claimed_proof_hash and claimed_proof_hash != actual_num_hash:
+        raise ValueError(
+            f"ASMAE proof numerical vector hash mismatch: recomputed {actual_num_hash} != claimed asmae_proof {claimed_proof_hash}"
+        )
+
+    claimed_lineage_hash = (frontend_payload.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
+    if claimed_lineage_hash and claimed_lineage_hash != actual_num_hash:
+        raise ValueError(
+            f"ASMAE lineage numerical vector hash mismatch: recomputed {actual_num_hash} != claimed lineage {claimed_lineage_hash}"
+        )
+
+    sci_digest = scientific_result.get("asmae_numerical_digest")
+    if sci_digest and sci_digest != actual_num_hash:
+        raise ValueError(
+            f"ASMAE scientific result numerical digest mismatch: recomputed {actual_num_hash} != claimed digest {sci_digest}"
+        )
+
+    sci_asmae_digest = (scientific_result.get("asmae") or {}).get("asmae_numerical_digest")
+    if sci_asmae_digest and sci_asmae_digest != actual_num_hash:
+        raise ValueError(
+            f"ASMAE scientific result nested numerical digest mismatch: recomputed {actual_num_hash} != claimed digest {sci_asmae_digest}"
+        )
+
+    return actual_num_hash
+
+
 def _plot_key(namespace: PlotNamespace) -> str:
     return hashlib.sha256(namespace.stable_key().encode("utf-8")).hexdigest()[:32]
 
@@ -228,6 +297,67 @@ def _atomic(path: Path, payload: Dict[str, Any]) -> None:
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+_PLOT_MUTEXES: Dict[str, threading.Lock] = {}
+_PLOT_MUTEXES_LOCK = threading.Lock()
+
+
+def _get_process_plot_mutex(plot_dir_str: str) -> threading.Lock:
+    with _PLOT_MUTEXES_LOCK:
+        if plot_dir_str not in _PLOT_MUTEXES:
+            _PLOT_MUTEXES[plot_dir_str] = threading.Lock()
+        return _PLOT_MUTEXES[plot_dir_str]
+
+
+@contextlib.contextmanager
+def _plot_publication_lock(plot_dir: Path, timeout: float = 10.0):
+    """Interprocess and thread-safe advisory lock for plot head supersession."""
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = plot_dir / ".head.lock"
+    process_mutex = _get_process_plot_mutex(str(plot_dir.resolve()))
+    acquired_thread = process_mutex.acquire(timeout=timeout)
+    if not acquired_thread:
+        raise TimeoutError(f"Timed out after {timeout}s waiting for intra-process thread lock on {plot_dir}")
+    fd = -1
+    locked_os = False
+    try:
+        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked_os = True
+                break
+            except (OSError, IOError, PermissionError):
+                time.sleep(0.005)
+        if not locked_os:
+            raise TimeoutError(f"Timed out after {timeout}s waiting for publication OS lock at {lock_path}")
+        yield
+    finally:
+        if locked_os and fd >= 0:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        process_mutex.release()
 
 
 def _immutable_asmae_payload(
@@ -356,11 +486,17 @@ def publish_canonical_plot_snapshot(
             immutable_frontend_payload.get("asmae_posterior_numerical_record")
             or scientific_result.get("asmae_posterior_numerical_record")
         )
-        is_num_valid, num_err = validate_complete_numerical_record(num_rec)
-        if not is_num_valid:
-            raise ValueError(f"CERTIFIED_NUMERICAL publication requires complete uncertainty: {num_err}")
+        actual_num_hash = validate_certified_numerical_publication(
+            num_rec,
+            immutable_frontend_payload,
+            scientific_result,
+        )
         immutable_frontend_payload["claims_numerical_authority"] = True
         scientific_result["claims_numerical_authority"] = True
+        if not scientific_result.get("asmae_numerical_digest"):
+            scientific_result["asmae_numerical_digest"] = actual_num_hash
+        if isinstance(scientific_result.get("asmae"), dict) and not scientific_result["asmae"].get("asmae_numerical_digest"):
+            scientific_result["asmae"]["asmae_numerical_digest"] = actual_num_hash
     elif pub_auth == "CONTAINED_PROPOSAL":
         immutable_frontend_payload["claims_numerical_authority"] = False
         scientific_result["claims_numerical_authority"] = False
@@ -832,16 +968,21 @@ def publish_canonical_plot_snapshot(
         head["bitemporal_replay_receipt"] = envelope["bitemporal_replay_receipt"]
         head["evidence_set_digest"] = envelope.get("evidence_set_digest")
 
-    current_head_check = _read(_head_path(ns))
-    if current_head_check and prior_head:
-        if current_head_check.get("snapshot_id") != prior_head.get("snapshot_id") and not allow_overwrite:
-            raise ValueError("concurrent publication collision: head was superseded by another process")
+    with _plot_publication_lock(directory):
+        current_head_check = _read(_head_path(ns))
+        if not allow_overwrite:
+            if current_head_check.get("snapshot_id") != snapshot_id:
+                if prior_head and current_head_check:
+                    if current_head_check.get("snapshot_id") != prior_head.get("snapshot_id"):
+                        raise ValueError("concurrent publication collision: head was superseded by another process")
+                elif not prior_head and current_head_check:
+                    raise ValueError("concurrent publication collision: head was initialized by another process")
 
-    _atomic(_head_path(ns), head)
-    with _SNAPSHOT_CACHE_LOCK:
-        keys_to_evict = [k for k in _CANONICAL_SNAPSHOT_CACHE if k[0] == ns.stable_key()]
-        for k in keys_to_evict:
-            _CANONICAL_SNAPSHOT_CACHE.pop(k, None)
+        _atomic(_head_path(ns), head)
+        with _SNAPSHOT_CACHE_LOCK:
+            keys_to_evict = [k for k in _CANONICAL_SNAPSHOT_CACHE if k[0] == ns.stable_key()]
+            for k in keys_to_evict:
+                _CANONICAL_SNAPSHOT_CACHE.pop(k, None)
     return head
 
 
