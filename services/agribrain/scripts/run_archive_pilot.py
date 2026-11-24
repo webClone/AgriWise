@@ -38,7 +38,8 @@ COHORT_GEOMETRIES = {
     "timimoun_plot": "POLYGON ((0.23 29.25, 0.24 29.25, 0.24 29.26, 0.23 29.26, 0.23 29.25))",
     "boufarik_plot": "POLYGON ((2.91 36.57, 2.92 36.57, 2.92 36.58, 2.91 36.58, 2.91 36.57))",
     "oued_souf_plot": "POLYGON ((6.85 33.36, 6.86 33.36, 6.86 33.37, 6.85 33.37, 6.85 33.36))",
-    "sparse_plot": "POLYGON ((2.0 48.0, 2.1 48.0, 2.1 48.1, 2.0 48.1, 2.0 48.0))"
+    "sparse_plot": "POLYGON ((2.0 48.0, 2.1 48.0, 2.1 48.1, 2.0 48.1, 2.0 48.0))",
+    "6a09d9e91dd0c7ed6fce7d50": "POLYGON ((2.65551 36.509522, 2.655457 36.507444, 2.663261 36.507194, 2.663331 36.510609, 2.65551 36.509522))",
 }
 
 def get_lookback_years(depth_mode: str) -> float:
@@ -59,7 +60,8 @@ def run_pilot_for_plot(
     depth_mode: str,
     budget_profile: str,
     trigger_context: Optional[str] = None,
-    workspace_root: str = "."
+    workspace_root: str = ".",
+    offline: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Runs the historical archive pilot benchmark for a single cohort plot."""
     if not is_archive_pilot_plot(plot_id):
@@ -99,9 +101,16 @@ def run_pilot_for_plot(
     if depth_mode == "historical_full":
         start_dt = datetime(2015, 6, 23, 12, 0, 0, tzinfo=timezone.utc)
 
-    # Force test mode & offline simulation
-    os.environ["AGRIWISE_TEST_MODE"] = "true"
-    os.environ["AGRIWISE_ARCHIVE_OFFLINE"] = "true"
+    # Configure test/offline simulation only when explicitly requested
+    if offline is True:
+        os.environ["AGRIWISE_TEST_MODE"] = "true"
+        os.environ["AGRIWISE_ARCHIVE_OFFLINE"] = "true"
+    elif offline is False:
+        os.environ.pop("AGRIWISE_TEST_MODE", None)
+        os.environ.pop("AGRIWISE_ARCHIVE_OFFLINE", None)
+    elif os.environ.get("AGRIWISE_ARCHIVE_OFFLINE", "false").lower() != "true":
+        # Retain live provider query defaults for production / genuine plots
+        pass
 
     start_time = time.perf_counter()
 

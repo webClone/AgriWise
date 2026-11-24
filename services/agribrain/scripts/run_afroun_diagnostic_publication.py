@@ -116,15 +116,20 @@ def run_publication() -> Dict[str, Any]:
     if scl_mask is not None:
         raw_ndvi = np.where(scl_mask, raw_ndvi, np.nan)
 
-    ndvi_clean = np.where(np.isnan(raw_ndvi), 0.0, raw_ndvi)
-    ndvi_min = float(np.nanmin(raw_ndvi))
-    ndvi_max = float(np.nanmax(raw_ndvi))
-    ndvi_mean = float(np.nanmean(raw_ndvi))
-    ndvi_std = float(np.nanstd(raw_ndvi))
+    valid_ndvi = raw_ndvi[np.isfinite(raw_ndvi)]
+    ndvi_min = float(np.min(valid_ndvi))
+    ndvi_max = float(np.max(valid_ndvi))
+    ndvi_mean = float(np.mean(valid_ndvi))
+    ndvi_std = float(np.std(valid_ndvi))
     logger.info("Canopy Vigor NDVI: min=%.4f, max=%.4f, mean=%.4f, std=%.4f", ndvi_min, ndvi_max, ndvi_mean, ndvi_std)
 
-    # Compute spatial uncertainty raster (~5% radiometric uncertainty)
-    vigor_uncertainty = np.full_like(raw_ndvi, 0.035, dtype=np.float64)
+    # Support-derived radiometric uncertainty propagated through NDVI
+    sigma_b4 = 0.02 * np.maximum(b4_data, 1e-4)
+    sigma_b8 = 0.02 * np.maximum(b8_data, 1e-4)
+    denom_sq = np.maximum((b8_data + b4_data) ** 2, 1e-6)
+    vigor_uncertainty_raw = (2.0 * np.sqrt((b8_data * sigma_b4) ** 2 + (b4_data * sigma_b8) ** 2)) / denom_sq
+    if scl_mask is not None:
+        vigor_uncertainty_raw = np.where(scl_mask, vigor_uncertainty_raw, np.nan)
 
     # Primary S1 SAR scene
     primary_s1 = s1_scenes[0]
@@ -143,7 +148,8 @@ def run_publication() -> Dict[str, Any]:
     wetness_std = float(np.nanstd(wetness_raw))
     logger.info("SAR Relative Wetness: min=%.4f, max=%.4f, mean=%.4f, std=%.4f", wetness_min, wetness_max, wetness_mean, wetness_std)
 
-    wetness_uncertainty = np.full_like(wetness_raw, 0.045, dtype=np.float64)
+    # Support-derived speckle uncertainty propagated to wetness proxy
+    wetness_uncertainty_raw = np.clip(0.05 * wetness_raw + 0.02, 0.015, 0.08)
 
     # Spatial bounds & transform
     h, w = raw_ndvi.shape
@@ -151,12 +157,26 @@ def run_publication() -> Dict[str, Any]:
     transform = list(primary_s2.transform)
     crs = primary_s2.crs
 
-    # Compute deterministic content hashes for the rasters
-    vigor_grid_list = np.round(ndvi_clean, 4).tolist()
+    # Preserve unobserved / masked pixels as null in JSON grids (never 0.0)
+    vigor_grid_list = [
+        [round(float(val), 4) if np.isfinite(val) else None for val in row]
+        for row in raw_ndvi
+    ]
+    vigor_uncertainty_grid = [
+        [round(float(val), 4) if np.isfinite(val) else None for val in row]
+        for row in vigor_uncertainty_raw
+    ]
     vigor_bytes = json.dumps(vigor_grid_list, separators=(",", ":")).encode("utf-8")
     vigor_hash = f"sha256:{hashlib.sha256(vigor_bytes).hexdigest()}"
 
-    wetness_grid_list = np.round(wetness_raw, 4).tolist()
+    wetness_grid_list = [
+        [round(float(val), 4) if np.isfinite(val) else None for val in row]
+        for row in wetness_raw
+    ]
+    wetness_uncertainty_grid = [
+        [round(float(val), 4) if np.isfinite(val) else None for val in row]
+        for row in wetness_uncertainty_raw
+    ]
     wetness_bytes = json.dumps(wetness_grid_list, separators=(",", ":")).encode("utf-8")
     wetness_hash = f"sha256:{hashlib.sha256(wetness_bytes).hexdigest()}"
 
@@ -293,7 +313,7 @@ def run_publication() -> Dict[str, Any]:
         "crs": crs,
         "transform": transform,
         "values": vigor_grid_list,
-        "uncertainty_values": np.round(vigor_uncertainty, 4).tolist(),
+        "uncertainty_values": vigor_uncertainty_grid,
         "stats": {"min": ndvi_min, "max": ndvi_max, "mean": ndvi_mean, "std": ndvi_std},
         "content_hash": vigor_hash,
         "source_id": primary_s2.scene_id,
@@ -315,14 +335,14 @@ def run_publication() -> Dict[str, Any]:
         "crs": crs,
         "transform": transform,
         "values": wetness_grid_list,
-        "uncertainty_values": np.round(wetness_uncertainty, 4).tolist(),
+        "uncertainty_values": wetness_uncertainty_grid,
         "stats": {"min": wetness_min, "max": wetness_max, "mean": wetness_mean, "std": wetness_std},
         "content_hash": wetness_hash,
         "source_id": primary_s1.scene_id,
         "source_reality": "provider_observation",
         "real_provider_product": True,
         "diagnostic_only": True,
-        "unit": "linear_backscatter",
+        "unit": "linear_backscatter_proxy",
     }
 
     surfaces = [canopy_surface, wetness_surface]
@@ -384,7 +404,7 @@ def run_publication() -> Dict[str, Any]:
             },
             "weather_proof": {
                 "daily_count": 14,
-                "status": "verified",
+                "status": "unverified_diagnostic",
             },
             "resolution_proof": {
                 "effective_resolution_m": 10.0,
@@ -406,14 +426,14 @@ def run_publication() -> Dict[str, Any]:
             {
                 "zone_id": "zone-afroun-east",
                 "label": "Eastern Citrus Orchard",
-                "mean_vigor": ndvi_mean + 0.04,
-                "mean_wetness": wetness_mean + 0.02,
+                "mean_vigor": round(float(np.mean(raw_ndvi[np.isfinite(raw_ndvi) & (np.arange(w) >= w // 2)])), 4) if np.any(np.isfinite(raw_ndvi) & (np.arange(w) >= w // 2)) else round(ndvi_mean, 4),
+                "mean_wetness": round(float(np.mean(wetness_raw[:, w // 2 :])), 4) if np.any(np.isfinite(wetness_raw[:, w // 2 :])) else round(wetness_mean, 4),
             },
             {
                 "zone_id": "zone-afroun-west",
                 "label": "Western Citrus Orchard",
-                "mean_vigor": ndvi_mean - 0.03,
-                "mean_wetness": wetness_mean - 0.01,
+                "mean_vigor": round(float(np.mean(raw_ndvi[np.isfinite(raw_ndvi) & (np.arange(w) < w // 2)])), 4) if np.any(np.isfinite(raw_ndvi) & (np.arange(w) < w // 2)) else round(ndvi_mean, 4),
+                "mean_wetness": round(float(np.mean(wetness_raw[:, : w // 2])), 4) if np.any(np.isfinite(wetness_raw[:, : w // 2])) else round(wetness_mean, 4),
             },
         ],
     }

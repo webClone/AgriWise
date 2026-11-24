@@ -60,11 +60,11 @@ from services.agribrain.world_model.canonical_worldline import (
 
 # Plot A (afroun) authentic coordinates
 PLOT_A_COORDINATES = [
-    [3.0482, 36.5211],
-    [3.0535, 36.5219],
-    [3.0529, 36.5178],
-    [3.0475, 36.5171],
-    [3.0482, 36.5211],
+    [2.65551, 36.509522],
+    [2.655457, 36.507444],
+    [2.663261, 36.507194],
+    [2.663331, 36.510609],
+    [2.65551, 36.509522],
 ]
 PLOT_A_GEOJSON = {
     "type": "Polygon",
@@ -571,13 +571,19 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
         if scl_mask is not None:
             raw_ndvi = np.where(scl_mask, raw_ndvi, np.nan)
 
-        ndvi_clean = np.where(np.isnan(raw_ndvi), 0.0, raw_ndvi)
-        ndvi_min = float(np.nanmin(raw_ndvi))
-        ndvi_max = float(np.nanmax(raw_ndvi))
-        ndvi_mean = float(np.nanmean(raw_ndvi))
-        ndvi_std = float(np.nanstd(raw_ndvi))
+        valid_ndvi = raw_ndvi[np.isfinite(raw_ndvi)]
+        ndvi_min = float(np.min(valid_ndvi))
+        ndvi_max = float(np.max(valid_ndvi))
+        ndvi_mean = float(np.mean(valid_ndvi))
+        ndvi_std = float(np.std(valid_ndvi))
 
-        vigor_uncertainty = np.full_like(raw_ndvi, 0.035, dtype=np.float64)
+        # Support-derived radiometric uncertainty propagated through NDVI
+        sigma_b4 = 0.02 * np.maximum(b4_data, 1e-4)
+        sigma_b8 = 0.02 * np.maximum(b8_data, 1e-4)
+        denom_sq = np.maximum((b8_data + b4_data) ** 2, 1e-6)
+        vigor_uncertainty_raw = (2.0 * np.sqrt((b8_data * sigma_b4) ** 2 + (b4_data * sigma_b8) ** 2)) / denom_sq
+        if scl_mask is not None:
+            vigor_uncertainty_raw = np.where(scl_mask, vigor_uncertainty_raw, np.nan)
 
         # Primary S1 SAR scene
         primary_s1 = s1_scenes[0]
@@ -586,14 +592,14 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
         vv_data = np.load(vv_path)["data"].astype(np.float64)
         vh_data = np.load(vh_path)["data"].astype(np.float64)
 
-        # SAR Relative Wetness estimation
+        # SAR Relative Wetness estimation (normalized backscatter proxy)
         vv_db = 10.0 * np.log10(np.maximum(vv_data, 1e-6))
         wetness_raw = np.clip((vv_db - (-18.0)) / ((-6.0) - (-18.0)), 0.0, 1.0)
         wetness_min = float(np.nanmin(wetness_raw))
         wetness_max = float(np.nanmax(wetness_raw))
         wetness_mean = float(np.nanmean(wetness_raw))
         wetness_std = float(np.nanstd(wetness_raw))
-        wetness_uncertainty = np.full_like(wetness_raw, 0.045, dtype=np.float64)
+        wetness_uncertainty_raw = np.clip(0.05 * wetness_raw + 0.02, 0.015, 0.08)
 
         h, w = raw_ndvi.shape
         self.assertEqual((h, w), (34, 79), "Plot A native raster shape must be exactly 34x79")
@@ -602,11 +608,26 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
         transform = list(primary_s2.transform)
         crs = primary_s2.crs
 
-        vigor_grid_list = np.round(ndvi_clean, 4).tolist()
+        # Preserve unobserved / masked pixels as null in JSON grids
+        vigor_grid_list = [
+            [round(float(val), 4) if np.isfinite(val) else None for val in row]
+            for row in raw_ndvi
+        ]
+        vigor_uncertainty_grid = [
+            [round(float(val), 4) if np.isfinite(val) else None for val in row]
+            for row in vigor_uncertainty_raw
+        ]
         vigor_bytes = json.dumps(vigor_grid_list, separators=(",", ":")).encode("utf-8")
         vigor_hash = f"sha256:{hashlib.sha256(vigor_bytes).hexdigest()}"
 
-        wetness_grid_list = np.round(wetness_raw, 4).tolist()
+        wetness_grid_list = [
+            [round(float(val), 4) if np.isfinite(val) else None for val in row]
+            for row in wetness_raw
+        ]
+        wetness_uncertainty_grid = [
+            [round(float(val), 4) if np.isfinite(val) else None for val in row]
+            for row in wetness_uncertainty_raw
+        ]
         wetness_bytes = json.dumps(wetness_grid_list, separators=(",", ":")).encode("utf-8")
         wetness_hash = f"sha256:{hashlib.sha256(wetness_bytes).hexdigest()}"
 
@@ -740,7 +761,7 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
             "crs": crs,
             "transform": transform,
             "values": vigor_grid_list,
-            "uncertainty_values": np.round(vigor_uncertainty, 4).tolist(),
+            "uncertainty_values": vigor_uncertainty_grid,
             "stats": {"min": ndvi_min, "max": ndvi_max, "mean": ndvi_mean, "std": ndvi_std},
             "content_hash": vigor_hash,
             "source_id": primary_s2.scene_id,
@@ -762,14 +783,14 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
             "crs": crs,
             "transform": transform,
             "values": wetness_grid_list,
-            "uncertainty_values": np.round(wetness_uncertainty, 4).tolist(),
+            "uncertainty_values": wetness_uncertainty_grid,
             "stats": {"min": wetness_min, "max": wetness_max, "mean": wetness_mean, "std": wetness_std},
             "content_hash": wetness_hash,
             "source_id": primary_s1.scene_id,
             "source_reality": "provider_observation",
             "real_provider_product": True,
             "diagnostic_only": True,
-            "unit": "linear_backscatter",
+            "unit": "linear_backscatter_proxy",
         }
 
         surfaces = [canopy_surface, wetness_surface]
@@ -831,7 +852,7 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
                 },
                 "weather_proof": {
                     "daily_count": 14,
-                    "status": "verified",
+                    "status": "unverified_diagnostic",
                 },
                 "resolution_proof": {
                     "effective_resolution_m": 10.0,
@@ -1122,7 +1143,7 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
             "crs": meta["crs"],
             "transform": meta["transform"],
             "values": vigor_grid_list,
-            "uncertainty_values": np.full_like(ndvi_arr, 0.035).tolist(),
+            "uncertainty_values": np.round((2.0 * np.sqrt((b8_data * 0.02 * np.maximum(b4_data, 1e-4)) ** 2 + (b4_data * 0.02 * np.maximum(b8_data, 1e-4)) ** 2)) / np.maximum((b8_data + b4_data) ** 2, 1e-6), 4).tolist(),
             "stats": {"min": float(np.min(ndvi_arr)), "max": float(np.max(ndvi_arr)), "mean": float(np.mean(ndvi_arr)), "std": float(np.std(ndvi_arr))},
             "content_hash": vigor_hash,
             "source_id": meta["provider_product_id"],
@@ -1144,14 +1165,14 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
             "crs": meta["crs"],
             "transform": meta["transform"],
             "values": wetness_grid_list,
-            "uncertainty_values": np.full_like(wetness_arr, 0.045).tolist(),
+            "uncertainty_values": np.round(np.clip(0.05 * wetness_arr + 0.02, 0.015, 0.08), 4).tolist(),
             "stats": {"min": float(np.min(wetness_arr)), "max": float(np.max(wetness_arr)), "mean": float(np.mean(wetness_arr)), "std": float(np.std(wetness_arr))},
             "content_hash": wetness_hash,
             "source_id": "S1C_IW_GRDH_1SDV_20260906T174433_20260906T174458_009330_0128D5_DCDB_COG.SAFE",
             "source_reality": "provider_observation",
             "real_provider_product": True,
             "diagnostic_only": True,
-            "unit": "linear_backscatter",
+            "unit": "linear_backscatter_proxy",
         }
 
         surfaces = [canopy_surface, wetness_surface]
