@@ -21,6 +21,7 @@ from services.agribrain.layer10_sire.surface_contract import RENDER_AUTHORIZATIO
 from services.agribrain.layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
 from fastapi.testclient import TestClient
 from services.agribrain.app.main import app, require_internal_service_request
+from services.agribrain.app.internal_service_auth import compute_request_signature
 
 
 def _publish_candidate(
@@ -771,4 +772,343 @@ def test_idempotent_republish_no_duplicate_commit(tmp_path):
 
     lines2 = [l for l in commits_file.read_text(encoding="utf-8").splitlines() if l.strip()]
     assert len(lines2) == 1, "Idempotent re-publish must not append an additional commit"
+
+
+def test_genesis_crash_recovery_missing_head_reconciles_cleanly(tmp_path):
+    """P1-01: Genesis crash recovery when head.json is missing but commits.jsonl has a valid first publication."""
+    plot_id = f"parcel-genesis-rec-{int(time.time() * 1000)}"
+    tenant_id = "tenant-genesis"
+    farm_id = "farm-genesis"
+    geom_hash = "geom-genesis"
+    ns = PlotNamespace(tenant_id=tenant_id, farm_id=farm_id, plot_id=plot_id)
+    directory = plot_snapshot_store._plot_dir(ns)
+
+    states = {"root_zone_moisture": 0.36, "canopy_vigor": 0.64}
+    sigmas = {"root_zone_moisture": 0.016, "canopy_vigor": 0.024}
+
+    # 1. Publish valid first candidate (genesis commit)
+    published = _publish_candidate(tenant_id, farm_id, plot_id, geom_hash, "job-genesis-1", states, sigmas)
+    snap_id = published["snapshot_id"]
+
+    head_file = plot_snapshot_store._head_path(ns)
+    assert head_file.exists()
+
+    # 2. Simulate crash immediately after ledger append & fsync, before head.json was created or retained
+    head_file.unlink()
+    assert not head_file.exists()
+    with plot_snapshot_store._SNAPSHOT_CACHE_LOCK:
+        plot_snapshot_store._CANONICAL_SNAPSHOT_CACHE.clear()
+
+    # 3. Direct call to load_latest_plot_snapshot without head.json must trigger genesis recovery
+    reconciled = plot_snapshot_store.load_latest_plot_snapshot(ns, force_verify=True)
+    assert reconciled is not None, "load_latest_plot_snapshot must recover genesis commit when head.json is missing"
+    assert reconciled["snapshot_id"] == snap_id
+    assert reconciled["commit_seq"] == 1
+    assert head_file.exists(), "Reconciliation must have atomically written head.json"
+
+    # Verify scientific admission on recovered snapshot
+    admission = evaluate_snapshot_admission(reconciled, namespace=ns)
+    assert admission["is_valid"] is True
+    assert admission["status"] == "admitted"
+
+    # 4. Exact reader can also load the recovered snapshot
+    exact = plot_snapshot_store.load_and_validate_plot_snapshot_by_id(snap_id, namespace=ns)
+    assert exact is not None
+    assert exact["snapshot_id"] == snap_id
+
+    # 5. Verify FastAPI endpoints return HTTP 200 for latest and exact queries
+    app.dependency_overrides[require_internal_service_request] = lambda: ns
+    try:
+        client = TestClient(app)
+        resp_latest = client.get(f"/v2/plots/{plot_id}/snapshot")
+        assert resp_latest.status_code == 200
+        assert resp_latest.json()["available"] is True
+        assert resp_latest.json()["snapshot_id"] == snap_id
+
+        resp_exact = client.get(f"/v2/snapshots/{snap_id}")
+        assert resp_exact.status_code == 200
+        assert resp_exact.json()["available"] is True
+        assert resp_exact.json()["snapshot_id"] == snap_id
+    finally:
+        app.dependency_overrides.pop(require_internal_service_request, None)
+
+
+def test_genesis_crash_recovery_corrupt_genesis_fails_closed(tmp_path):
+    """P1-01 Negative: Corrupt genesis commit with missing head.json must fail closed, return None, and NOT create head.json."""
+    plot_id = f"parcel-genesis-corrupt-{int(time.time() * 1000)}"
+    tenant_id = "tenant-corrupt-gen"
+    farm_id = "farm-corrupt-gen"
+    ns = PlotNamespace(tenant_id=tenant_id, farm_id=farm_id, plot_id=plot_id)
+    directory = plot_snapshot_store._plot_dir(ns)
+    directory.mkdir(parents=True, exist_ok=True)
+
+    head_file = plot_snapshot_store._head_path(ns)
+    assert not head_file.exists()
+
+    commits_file = directory / "commits.jsonl"
+    corrupt_sid = f"L10-GENESIS-CORRUPT-{uuid.uuid4().hex[:8]}"
+    rec = {
+        "commit_seq": 1,
+        "snapshot_id": corrupt_sid,
+        "node_hash": "a" * 64,
+        "frontend_publication_hash": "b" * 64,
+        "publication_receipt_hash": "c" * 64,
+        "publication_job_id": "job-gen-corrupt",
+        "committed_at": datetime.now(timezone.utc).isoformat(),
+        "parent_commit_hash": "0" * 64,
+    }
+    rec["commit_hash"] = hashlib.sha256(plot_snapshot_store._json_bytes({k: v for k, v in rec.items() if k != "commit_hash"})).hexdigest()
+    commits_file.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+
+    # 1. load_latest_plot_snapshot returns None and does NOT create head.json
+    latest = plot_snapshot_store.load_latest_plot_snapshot(ns, force_verify=True)
+    assert latest is None
+    assert not head_file.exists(), "Corrupt genesis must never create head.json"
+
+    # 2. load_and_validate_plot_snapshot_by_id returns None
+    exact = plot_snapshot_store.load_and_validate_plot_snapshot_by_id(corrupt_sid, namespace=ns)
+    assert exact is None
+
+    # 3. FastAPI HTTP endpoint returns available=False for latest and 404 for exact
+    app.dependency_overrides[require_internal_service_request] = lambda: ns
+    try:
+        client = TestClient(app)
+        resp_latest = client.get(f"/v2/plots/{plot_id}/snapshot")
+        assert resp_latest.status_code == 200
+        assert resp_latest.json()["available"] is False
+        assert resp_latest.json()["reason"] == "canonical_head_not_published"
+
+        resp_exact = client.get(f"/v2/snapshots/{corrupt_sid}")
+        assert resp_exact.status_code == 404
+    finally:
+        app.dependency_overrides.pop(require_internal_service_request, None)
+
+    # 4. Attempting to publish new snapshot fails closed due to un-reconciled tip
+    states = {"root_zone_moisture": 0.35, "canopy_vigor": 0.65}
+    sigmas = {"root_zone_moisture": 0.015, "canopy_vigor": 0.025}
+    with pytest.raises(ValueError, match="could not be reconciled with head"):
+        _publish_candidate(tenant_id, farm_id, plot_id, "geom", "job-fail", states, sigmas)
+
+
+def test_reconciliation_rejects_hash_consistent_but_unadmitted_tip(tmp_path):
+    """P1-02: A fully hash-consistent ledger tip that fails semantic contracts must be rejected by reconciliation."""
+    plot_id = f"parcel-semantic-rej-{int(time.time() * 1000)}"
+    tenant_id = "tenant-sem"
+    farm_id = "farm-sem"
+    geom_hash = "geom-sem"
+    ns = PlotNamespace(tenant_id=tenant_id, farm_id=farm_id, plot_id=plot_id)
+    directory = plot_snapshot_store._plot_dir(ns)
+
+    states1 = {"root_zone_moisture": 0.33, "canopy_vigor": 0.67}
+    sigmas1 = {"root_zone_moisture": 0.015, "canopy_vigor": 0.025}
+
+    # 1. Publish valid initial snapshot (Commit 1)
+    published1 = _publish_candidate(tenant_id, farm_id, plot_id, geom_hash, "job-sem-1", states1, sigmas1)
+    snap1_id = published1["snapshot_id"]
+
+    head_file = plot_snapshot_store._head_path(ns)
+    head1_bytes = head_file.read_bytes()
+
+    commits_file = directory / "commits.jsonl"
+    lines1 = [json.loads(l) for l in commits_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+    parent_hash = lines1[-1]["commit_hash"]
+
+    # 2. Stage Commit 2: mathematically 100% hash-consistent on disk, but node has mismatched plot_id!
+    snap2_id = f"L10-MISMATCH-{uuid.uuid4().hex[:8]}"
+    job2_id = "job-mismatch-2"
+    safe_job2 = hashlib.sha256(job2_id.encode("utf-8")).hexdigest()[:32]
+
+    # Node artifact with CONFLICTING plot_id
+    mismatched_plot_id = f"{plot_id}-INTRUDER"
+    node_payload = {
+        "contract_version": plot_snapshot_store.PLOT_SNAPSHOT_CONTRACT_VERSION,
+        "snapshot_kind": "layer10_terminal",
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "snapshot_id": snap2_id,
+        "tenant_id": tenant_id,
+        "farm_id": farm_id,
+        "plot_id": mismatched_plot_id,  # <-- CONFLICTING IDENTITY
+        "geometry_hash": geom_hash,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "published_at": datetime.now(timezone.utc).isoformat(),
+        "evidence_cutoff_at": None,
+        "observation_window": None,
+        "crop_cycle_id": "cycle-test",
+        "supersedes_snapshot_id": snap1_id,
+        "job_id": job2_id,
+        "manifest_hash": "manifest-hash-2",
+        "crop_posterior_lineage": None,
+        "crop_worldline_event_id": None,
+        "phenology_worldline_event_id": None,
+        "crop_evidence_ledger_hash": None,
+        "crop_influence_manifest_hash": None,
+        "scientific_result": {"content_hash": "sci-2"},
+        "scientific_content_hash": "sci-2",
+    }
+    hashable_node = {k: v for k, v in node_payload.items() if not k.endswith("_ref")}
+    node_hash = hashlib.sha256(plot_snapshot_store._json_bytes(hashable_node)).hexdigest()
+    node_payload["node_hash"] = node_hash
+
+    # Publication artifact
+    frontend_payload = {
+        "surface_schema_version": SURFACES_SCHEMA_VERSION,
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "publication_status": "READY_DIAGNOSTIC_ONLY",
+        "surfaces": [],
+        "intelligence_snapshot_id": snap2_id,
+    }
+    pub_payload = {
+        "contract_version": plot_snapshot_store.PLOT_PUBLICATION_CONTRACT_VERSION,
+        "snapshot_kind": "layer10_terminal",
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "tenant_id": tenant_id,
+        "farm_id": farm_id,
+        "plot_id": plot_id,
+        "geometry_hash": geom_hash,
+        "snapshot_id": snap2_id,
+        "job_id": job2_id,
+        "manifest_hash": "manifest-hash-2",
+        "node_ref": f"nodes/{snap2_id}.json",
+        "node_hash": node_hash,
+        "frontend_payload": frontend_payload,
+        "published_at": node_payload["published_at"],
+        "evidence_cutoff_at": None,
+        "observation_window": None,
+        "crop_cycle_id": "cycle-test",
+        "recorded_at": node_payload["recorded_at"],
+    }
+    hashable_pub = {k: v for k, v in pub_payload.items() if not k.endswith("_ref")}
+    pub_hash = hashlib.sha256(plot_snapshot_store._json_bytes(hashable_pub)).hexdigest()
+    pub_payload["publication_hash"] = pub_hash
+
+    # Receipt artifact
+    rcpt_payload = {
+        "contract_version": plot_snapshot_store.PLOT_SNAPSHOT_RECEIPT_CONTRACT_VERSION,
+        "snapshot_kind": "layer10_terminal",
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "tenant_id": tenant_id,
+        "farm_id": farm_id,
+        "plot_id": plot_id,
+        "geometry_hash": geom_hash,
+        "snapshot_id": snap2_id,
+        "node_ref": f"nodes/{snap2_id}.json",
+        "node_hash": node_hash,
+        "source_node_job_id": job2_id,
+        "source_node_manifest_hash": "manifest-hash-2",
+        "job_id": job2_id,
+        "manifest_hash": "manifest-hash-2",
+        "frontend_publication_ref": f"publications/{safe_job2}.json",
+        "frontend_publication_hash": pub_hash,
+        "equivalence_reason": "scientific_content_hash_equivalent",
+        "recorded_at": node_payload["recorded_at"],
+    }
+    hashable_rcpt = {k: v for k, v in rcpt_payload.items() if not k.endswith("_ref")}
+    rcpt_hash = hashlib.sha256(plot_snapshot_store._json_bytes(hashable_rcpt)).hexdigest()
+    rcpt_payload["receipt_hash"] = rcpt_hash
+
+    # Write all three artifacts
+    (directory / "nodes" / f"{snap2_id}.json").write_bytes(plot_snapshot_store._json_bytes(node_payload))
+    (directory / "publications" / f"{safe_job2}.json").write_bytes(plot_snapshot_store._json_bytes(pub_payload))
+    (directory / "receipts" / f"{safe_job2}.json").write_bytes(plot_snapshot_store._json_bytes(rcpt_payload))
+
+    # Append validly formatted commit 2 to commits.jsonl
+    commit2_rec = {
+        "commit_seq": 2,
+        "snapshot_id": snap2_id,
+        "node_hash": node_hash,
+        "frontend_publication_hash": pub_hash,
+        "publication_receipt_hash": rcpt_hash,
+        "publication_job_id": job2_id,
+        "committed_at": node_payload["recorded_at"],
+        "parent_commit_hash": parent_hash,
+    }
+    commit2_rec["commit_hash"] = hashlib.sha256(plot_snapshot_store._json_bytes({k: v for k, v in commit2_rec.items() if k != "commit_hash"})).hexdigest()
+    with open(commits_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(commit2_rec) + "\n")
+
+    # 3. Trigger reconciliation under publication lock
+    with plot_snapshot_store._plot_publication_lock(directory):
+        rec_res = plot_snapshot_store.reconcile_publication_ledger_and_head(directory, ns)
+
+    # Must preserve Commit 1 and reject Commit 2 due to namespace mismatch
+    assert rec_res["snapshot_id"] == snap1_id
+    assert head_file.read_bytes() == head1_bytes, "head.json bytes must remain unaltered"
+
+    # 4. Read contracts reject the unadmitted candidate and withhold scientific authority
+    with plot_snapshot_store._SNAPSHOT_CACHE_LOCK:
+        plot_snapshot_store._CANONICAL_SNAPSHOT_CACHE.clear()
+
+    # Latest reader detects unreconciled tip and fails closed (returns None, no authority issued)
+    assert plot_snapshot_store.load_latest_plot_snapshot(ns, force_verify=True) is None, \
+        "Latest reader must withhold scientific authority when ledger tip is unreconciled"
+
+    # Exact reader strictly rejects the unadmitted tip
+    assert plot_snapshot_store.load_and_validate_plot_snapshot_by_id(snap2_id, namespace=ns) is None, \
+        "Exact reader must reject the semantically mismatched tip"
+
+    # 5. Subsequent publication fails closed due to unreconciled tip
+    with pytest.raises(ValueError, match="could not be reconciled with head"):
+        _publish_candidate(tenant_id, farm_id, plot_id, geom_hash, "job-should-fail", states1, sigmas1)
+
+
+def test_authenticated_signed_retrieval_end_to_end(tmp_path):
+    """P2: Verify real HMAC-SHA256 authenticated retrieval of /v2/plots/{plot_id}/snapshot without dependency overrides."""
+    plot_id = f"parcel-signed-{int(time.time() * 1000)}"
+    tenant_id = "tenant-signed"
+    farm_id = "farm-signed"
+    geom_hash = "geom-signed"
+    ns = PlotNamespace(tenant_id=tenant_id, farm_id=farm_id, plot_id=plot_id)
+
+    states = {"root_zone_moisture": 0.40, "canopy_vigor": 0.60}
+    sigmas = {"root_zone_moisture": 0.02, "canopy_vigor": 0.02}
+
+    published = _publish_candidate(tenant_id, farm_id, plot_id, geom_hash, "job-signed-1", states, sigmas)
+    snap_id = published["snapshot_id"]
+
+    client = TestClient(app)
+    path = f"/v2/plots/{plot_id}/snapshot"
+    ts = str(time.time())
+    nonce = uuid.uuid4().hex
+
+    sig = compute_request_signature(
+        method="GET",
+        path=path,
+        query_string="",
+        tenant_id=tenant_id,
+        farm_id=farm_id,
+        plot_id=plot_id,
+        body_bytes=b"",
+        timestamp=ts,
+        nonce=nonce,
+        key_version="v1",
+    )
+
+    headers = {
+        "X-AgriBrain-Signature": sig,
+        "X-AgriBrain-Timestamp": ts,
+        "X-AgriBrain-Nonce": nonce,
+        "X-AgriBrain-Key-Version": "v1",
+        "X-Tenant-Id": tenant_id,
+        "X-Farm-Id": farm_id,
+        "X-Plot-Id": plot_id,
+    }
+
+    # 1. Genuine signed GET succeeds through real require_internal_service_request
+    resp = client.get(path, headers=headers)
+    assert resp.status_code == 200, f"Signed retrieval failed: {resp.text}"
+    assert resp.json()["available"] is True
+    assert resp.json()["snapshot_id"] == snap_id
+
+    # 2. Tampered signature fails closed (401 Unauthorized)
+    headers_bad_sig = {**headers, "X-AgriBrain-Signature": "deadbeef" * 8, "X-AgriBrain-Nonce": uuid.uuid4().hex}
+    resp_bad_sig = client.get(path, headers=headers_bad_sig)
+    assert resp_bad_sig.status_code == 401
+
+    # 3. Missing headers fails closed (401 Unauthorized)
+    resp_no_headers = client.get(path)
+    assert resp_no_headers.status_code == 401
+
+    # 4. Replay attack with same nonce fails closed (401 Unauthorized)
+    resp_replay = client.get(path, headers=headers)
+    assert resp_replay.status_code == 401
 

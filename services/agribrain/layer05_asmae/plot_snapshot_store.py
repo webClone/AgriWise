@@ -539,6 +539,15 @@ def reconcile_publication_ledger_and_head(
         return current_head if current_head else None
 
     node = _read(node_path)
+    if (
+        node.get("contract_version") != PLOT_SNAPSHOT_CONTRACT_VERSION
+        or node.get("plot_id") != ns.plot_id
+        or node.get("tenant_id") != ns.tenant_id
+        or node.get("farm_id") != ns.farm_id
+        or node.get("snapshot_id") != tip_sid
+    ):
+        return current_head if current_head else None
+
     hashable_node = {
         k: v for k, v in node.items()
         if not k.endswith("_ref") and k not in (
@@ -561,6 +570,22 @@ def reconcile_publication_ledger_and_head(
 
     pub = _read(pub_path)
     rcpt = _read(rcpt_path)
+
+    # Check namespace & snapshot bindings in pub and rcpt
+    if pub.get("snapshot_id") != tip_sid or rcpt.get("snapshot_id") != tip_sid:
+        return current_head if current_head else None
+    if pub.get("plot_id") and pub.get("plot_id") != ns.plot_id:
+        return current_head if current_head else None
+    if rcpt.get("plot_id") and rcpt.get("plot_id") != ns.plot_id:
+        return current_head if current_head else None
+    if pub.get("tenant_id") and pub.get("tenant_id") != ns.tenant_id:
+        return current_head if current_head else None
+    if rcpt.get("tenant_id") and rcpt.get("tenant_id") != ns.tenant_id:
+        return current_head if current_head else None
+    if pub.get("farm_id") and pub.get("farm_id") != ns.farm_id:
+        return current_head if current_head else None
+    if rcpt.get("farm_id") and rcpt.get("farm_id") != ns.farm_id:
+        return current_head if current_head else None
 
     # Recompute cryptographic publication hash from content (R2)
     hashable_pub = {
@@ -587,8 +612,6 @@ def reconcile_publication_ledger_and_head(
         return current_head if current_head else None
 
     # Cross-artifact binding verification (R2)
-    if pub.get("snapshot_id") != tip_sid or rcpt.get("snapshot_id") != tip_sid:
-        return current_head if current_head else None
     if pub.get("node_hash") != tip["node_hash"] or rcpt.get("node_hash") != tip["node_hash"]:
         return current_head if current_head else None
     if rcpt.get("frontend_publication_hash") != tip["frontend_publication_hash"]:
@@ -602,11 +625,75 @@ def reconcile_publication_ledger_and_head(
         or (pub_frontend.get("provenance") or {}).get("surface_schema_version")
         or ""
     )
+    if published_schema_version != SURFACES_SCHEMA_VERSION:
+        return current_head if current_head else None
+
+    # Cryptographic temporal binding verification (P1-02)
+    authoritative_published_at = (
+        pub.get("published_at")
+        or node.get("published_at")
+        or node.get("recorded_at")
+    )
+    authoritative_evidence_cutoff = (
+        pub.get("evidence_cutoff_at")
+        or node.get("evidence_cutoff_at")
+    )
+    authoritative_observation_window = (
+        pub.get("observation_window")
+        or node.get("observation_window")
+    )
+    temporal_binding_valid = bool(
+        (not pub.get("published_at") or not node.get("published_at") or pub.get("published_at") == node.get("published_at"))
+        and (not pub.get("evidence_cutoff_at") or not node.get("evidence_cutoff_at") or pub.get("evidence_cutoff_at") == node.get("evidence_cutoff_at"))
+        and (not pub.get("observation_window") or not node.get("observation_window") or pub.get("observation_window") == node.get("observation_window"))
+        and authoritative_published_at is not None
+    )
+    if not temporal_binding_valid:
+        return current_head if current_head else None
+
+    # Cryptographic bitemporal replay receipt verification (P1-02)
+    replay_receipt_valid = True
+    if node.get("bitemporal_replay_receipt"):
+        n_rr = node.get("bitemporal_replay_receipt") or {}
+        p_rr = pub.get("bitemporal_replay_receipt") or {}
+        r_rr = rcpt.get("bitemporal_replay_receipt") or {}
+        expected_digest = node.get("evidence_set_digest")
+        if not expected_digest or n_rr.get("evidence_set_digest") != expected_digest:
+            replay_receipt_valid = False
+        if p_rr and p_rr.get("evidence_set_digest") != expected_digest:
+            replay_receipt_valid = False
+        if r_rr and r_rr.get("evidence_set_digest") != expected_digest:
+            replay_receipt_valid = False
+    if not replay_receipt_valid:
+        return current_head if current_head else None
+
+    # Lineage verification (P1-02)
+    lineage_valid = bool(
+        node.get("snapshot_kind") != "asmae"
+        or (
+            node.get("crop_posterior_lineage")
+            and node.get("crop_worldline_event_id")
+            and node.get("phenology_worldline_event_id")
+            and pub.get("crop_posterior_lineage") == node.get("crop_posterior_lineage")
+            and pub.get("crop_worldline_event_id") == node.get("crop_worldline_event_id")
+            and pub.get("phenology_worldline_event_id") == node.get("phenology_worldline_event_id")
+            and rcpt.get("crop_posterior_lineage") == node.get("crop_posterior_lineage")
+        )
+    )
+    if not lineage_valid:
+        return current_head if current_head else None
+
+    pub_auth = (
+        pub.get("publication_authority")
+        or node.get("publication_authority")
+        or pub_frontend.get("publication_authority")
+        or "DIAGNOSTIC_ONLY"
+    )
 
     reconciled_head = {
         "contract_version": PLOT_SNAPSHOT_CONTRACT_VERSION,
         "snapshot_kind": node.get("snapshot_kind") or "layer10_terminal",
-        "publication_authority": node.get("publication_authority") or pub.get("publication_authority") or "DIAGNOSTIC_ONLY",
+        "publication_authority": pub_auth,
         "tenant_id": ns.tenant_id,
         "farm_id": ns.farm_id,
         "plot_id": ns.plot_id,
@@ -624,16 +711,19 @@ def reconcile_publication_ledger_and_head(
         "frontend_publication_ref": str(pub_path),
         "frontend_publication_hash": tip["frontend_publication_hash"],
         "surface_inventory_hash": pub_frontend.get("surface_inventory_hash"),
-        "published_at": pub.get("published_at") or node.get("published_at") or tip["committed_at"],
-        "evidence_cutoff_at": pub.get("evidence_cutoff_at") or node.get("evidence_cutoff_at"),
-        "observation_window": pub.get("observation_window") or node.get("observation_window"),
+        "published_at": authoritative_published_at or tip["committed_at"],
+        "evidence_cutoff_at": authoritative_evidence_cutoff,
+        "observation_window": authoritative_observation_window,
         "crop_cycle_id": node.get("crop_cycle_id"),
         "updated_at": tip["committed_at"],
         "commit_seq": tip["commit_seq"],
         "commit_hash": tip["commit_hash"],
     }
+    if node.get("bitemporal_replay_receipt"):
+        reconciled_head["bitemporal_replay_receipt"] = node["bitemporal_replay_receipt"]
+        reconciled_head["evidence_set_digest"] = node.get("evidence_set_digest")
 
-    # Verify scientific admission contract before advancing head.json (R2)
+    # Verify scientific admission contract before advancing head.json (R2, P1-02)
     payload_surfaces = pub_frontend.get("surfaces") or pub_frontend.get("surface_pack") or []
     try:
         computed_inv_hash = (
@@ -647,25 +737,72 @@ def reconcile_publication_ledger_and_head(
     derived_publication_status, _ = classify_surface_publication(pub_frontend)
     declared_status_valid, _, _ = validate_declared_publication_status(pub_frontend)
 
-    # Numerical authority check
+    # Authority agreement & numerical authority checks (P1-02)
+    node_num_hash = (
+        (node.get("scientific_result") or {}).get("asmae_numerical_digest")
+        or ((node.get("frontend_payload") or {}).get("asmae_posterior_numerical_record") or {}).get("numerical_vector_hash")
+        or (node.get("asmae") or {}).get("asmae_numerical_digest")
+    )
     num_rec = (
         (node.get("scientific_result") or {}).get("asmae_posterior_numerical_record")
         or (node.get("asmae") or {}).get("asmae_posterior_numerical_record")
         or pub_frontend.get("asmae_posterior_numerical_record")
     )
+
+    authority_agreement_valid = True
+    node_agreement_valid = True
     numerical_valid = True
-    if reconciled_head["publication_authority"] == "CERTIFIED_NUMERICAL":
+    if pub_auth in ("DIAGNOSTIC_ONLY", "CONTAINED_PROPOSAL"):
+        if node_num_hash or num_rec or (node.get("asmae") or {}).get("state_means"):
+            authority_agreement_valid = False
+            node_agreement_valid = False
+            numerical_valid = False
+    elif pub_auth == "CERTIFIED_NUMERICAL":
         try:
             validate_certified_numerical_publication(
                 num_rec, pub_frontend, node.get("scientific_result") or node.get("asmae") or {}, node=node
             )
         except (ValueError, TypeError):
             numerical_valid = False
+            node_agreement_valid = False
+            authority_agreement_valid = False
+    elif num_rec is not None:
+        try:
+            validate_certified_numerical_publication(
+                num_rec, pub_frontend, node.get("scientific_result") or node.get("asmae") or {}, node=node
+            )
+        except (ValueError, TypeError):
+            numerical_valid = False
+            node_agreement_valid = False
+
+    binding_valid = bool(
+        reconciled_head.get("snapshot_id") == tip_sid
+        and reconciled_head.get("plot_id") == ns.plot_id
+        and reconciled_head.get("tenant_id") == ns.tenant_id
+        and reconciled_head.get("farm_id") == ns.farm_id
+        and node.get("snapshot_id") == tip_sid
+        and node.get("plot_id") == ns.plot_id
+        and node.get("tenant_id") == ns.tenant_id
+        and node.get("farm_id") == ns.farm_id
+        and pub.get("snapshot_id") == tip_sid
+        and pub.get("node_hash") == tip["node_hash"]
+        and rcpt.get("snapshot_id") == tip_sid
+        and rcpt.get("node_hash") == tip["node_hash"]
+        and rcpt.get("frontend_publication_hash") == tip["frontend_publication_hash"]
+        and temporal_binding_valid
+        and (numerical_valid is not False)
+        and node_agreement_valid
+        and authority_agreement_valid
+        and replay_receipt_valid
+        and (computed_node_hash == tip["node_hash"])
+    )
+    if not binding_valid or not authority_agreement_valid or not node_agreement_valid:
+        return current_head if current_head else None
 
     candidate_validation = {
-        "nodeValid": True,
-        "publicationValid": True,
-        "receiptValid": True,
+        "nodeValid": bool(computed_node_hash == tip["node_hash"]),
+        "publicationValid": bool(computed_pub_hash == tip["frontend_publication_hash"]),
+        "receiptValid": bool(computed_rcpt_hash == tip["publication_receipt_hash"]),
         "inventoryValid": bool(
             not payload_surfaces
             or (
@@ -674,24 +811,15 @@ def reconcile_publication_ledger_and_head(
                 and reconciled_head.get("surface_inventory_hash") == computed_inv_hash
             )
         ),
-        "temporalBindingValid": True,
+        "temporalBindingValid": temporal_binding_valid,
         "numericalBindingValid": numerical_valid,
-        "nodeAgreementValid": True,
-        "authorityAgreementValid": True,
-        "replayReceiptValid": True,
-        "bindingValid": True,
-        "lineageValid": bool(
-            node.get("snapshot_kind") != "asmae"
-            or (
-                node.get("crop_posterior_lineage")
-                and node.get("crop_worldline_event_id")
-                and node.get("phenology_worldline_event_id")
-                and pub.get("crop_posterior_lineage") == node.get("crop_posterior_lineage")
-                and rcpt.get("crop_posterior_lineage") == node.get("crop_posterior_lineage")
-            )
-        ),
+        "nodeAgreementValid": node_agreement_valid,
+        "authorityAgreementValid": authority_agreement_valid,
+        "replayReceiptValid": replay_receipt_valid,
+        "bindingValid": binding_valid,
+        "lineageValid": lineage_valid,
         "schemaValid": published_schema_version == SURFACES_SCHEMA_VERSION,
-        "contractValid": derived_publication_status in VALID_PUBLICATION_STATUSES and numerical_valid,
+        "contractValid": derived_publication_status in VALID_PUBLICATION_STATUSES and (numerical_valid is not False),
         "publicationStatusValid": declared_status_valid,
     }
 
@@ -704,16 +832,11 @@ def reconcile_publication_ledger_and_head(
     }
     admission_report = evaluate_snapshot_admission(reconstructed_candidate, namespace=ns)
     if not admission_report.get("is_valid", False):
-        # Ledger tip fails scientific admission; do NOT promote to head.json (R2)
+        # Ledger tip fails scientific admission; do NOT promote to head.json (R2, P1-02)
         return current_head if current_head else None
 
     # All checks passed: atomically update head.json to validated tip
     _atomic(head_file, reconciled_head)
-    with _SNAPSHOT_CACHE_LOCK:
-        keys_to_evict = [k for k in _CANONICAL_SNAPSHOT_CACHE if k[0] == ns.stable_key()]
-        for k in keys_to_evict:
-            _CANONICAL_SNAPSHOT_CACHE.pop(k, None)
-    return reconciled_head
     with _SNAPSHOT_CACHE_LOCK:
         keys_to_evict = [k for k in _CANONICAL_SNAPSHOT_CACHE if k[0] == ns.stable_key()]
         for k in keys_to_evict:
@@ -1374,10 +1497,10 @@ def publish_canonical_plot_snapshot(
                 "explicit authorized recovery required"
             )
 
-        # Unreconciled tip quarantine guard (R2):
-        if existing_commits and current_head_check:
+        # Unreconciled tip quarantine guard (R2, P1-01):
+        if existing_commits:
             tip = existing_commits[-1]
-            if (
+            if not current_head_check or (
                 current_head_check.get("commit_seq") is not None
                 and current_head_check.get("commit_hash") != tip["commit_hash"]
             ):
@@ -1816,8 +1939,20 @@ def load_latest_plot_snapshot(
     ns = _coerce_namespace(namespace, tenant_id=tenant_id, farm_id=farm_id)
     directory = _plot_dir(ns)
     head_file = _head_path(ns)
+    commits_file = directory / "commits.jsonl"
+
+    # Genesis crash recovery check (P1-01):
+    # If head.json is missing but a valid commits ledger exists, attempt reconciliation
+    # before deciding that the plot has no canonical head.
     if not head_file.exists():
-        return None
+        if commits_file.exists() and commits_file.stat().st_size > 0:
+            is_ledger_valid, records, _ = validate_publication_commit_ledger(directory)
+            if not is_ledger_valid or not records:
+                return None
+            with _plot_publication_lock(directory):
+                reconcile_publication_ledger_and_head(directory, ns)
+        if not head_file.exists():
+            return None
 
     head = _read(head_file)
     if head.get("contract_version") != PLOT_SNAPSHOT_CONTRACT_VERSION:
@@ -1829,7 +1964,6 @@ def load_latest_plot_snapshot(
         head.get("commit_seq") is not None
         or head.get("commit_hash")
     )
-    commits_file = directory / "commits.jsonl"
 
     if has_post_ledger_head:
         if not commits_file.exists() or commits_file.stat().st_size == 0:
@@ -2326,12 +2460,21 @@ def load_and_validate_plot_snapshot_by_id(
 
     directory = _plot_dir(ns)
     head_file = _head_path(ns)
+    commits_file = directory / "commits.jsonl"
+
+    # Genesis crash recovery check (P1-01):
+    if not head_file.exists() and commits_file.exists() and commits_file.stat().st_size > 0:
+        is_ledger_valid, records, _ = validate_publication_commit_ledger(directory)
+        if not is_ledger_valid or not records:
+            return None
+        with _plot_publication_lock(directory):
+            reconcile_publication_ledger_and_head(directory, ns)
+
     head_check = _read(head_file) if head_file.exists() else {}
     has_post_ledger_head = bool(
         head_check.get("commit_seq") is not None
         or head_check.get("commit_hash")
     )
-    commits_file = directory / "commits.jsonl"
 
     if has_post_ledger_head:
         if not commits_file.exists() or commits_file.stat().st_size == 0:
