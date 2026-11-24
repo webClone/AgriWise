@@ -848,6 +848,30 @@ export default function WorkspaceContextInspector({
                 )}
               </dd>
             </div>
+            {rawPub?.publication_authority && (
+              <div>
+                <dt>Authority</dt>
+                <dd style={{ fontFamily: "monospace", fontSize: "11px", color: rawPub.publication_authority === "DIAGNOSTIC_ONLY" ? "#f59e0b" : "#34d399" }}>
+                  {rawPub.publication_authority}
+                </dd>
+              </div>
+            )}
+            {(rawPub?.evidence_acquisition_date || rawPub?.evidence_cutoff_at) && (
+              <div>
+                <dt>Acquisition</dt>
+                <dd style={{ fontSize: "11px", color: "#e2e8f0" }}>
+                  {rawPub.evidence_acquisition_date || String(rawPub.evidence_cutoff_at).slice(0, 10)}
+                </dd>
+              </div>
+            )}
+            {rawPub?.calibration_status && (
+              <div>
+                <dt>Calibration</dt>
+                <dd style={{ fontSize: "11px", color: "#94a3b8" }}>
+                  {rawPub.calibration_status}
+                </dd>
+              </div>
+            )}
             <div>
               <dt>Applicability</dt>
               <dd>

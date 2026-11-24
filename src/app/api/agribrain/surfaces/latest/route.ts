@@ -177,6 +177,49 @@ async function handleSurfacesRequest(request: NextRequest, plotIdParam?: string)
           );
         }
 
+        // 3. Epistemic distinctions: publication freshness vs observation freshness & scientific authority
+        const publication_authority = snapJson.publication_authority
+          || payload.publication_authority
+          || "DIAGNOSTIC_ONLY";
+        const isDiagnosticOnly = publication_authority === "DIAGNOSTIC_ONLY";
+
+        const publication_status = isDiagnosticOnly
+          ? "admitted_diagnostic"
+          : (payload.publication_status || "VALID_NORMAL");
+
+        let evidence_acquisition_date = payload.evidence_acquisition_date;
+        if (!evidence_acquisition_date && evidence_cutoff_at) {
+          try {
+            const d = new Date(evidence_cutoff_at);
+            evidence_acquisition_date = d.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
+          } catch {
+            evidence_acquisition_date = String(evidence_cutoff_at).slice(0, 10);
+          }
+        }
+
+        const effective_resolution = payload.effective_resolution
+          || snapJson.effective_resolution
+          || "10m native satellite";
+
+        const calibration_status = payload.calibration_status
+          || snapJson.calibration_status
+          || (isDiagnosticOnly ? "uncalibrated_diagnostic" : "calibrated_production");
+
+        const surfacesList = payload.surfaces || payload.surface_pack || [];
+        const supported_layers = payload.supported_layers
+          || (Array.isArray(surfacesList) ? surfacesList.map((s: any) => s.surface_type || s.type || s.semantic_type).filter(Boolean) : []);
+
+        const unsupported_layers = payload.unsupported_layers || [
+          { layer: "surface_temperature", reason: "thermal_observation_unavailable" },
+        ];
+
+        const raster_availability = {
+          supported_layers,
+          unsupported_layers,
+          supported_count: supported_layers.length,
+          can_render_pixels: Boolean(payload.canRenderPixels ?? (supported_layers.length > 0)),
+        };
+
         return NextResponse.json({
           ...payload,
           tenant_id,
@@ -216,6 +259,22 @@ async function handleSurfacesRequest(request: NextRequest, plotIdParam?: string)
           zones: payload.zones || [],
           histograms: payload.histograms || {},
           validation,
+          publication_authority,
+          publicationAuthority: publication_authority,
+          publication_status,
+          publicationStatus: publication_status,
+          evidence_acquisition_date,
+          evidenceAcquisitionDate: evidence_acquisition_date,
+          effective_resolution,
+          effectiveResolution: effective_resolution,
+          calibration_status,
+          calibrationStatus: calibration_status,
+          supported_layers,
+          supportedLayers: supported_layers,
+          unsupported_layers,
+          unsupportedLayers: unsupported_layers,
+          raster_availability,
+          rasterAvailability: raster_availability,
         });
       }
     }

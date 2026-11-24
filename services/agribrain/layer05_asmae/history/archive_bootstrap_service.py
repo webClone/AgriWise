@@ -27,7 +27,10 @@ import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from services.agribrain.layer05_asmae.history.historical_stack_builder import HistoricalStackBuilder
 
 from services.agribrain.world_model.canonical_worldline import (
     CanonicalWorldlineService,
@@ -52,6 +55,7 @@ class BootstrapWindowRecord:
     scenes_discovered: int
     events_committed: int
     completed_at: str
+    gap_detected: bool = False
 
 
 @dataclass
@@ -67,6 +71,8 @@ class BootstrapCheckpoint:
     current_cursor: str
     status: str  # "IN_PROGRESS", "COMPLETED", "FAILED"
     completed_windows: List[Dict[str, Any]] = field(default_factory=list)
+    gap_windows: List[int] = field(default_factory=list)
+    total_gaps_recorded: int = 0
     total_scenes_discovered: int = 0
     total_events_committed: int = 0
     last_committed_event_id: Optional[str] = None
@@ -92,6 +98,7 @@ class ArchiveBootstrapService:
         worldline: Optional[CanonicalWorldlineService] = None,
         bootstrap_root: Optional[Path] = None,
         fetcher_factory: Optional[Callable[[str, str], List[Dict[str, Any]]]] = None,
+        stack_builder: Optional["HistoricalStackBuilder"] = None,
     ) -> None:
         self.worldline = worldline or CanonicalWorldlineService()
         self.bootstrap_root = Path(
@@ -100,6 +107,7 @@ class ArchiveBootstrapService:
         ).resolve()
         self.bootstrap_root.mkdir(parents=True, exist_ok=True)
         self._fetcher_factory = fetcher_factory
+        self.stack_builder = stack_builder
 
     def _checkpoint_path(
         self, plot_id: str, tenant_id: str, namespace: str
@@ -157,6 +165,7 @@ class ArchiveBootstrapService:
         window_days: int = DEFAULT_WINDOW_DAYS,
         fail_fast: bool = True,
         max_windows: Optional[int] = None,
+        polygon_geojson: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Execute or resume the historical bootstrap.
 
@@ -194,6 +203,8 @@ class ArchiveBootstrapService:
                     "plot_id": plot_id,
                     "total_events_committed": checkpoint.total_events_committed,
                     "total_scenes_discovered": checkpoint.total_scenes_discovered,
+                    "total_gaps_recorded": checkpoint.total_gaps_recorded,
+                    "gap_windows": checkpoint.gap_windows,
                     "last_committed_event_id": checkpoint.last_committed_event_id,
                     "checkpoint": checkpoint.to_dict(),
                 }
@@ -234,28 +245,34 @@ class ArchiveBootstrapService:
 
                 checkpoint.total_scenes_discovered += len(scenes)
                 events_in_win = 0
+                is_gap = len(scenes) == 0
 
-                # Reconstruct events chronologically
-                sorted_scenes = sorted(
-                    scenes,
-                    key=lambda s: _parse_utc_iso(
-                        s.get("acquisition_time") or s.get("observation_time") or win_start
-                    ),
-                )
-
-                for scene in sorted_scenes:
-                    event_id = self._commit_scene_to_worldline(
-                        plot_id=plot_id,
-                        geometry_hash=geometry_hash,
-                        tenant_id=tenant_id,
-                        namespace=namespace,
-                        scene=scene,
-                        parent_event_id=checkpoint.last_committed_event_id,
+                if is_gap:
+                    checkpoint.total_gaps_recorded += 1
+                    checkpoint.gap_windows.append(idx)
+                    logger.info("Window %d recorded as historical evidence gap (no observations)", idx)
+                else:
+                    # Reconstruct events chronologically
+                    sorted_scenes = sorted(
+                        scenes,
+                        key=lambda s: _parse_utc_iso(
+                            s.get("acquisition_time") or s.get("observation_time") or win_start
+                        ),
                     )
-                    if event_id:
-                        checkpoint.last_committed_event_id = event_id
-                        checkpoint.total_events_committed += 1
-                        events_in_win += 1
+
+                    for scene in sorted_scenes:
+                        event_id = self._commit_scene_to_worldline(
+                            plot_id=plot_id,
+                            geometry_hash=geometry_hash,
+                            tenant_id=tenant_id,
+                            namespace=namespace,
+                            scene=scene,
+                            parent_event_id=checkpoint.last_committed_event_id,
+                        )
+                        if event_id:
+                            checkpoint.last_committed_event_id = event_id
+                            checkpoint.total_events_committed += 1
+                            events_in_win += 1
 
                 # Record completed window
                 win_record = BootstrapWindowRecord(
@@ -265,6 +282,7 @@ class ArchiveBootstrapService:
                     scenes_discovered=len(scenes),
                     events_committed=events_in_win,
                     completed_at=datetime.now(timezone.utc).isoformat(),
+                    gap_detected=is_gap,
                 )
                 checkpoint.completed_windows.append(asdict(win_record))
                 checkpoint.current_cursor = win_end
@@ -328,21 +346,37 @@ class ArchiveBootstrapService:
         if not acq_time:
             return None
 
-        # Build payload with full provenance and indices
-        payload = {
-            "archive_posterior": {
-                "geometry_hash": geometry_hash,
-                "scene_id": scene.get("scene_id", f"scene_{acq_time}"),
-                "source": scene.get("source", "sentinel2"),
-                "product_level": scene.get("product_level", "L2A"),
-                "cloud_score": scene.get("cloud_score", 0.0),
-                "quality_score": scene.get("quality_score", 1.0),
-                "metrics": scene.get("metrics", {}),
-                "valid_pixel_fraction": scene.get("valid_pixel_fraction", 1.0),
-                "raw_resolution_m": scene.get("resolution_m", 10.0),
-                "source_content_hash": scene.get("source_content_hash", "hash_mock"),
-            }
+        # Build payload with full provenance and indices consistent with ASMAE state model
+        archive_posterior = {
+            "geometry_hash": geometry_hash,
+            "scene_id": scene.get("scene_id", f"scene_{acq_time}"),
+            "source": scene.get("source", "sentinel2"),
+            "product_level": scene.get("product_level", "L2A"),
+            "cloud_score": scene.get("cloud_score", 0.0),
+            "quality_score": scene.get("quality_score", 1.0),
+            "metrics": scene.get("metrics", {}),
+            "valid_pixel_fraction": scene.get("valid_pixel_fraction", 1.0),
+            "raw_resolution_m": scene.get("resolution_m", 10.0),
+            "source_content_hash": scene.get("source_content_hash", "hash_mock"),
+            "publication_authority": scene.get("publication_authority", "DIAGNOSTIC_ONLY"),
+            "claims_numerical_authority": False,
+            "supported_layers": scene.get("supported_layers", ["canopy_vigor", "relative_wetness"]),
+            "unsupported_layers": scene.get(
+                "unsupported_layers",
+                [{"layer": "surface_temperature", "reason": "thermal_observation_unavailable"}],
+            ),
+            "effective_resolution": scene.get("effective_resolution", "10m native satellite"),
+            "calibration_status": scene.get("calibration_status", "uncalibrated_diagnostic"),
+            "can_render_pixels": scene.get("can_render_pixels", bool(scene.get("values") is not None)),
         }
+        if "biophysical_state" in scene:
+            archive_posterior["biophysical_state"] = scene["biophysical_state"]
+        elif "posterior" in scene:
+            archive_posterior["biophysical_state"] = scene["posterior"]
+        elif "metrics" in scene:
+            archive_posterior["biophysical_state"] = scene["metrics"]
+
+        payload = {"archive_posterior": archive_posterior}
 
         parents = [parent_event_id] if parent_event_id else []
 

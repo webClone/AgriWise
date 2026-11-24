@@ -36,12 +36,17 @@ from rasterio.transform import from_origin
 from services.agribrain.layer0.archive.archive_fetcher import ArchiveFetcher, load_raster_data, load_spatial_raster
 from services.agribrain.layer0.archive.archive_types import ArchiveSearchResult
 from services.agribrain.layer0.archive.scene_manifest import HistoricalSceneRecord
+from services.agribrain.layer0.providers.asmae_scene_fetcher import (
+    fetch_asmae_s2_scene_stack,
+    fetch_asmae_s1_scene_stack,
+)
 from services.agribrain.layer05_asmae.history.archive_bootstrap_service import (
     ArchiveBootstrapService,
     MISSION_START_DATE,
 )
 from services.agribrain.layer05_asmae.history.historical_stack_builder import HistoricalStackBuilder
 from services.agribrain.layer05_asmae.plot_snapshot_store import (
+    compute_surface_inventory_hash,
     evaluate_snapshot_admission,
     load_latest_plot_snapshot,
     publish_canonical_plot_snapshot,
@@ -536,59 +541,133 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
         """End-to-end assimilation of genuine Copernicus S2/S1 scenes and weather for Plot A (afroun)."""
         from services.agribrain.app.main import api_v2_canonical_plot_snapshot
 
-        # 1. Formulate authentic provider scene records for Plot A
-        s2_scene_id = "S2A_MSIL2A_20260902T102701_N0512_R108_T31SDA_20260902T185409"
-        s1_scene_id = "S1C_IW_GRDH_1SDV_20260906T174433_20260906T174458_009330_0128D5_DCDB_COG"
-        weather_start = "2026-08-25"
+        # 1. Fetch real Copernicus Sentinel-2 and Sentinel-1 stacks
+        date_range = ("2026-08-30", "2026-09-08")
         evidence_cutoff = "2026-09-08T12:00:00+00:00"
+        weather_start = "2026-08-25"
 
-        # Commit real S2 observation event into worldline
+        s2_scenes = fetch_asmae_s2_scene_stack(self.plot_id, "diag_afroun", date_range, {})
+        s1_scenes = fetch_asmae_s1_scene_stack(self.plot_id, "diag_afroun", date_range, {})
+        self.assertGreater(len(s2_scenes), 0, "Real Sentinel-2 scenes must be present for plot")
+        self.assertGreater(len(s1_scenes), 0, "Real Sentinel-1 scenes must be present for plot")
+
+        # 2. Extract genuine scene pixels, CRS, transform and validity masks
+        primary_s2 = s2_scenes[0]
+        b4_path = primary_s2.band_refs["B04"]
+        b8_path = primary_s2.band_refs["B08"]
+        scl_path = primary_s2.mask_refs.get("SCL") or primary_s2.band_refs.get("SCL")
+
+        b4_data = np.load(b4_path)["data"].astype(np.float64)
+        b8_data = np.load(b8_path)["data"].astype(np.float64)
+
+        scl_mask = None
+        if scl_path and os.path.exists(scl_path):
+            scl_data = np.load(scl_path)["data"]
+            scl_mask = ~np.isin(scl_data, [0, 1, 3, 8, 9, 10, 11])
+
+        # Authentic calibrated NDVI (Canopy Vigor)
+        denom = np.maximum(b8_data + b4_data, 1e-6)
+        raw_ndvi = (b8_data - b4_data) / denom
+        if scl_mask is not None:
+            raw_ndvi = np.where(scl_mask, raw_ndvi, np.nan)
+
+        ndvi_clean = np.where(np.isnan(raw_ndvi), 0.0, raw_ndvi)
+        ndvi_min = float(np.nanmin(raw_ndvi))
+        ndvi_max = float(np.nanmax(raw_ndvi))
+        ndvi_mean = float(np.nanmean(raw_ndvi))
+        ndvi_std = float(np.nanstd(raw_ndvi))
+
+        vigor_uncertainty = np.full_like(raw_ndvi, 0.035, dtype=np.float64)
+
+        # Primary S1 SAR scene
+        primary_s1 = s1_scenes[0]
+        vv_path = primary_s1.band_refs["VV"]
+        vh_path = primary_s1.band_refs["VH"]
+        vv_data = np.load(vv_path)["data"].astype(np.float64)
+        vh_data = np.load(vh_path)["data"].astype(np.float64)
+
+        # SAR Relative Wetness estimation
+        vv_db = 10.0 * np.log10(np.maximum(vv_data, 1e-6))
+        wetness_raw = np.clip((vv_db - (-18.0)) / ((-6.0) - (-18.0)), 0.0, 1.0)
+        wetness_min = float(np.nanmin(wetness_raw))
+        wetness_max = float(np.nanmax(wetness_raw))
+        wetness_mean = float(np.nanmean(wetness_raw))
+        wetness_std = float(np.nanstd(wetness_raw))
+        wetness_uncertainty = np.full_like(wetness_raw, 0.045, dtype=np.float64)
+
+        h, w = raw_ndvi.shape
+        self.assertEqual((h, w), (34, 79), "Plot A native raster shape must be exactly 34x79")
+
+        bounds = [2.655457, 36.507194, 2.663331, 36.510609]
+        transform = list(primary_s2.transform)
+        crs = primary_s2.crs
+
+        vigor_grid_list = np.round(ndvi_clean, 4).tolist()
+        vigor_bytes = json.dumps(vigor_grid_list, separators=(",", ":")).encode("utf-8")
+        vigor_hash = f"sha256:{hashlib.sha256(vigor_bytes).hexdigest()}"
+
+        wetness_grid_list = np.round(wetness_raw, 4).tolist()
+        wetness_bytes = json.dumps(wetness_grid_list, separators=(",", ":")).encode("utf-8")
+        wetness_hash = f"sha256:{hashlib.sha256(wetness_bytes).hexdigest()}"
+
+        # 3. Commit genuine events to Worldline
         s2_event = self.worldline.commit_event(
             plot_id=self.plot_id,
             event_type="OBSERVATION_RAW",
             payload={
                 "source": "sentinel2",
-                "scene_id": s2_scene_id,
-                "tile": "T31SDA",
-                "cloud_fraction": 0.02,
-                "native_resolution_m": 10.0,
-                "mean_ndvi": 0.742,
+                "scene_id": primary_s2.scene_id,
+                "crs": crs,
+                "width": w,
+                "height": h,
+                "mean_ndvi": ndvi_mean,
+                "source_reality": "provider_observation",
+                "provider_acquisition_receipt": {
+                    "b04_hash": hashlib.sha256(b4_data.tobytes()).hexdigest(),
+                    "b08_hash": hashlib.sha256(b8_data.tobytes()).hexdigest(),
+                    "file_path": b4_path,
+                },
             },
             geometry_hash=PLOT_A_GEOMETRY_HASH,
-            effective_at="2026-09-02T10:27:01+00:00",
-            observation_or_valid_time="2026-09-02T10:27:01+00:00",
+            effective_at=primary_s2.acquisition_datetime.isoformat(),
+            observation_or_valid_time=primary_s2.acquisition_datetime.isoformat(),
             authority="copernicus:sentinel2:l2a",
             tenant_id=self.tenant_id,
             namespace=self.namespace,
         )
 
-        # Commit real S1 observation event into worldline
         s1_event = self.worldline.commit_event(
             plot_id=self.plot_id,
             event_type="OBSERVATION_RAW",
             payload={
                 "source": "sentinel1",
-                "scene_id": s1_scene_id,
-                "polarization": "VV+VH",
-                "orbit": "descending",
-                "native_resolution_m": 10.0,
-                "mean_vv_db": -11.4,
+                "scene_id": primary_s1.scene_id,
+                "crs": crs,
+                "width": w,
+                "height": h,
+                "mean_vv_db": float(np.nanmean(vv_db)),
+                "source_reality": "provider_observation",
+                "provider_acquisition_receipt": {
+                    "vv_hash": hashlib.sha256(vv_data.tobytes()).hexdigest(),
+                    "vh_hash": hashlib.sha256(vh_data.tobytes()).hexdigest(),
+                    "file_path": vv_path,
+                },
             },
             geometry_hash=PLOT_A_GEOMETRY_HASH,
-            effective_at="2026-09-06T17:44:33+00:00",
-            observation_or_valid_time="2026-09-06T17:44:33+00:00",
-            authority="copernicus:sentinel1:grd",
+            effective_at=primary_s1.acquisition_datetime.isoformat(),
+            observation_or_valid_time=primary_s1.acquisition_datetime.isoformat(),
+            authority="copernicus:sentinel1:iw_grd",
             tenant_id=self.tenant_id,
             namespace=self.namespace,
         )
 
-        # Commit real Weather slice event into worldline
         weather_event = self.worldline.commit_event(
             plot_id=self.plot_id,
             event_type="WEATHER_RECORD",
             payload={
-                "source": "era5_land",
+                "source": "ecmwf_era5_land",
                 "daily_count": 14,
+                "temporal_range": [weather_start, "2026-09-08"],
                 "temp_mean_c": 24.8,
                 "rain_sum_mm": 0.0,
                 "et0_sum_mm": 52.4,
@@ -601,86 +680,191 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
             namespace=self.namespace,
         )
 
-        # 2. Commit validated ASMAE biophysical posterior referencing the genuine parent events
-        asmae_posterior_event = self.worldline.commit_event(
+        posterior_event = self.worldline.commit_event(
             plot_id=self.plot_id,
             event_type="ARCHIVE_POSTERIOR_VALIDATED",
             payload={
-                "model_version": "asmae_v0.5.0",
-                "posterior": {
-                    "canopy_photosynthetic_activity": {"mean": 0.76, "std": 0.04},
-                    "vigor": 0.74,
-                    "lai": 2.65,
-                    "chlorophyll": 38.2,
+                "model_version": "asmae_diagnostic_v1",
+                "publication_authority": "DIAGNOSTIC_ONLY",
+                "claims_numerical_authority": False,
+                "supported_layers": ["canopy_vigor", "relative_wetness"],
+                "unsupported_layers": [
+                    {"layer": "surface_temperature", "reason": "thermal_observation_unavailable"}
+                ],
+                "posterior_states": {
+                    "canopy_vigor": {"mean": ndvi_mean, "std": ndvi_std},
+                    "relative_wetness": {"mean": wetness_mean, "std": wetness_std},
                 },
-                "spatial_support": "plot_level_only",
-                "can_render_pixels": False,  # Truthfulness gate: scalar-only estimate, rasters withheld
+                "can_render_pixels": True,
+                "raster_hashes": {
+                    "canopy_vigor": vigor_hash,
+                    "relative_wetness": wetness_hash,
+                },
             },
             geometry_hash=PLOT_A_GEOMETRY_HASH,
             effective_at=evidence_cutoff,
             observation_or_valid_time=evidence_cutoff,
             parent_event_ids=[s2_event["event_id"], s1_event["event_id"], weather_event["event_id"]],
-            authority="asmae:biophysical_engine",
+            authority="asmae:diagnostic_spatial_engine",
             tenant_id=self.tenant_id,
             namespace=self.namespace,
         )
 
-        # 3. Publish canonical plot snapshot with non-null authoritative evidence cutoff
-        snap_id = f"L10-SNAP-PLOT-A-{int(datetime.now(timezone.utc).timestamp()*1000)}"
+        # 4. Construct Bitemporal Replay Receipt
+        evidence_events = [s2_event, s1_event, weather_event, posterior_event]
+        digest_hasher = hashlib.sha256()
+        for ev in evidence_events:
+            digest_hasher.update(str(ev["event_id"]).encode("utf-8"))
+        evidence_digest = f"sha256:{digest_hasher.hexdigest()}"
+
+        replay_receipt = {
+            "contract_version": "canonical_bitemporal_replay_receipt_v1",
+            "replay_mode": "bitemporal_deterministic_v1",
+            "evidence_set_digest": evidence_digest,
+            "observation_valid_time": evidence_cutoff,
+            "knowledge_cutoff_time": datetime.now(timezone.utc).isoformat(),
+        }
+
+        # 5. Build Layer 10 Frontend Surfaces
+        snap_id = f"L10-SNAP-AFROUN-{int(datetime.now(timezone.utc).timestamp()*1000)}"
+
+        canopy_surface = {
+            "surface_id": f"surface-canopy-vigor-{snap_id}",
+            "surface_type": "canopy_vigor",
+            "type": "canopy_vigor",
+            "semantic_type": "canopy_vigor",
+            "resolution_m": 10.0,
+            "width": w,
+            "height": h,
+            "bounds": bounds,
+            "crs": crs,
+            "transform": transform,
+            "values": vigor_grid_list,
+            "uncertainty_values": np.round(vigor_uncertainty, 4).tolist(),
+            "stats": {"min": ndvi_min, "max": ndvi_max, "mean": ndvi_mean, "std": ndvi_std},
+            "content_hash": vigor_hash,
+            "source_id": primary_s2.scene_id,
+            "source_reality": "provider_observation",
+            "real_provider_product": True,
+            "diagnostic_only": True,
+            "unit": "NDVI",
+        }
+
+        wetness_surface = {
+            "surface_id": f"surface-relative-wetness-{snap_id}",
+            "surface_type": "relative_wetness",
+            "type": "relative_wetness",
+            "semantic_type": "relative_wetness",
+            "resolution_m": 10.0,
+            "width": w,
+            "height": h,
+            "bounds": bounds,
+            "crs": crs,
+            "transform": transform,
+            "values": wetness_grid_list,
+            "uncertainty_values": np.round(wetness_uncertainty, 4).tolist(),
+            "stats": {"min": wetness_min, "max": wetness_max, "mean": wetness_mean, "std": wetness_std},
+            "content_hash": wetness_hash,
+            "source_id": primary_s1.scene_id,
+            "source_reality": "provider_observation",
+            "real_provider_product": True,
+            "diagnostic_only": True,
+            "unit": "linear_backscatter",
+        }
+
+        surfaces = [canopy_surface, wetness_surface]
+        inventory_hash = compute_surface_inventory_hash(surfaces)
+
         frontend_payload = {
             "version": SURFACES_SCHEMA_VERSION,
             "surface_schema_version": SURFACES_SCHEMA_VERSION,
             "intelligence_snapshot_id": snap_id,
+            "snapshot_id": snap_id,
+            "snapshotId": snap_id,
             "publication_id": f"pub-{snap_id}",
             "publication_run_id": f"run-{snap_id}",
             "run_id": f"run-{snap_id}",
+            "runId": f"run-{snap_id}",
             "pipeline_state": "terminal_layer10_published",
             "publication_status": "VALID_NORMAL",
             "declared_publication_status": "VALID_NORMAL",
+            "publication_authority": "DIAGNOSTIC_ONLY",
+            "claims_numerical_authority": False,
             "render_authorization_version": RENDER_AUTHORIZATION_VERSION,
-            "render_authorizations": {"canopy": {"authorized": True}},
-            "asmae_proof": {
-                "sentinel_proof": {"proxy_scene_count": 0, "s1_real_scene_count": 1, "s2_real_scene_count": 1},
-                "weather_proof": {"daily_count": 14, "status": "verified"},
+            "render_authorizations": {
+                "canopy": {"authorized": True},
+                "soil": {"authorized": True},
             },
             "mode_display_state": {"mode": "scientific"},
             "source_policy_display_state": {"policy": "standard"},
             "core_asmae_evidence_state": {"status": "nominal"},
             "publication_surface_state": {"status": "published"},
-            "surfaces": [{
-                "surface_id": "surface-canopy-vigor",
-                "surface_type": "canopy_vigor",
-                "content_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-            }],
+            "surface_inventory_hash": inventory_hash,
+            "surfaces": surfaces,
+            "supported_layers": ["canopy_vigor", "relative_wetness"],
+            "unsupported_layers": [
+                {"layer": "surface_temperature", "reason": "thermal_observation_unavailable"}
+            ],
+            "raster_availability": {
+                "supported_layers": ["canopy_vigor", "relative_wetness"],
+                "unsupported_layers": [
+                    {"layer": "surface_temperature", "reason": "thermal_observation_unavailable"}
+                ],
+                "supported_count": 2,
+                "can_render_pixels": True,
+            },
+            "canRenderPixels": True,
+            "effective_resolution": "10m native satellite",
+            "calibration_status": "uncalibrated_diagnostic",
+            "evidence_acquisition_date": "September 2026",
             "evidence_cutoff_at": evidence_cutoff,
             "observation_window": {"start": weather_start, "end": "2026-09-08"},
+            "published_at": datetime.now(timezone.utc).isoformat(),
+            "asmae_proof": {
+                "proof_id": f"proof-{snap_id}",
+                "status": "valid",
+                "publication_authority": "DIAGNOSTIC_ONLY",
+                "sentinel_proof": {
+                    "s2_real_scene_count": len(s2_scenes),
+                    "s1_real_scene_count": len(s1_scenes),
+                    "proxy_scene_count": 0,
+                },
+                "weather_proof": {
+                    "daily_count": 14,
+                    "status": "verified",
+                },
+                "resolution_proof": {
+                    "effective_resolution_m": 10.0,
+                    "1m_field_approved": False,
+                },
+            },
             "scientific_evidence_lineage": {
                 "crop_posterior_lineage": "lineage-afroun-mitidja-v1",
-                "crop_worldline_event_id": asmae_posterior_event["event_id"],
+                "crop_worldline_event_id": posterior_event["event_id"],
                 "phenology_worldline_event_id": s2_event["event_id"],
             },
             "canopy_photosynthetic_activity": {
-                "mean": 0.76,
-                "std": 0.04,
-                "scalar_only": True,
-                "canRenderPixels": False,
+                "mean": ndvi_mean,
+                "std": ndvi_std,
+                "scalar_only": False,
+                "canRenderPixels": True,
             },
         }
 
         asmae_result = {
             "snapshot_id": snap_id,
             "content_hash": f"content_{snap_id}",
-            "bitemporal_replay_receipt": {
-                "contract_version": "canonical_bitemporal_replay_receipt_v1",
-                "replay_mode": "bitemporal_deterministic_v1",
-                "observation_valid_time": evidence_cutoff,
-                "knowledge_cutoff_time": evidence_cutoff,
-                "evidence_set_digest": "sha256:pilot_a_evidence_digest_validated",
-            },
+            "publication_authority": "DIAGNOSTIC_ONLY",
+            "claims_numerical_authority": False,
+            "bitemporal_replay_receipt": replay_receipt,
             "crop_posterior_lineage": "lineage-afroun-mitidja-v1",
-            "crop_worldline_event_id": asmae_posterior_event["event_id"],
+            "crop_worldline_event_id": posterior_event["event_id"],
             "phenology_worldline_event_id": s2_event["event_id"],
-            "canRenderPixels": False,
+            "canRenderPixels": True,
+            "supported_layers": ["canopy_vigor", "relative_wetness"],
+            "unsupported_layers": [
+                {"layer": "surface_temperature", "reason": "thermal_observation_unavailable"}
+            ],
         }
 
         pub_record = publish_canonical_plot_snapshot(
@@ -694,11 +878,12 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
             job_id=f"job-gate-b-{int(datetime.now(timezone.utc).timestamp()*1000)}",
             manifest_hash="manifest-gate-b-07",
             snapshot_kind="layer10_terminal",
+            publication_authority="DIAGNOSTIC_ONLY",
         )
 
         self.assertIsNotNone(pub_record)
 
-        # 4. Verify API admission via api_v2_canonical_plot_snapshot
+        # 6. Verify API admission via api_v2_canonical_plot_snapshot
         api_res = api_v2_canonical_plot_snapshot(self.plot_id, namespace=self.plot_namespace)
         if hasattr(api_res, "body"):
             data = json.loads(api_res.body)
@@ -707,14 +892,42 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
 
         self.assertTrue(data.get("available"))
         self.assertEqual(data.get("snapshot_id"), snap_id)
+        self.assertEqual(data.get("publication_authority"), "DIAGNOSTIC_ONLY")
         self.assertEqual(data.get("evidence_cutoff_at"), evidence_cutoff)
         self.assertTrue(data.get("validation", {}).get("temporalBindingValid"))
         self.assertTrue(data.get("validation", {}).get("bindingValid"))
         self.assertTrue(data.get("validation", {}).get("replayReceiptValid"))
+
         frontend_data = data.get("frontend_payload", {})
-        self.assertEqual(frontend_data.get("asmae_proof", {}).get("sentinel_proof", {}).get("s2_real_scene_count"), 1)
-        self.assertEqual(frontend_data.get("asmae_proof", {}).get("sentinel_proof", {}).get("s1_real_scene_count"), 1)
-        self.assertEqual(frontend_data.get("asmae_proof", {}).get("weather_proof", {}).get("daily_count"), 14)
+        self.assertEqual(frontend_data.get("publication_authority"), "DIAGNOSTIC_ONLY")
+        self.assertEqual(frontend_data.get("effective_resolution"), "10m native satellite")
+        self.assertEqual(frontend_data.get("calibration_status"), "uncalibrated_diagnostic")
+        self.assertEqual(frontend_data.get("evidence_acquisition_date"), "September 2026")
+        self.assertTrue(frontend_data.get("canRenderPixels"))
+        self.assertEqual(frontend_data.get("supported_layers"), ["canopy_vigor", "relative_wetness"])
+        self.assertEqual(
+            frontend_data.get("unsupported_layers"),
+            [{"layer": "surface_temperature", "reason": "thermal_observation_unavailable"}],
+        )
+
+        surfaces_ret = frontend_data.get("surfaces", [])
+        self.assertEqual(len(surfaces_ret), 2)
+        # Real 2D raster values (34, 79)
+        for surf in surfaces_ret:
+            vals = surf.get("values")
+            self.assertIsNotNone(vals)
+            self.assertEqual(len(vals), 34)
+            self.assertEqual(len(vals[0]), 79)
+            self.assertIn("content_hash", surf)
+            self.assertTrue(surf["content_hash"].startswith("sha256:"))
+            self.assertIn("stats", surf)
+            self.assertGreater(surf["stats"]["max"], surf["stats"]["min"])
+
+        # Verify admission evaluation
+        eval_res = evaluate_snapshot_admission(data, self.plot_namespace)
+        self.assertTrue(eval_res.get("is_valid"))
+        self.assertEqual(eval_res.get("status"), "admitted")
+        self.assertEqual(eval_res.get("invalid_integrity_flags"), [])
 
     # =========================================================================
     # GATE-B-08: Incremental Subsequent Assimilation Without Repetition
@@ -849,14 +1062,41 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
             namespace=self.namespace,
         )
 
+        # Extract genuine S2 and S1 pixel arrays for authentic 34x79 rasters
+        s2_scenes = fetch_asmae_s2_scene_stack(self.plot_id, "manifest_s2", ("2026-08-30", "2026-09-08"), {})
+        s1_scenes = fetch_asmae_s1_scene_stack(self.plot_id, "manifest_s1", ("2026-08-30", "2026-09-08"), {})
+
+        b4_data = np.load(s2_scenes[0].band_refs["B04"])["data"].astype(np.float64)
+        b8_data = np.load(s2_scenes[0].band_refs["B08"])["data"].astype(np.float64)
+        denom = np.maximum(b8_data + b4_data, 1e-6)
+        ndvi_arr = np.clip((b8_data - b4_data) / denom, 0.0, 1.0)
+        h, w = ndvi_arr.shape
+        self.assertEqual((h, w), (34, 79), "Native raster shape must be exactly 34x79")
+
+        vv_data = np.load(s1_scenes[0].band_refs["VV"])["data"].astype(np.float64)
+        vv_db = 10.0 * np.log10(np.maximum(vv_data, 1e-6))
+        wetness_arr = np.clip((vv_db - (-18.0)) / ((-6.0) - (-18.0)), 0.0, 1.0)
+
+        vigor_grid_list = np.round(ndvi_arr, 4).tolist()
+        wetness_grid_list = np.round(wetness_arr, 4).tolist()
+        vigor_hash = f"sha256:{hashlib.sha256(json.dumps(vigor_grid_list, separators=(',', ':')).encode('utf-8')).hexdigest()}"
+        wetness_hash = f"sha256:{hashlib.sha256(json.dumps(wetness_grid_list, separators=(',', ':')).encode('utf-8')).hexdigest()}"
+
         # Commit posterior referencing the genuine S2 observation
         post_ev = self.worldline.commit_event(
             plot_id=self.plot_id,
             event_type="ARCHIVE_POSTERIOR_VALIDATED",
             payload={
-                "model_version": "asmae_v0.5.0",
-                "canopy_photosynthetic_activity": {"mean": 0.76, "std": 0.04, "scalar_only": True},
-                "can_render_pixels": False,
+                "model_version": "asmae_diagnostic_v1",
+                "publication_authority": "DIAGNOSTIC_ONLY",
+                "claims_numerical_authority": False,
+                "supported_layers": ["canopy_vigor", "relative_wetness"],
+                "unsupported_layers": [
+                    {"layer": "surface_temperature", "reason": "thermal_observation_unavailable"}
+                ],
+                "canopy_photosynthetic_activity": {"mean": float(np.mean(ndvi_arr)), "std": float(np.std(ndvi_arr))},
+                "can_render_pixels": True,
+                "raster_hashes": {"canopy_vigor": vigor_hash, "relative_wetness": wetness_hash},
             },
             geometry_hash=PLOT_A_GEOMETRY_HASH,
             effective_at=evidence_cutoff,
@@ -867,42 +1107,109 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
             namespace=self.namespace,
         )
 
-        # Publish snapshot node
+        # Publish snapshot node with authentic rasters and strict physical layer separation
         snap_id = f"L10-SNAP-MANIFEST-{int(datetime.now(timezone.utc).timestamp()*1000)}"
+
+        canopy_surface = {
+            "surface_id": f"surface-canopy-vigor-{snap_id}",
+            "surface_type": "canopy_vigor",
+            "type": "canopy_vigor",
+            "semantic_type": "canopy_vigor",
+            "resolution_m": 10.0,
+            "width": w,
+            "height": h,
+            "bounds": [2.655457, 36.507194, 2.663331, 36.510609],
+            "crs": meta["crs"],
+            "transform": meta["transform"],
+            "values": vigor_grid_list,
+            "uncertainty_values": np.full_like(ndvi_arr, 0.035).tolist(),
+            "stats": {"min": float(np.min(ndvi_arr)), "max": float(np.max(ndvi_arr)), "mean": float(np.mean(ndvi_arr)), "std": float(np.std(ndvi_arr))},
+            "content_hash": vigor_hash,
+            "source_id": meta["provider_product_id"],
+            "source_reality": "provider_observation",
+            "real_provider_product": True,
+            "diagnostic_only": True,
+            "unit": "NDVI",
+        }
+
+        wetness_surface = {
+            "surface_id": f"surface-relative-wetness-{snap_id}",
+            "surface_type": "relative_wetness",
+            "type": "relative_wetness",
+            "semantic_type": "relative_wetness",
+            "resolution_m": 10.0,
+            "width": w,
+            "height": h,
+            "bounds": [2.655457, 36.507194, 2.663331, 36.510609],
+            "crs": meta["crs"],
+            "transform": meta["transform"],
+            "values": wetness_grid_list,
+            "uncertainty_values": np.full_like(wetness_arr, 0.045).tolist(),
+            "stats": {"min": float(np.min(wetness_arr)), "max": float(np.max(wetness_arr)), "mean": float(np.mean(wetness_arr)), "std": float(np.std(wetness_arr))},
+            "content_hash": wetness_hash,
+            "source_id": "S1C_IW_GRDH_1SDV_20260906T174433_20260906T174458_009330_0128D5_DCDB_COG.SAFE",
+            "source_reality": "provider_observation",
+            "real_provider_product": True,
+            "diagnostic_only": True,
+            "unit": "linear_backscatter",
+        }
+
+        surfaces = [canopy_surface, wetness_surface]
+        inventory_hash = compute_surface_inventory_hash(surfaces)
+
         frontend_payload = {
             "version": SURFACES_SCHEMA_VERSION,
             "surface_schema_version": SURFACES_SCHEMA_VERSION,
             "intelligence_snapshot_id": snap_id,
+            "snapshot_id": snap_id,
+            "snapshotId": snap_id,
             "publication_id": f"pub-{snap_id}",
             "publication_run_id": f"run-{snap_id}",
             "run_id": f"run-{snap_id}",
+            "runId": f"run-{snap_id}",
             "pipeline_state": "terminal_layer10_published",
             "publication_status": "VALID_NORMAL",
             "declared_publication_status": "VALID_NORMAL",
+            "publication_authority": "DIAGNOSTIC_ONLY",
+            "claims_numerical_authority": False,
             "render_authorization_version": RENDER_AUTHORIZATION_VERSION,
-            "render_authorizations": {"canopy": {"authorized": True}},
-            "asmae_proof": {"proof_id": f"proof-{snap_id}", "status": "valid"},
+            "render_authorizations": {"canopy": {"authorized": True}, "soil": {"authorized": True}},
+            "asmae_proof": {"proof_id": f"proof-{snap_id}", "status": "valid", "publication_authority": "DIAGNOSTIC_ONLY"},
             "mode_display_state": {"mode": "scientific"},
             "source_policy_display_state": {"policy": "standard"},
             "core_asmae_evidence_state": {"status": "nominal"},
             "publication_surface_state": {"status": "published"},
-            "surfaces": [{
-                "surface_id": "surface-canopy-vigor",
-                "surface_type": "canopy_vigor",
-                "content_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
-            }],
+            "surface_inventory_hash": inventory_hash,
+            "surfaces": surfaces,
+            "supported_layers": ["canopy_vigor", "relative_wetness"],
+            "unsupported_layers": [
+                {"layer": "surface_temperature", "reason": "thermal_observation_unavailable"}
+            ],
+            "raster_availability": {
+                "supported_layers": ["canopy_vigor", "relative_wetness"],
+                "unsupported_layers": [
+                    {"layer": "surface_temperature", "reason": "thermal_observation_unavailable"}
+                ],
+                "supported_count": 2,
+                "can_render_pixels": True,
+            },
+            "canRenderPixels": True,
+            "effective_resolution": "10m native satellite",
+            "calibration_status": "uncalibrated_diagnostic",
+            "evidence_acquisition_date": "September 2026",
             "evidence_cutoff_at": evidence_cutoff,
             "observation_window": {"start": "2026-08-25", "end": "2026-09-08"},
+            "published_at": datetime.now(timezone.utc).isoformat(),
             "scientific_evidence_lineage": {
                 "crop_posterior_lineage": "lineage-afroun-mitidja-v1",
                 "crop_worldline_event_id": post_ev["event_id"],
                 "phenology_worldline_event_id": ev_s2["event_id"],
             },
             "canopy_photosynthetic_activity": {
-                "mean": 0.76,
-                "std": 0.04,
-                "scalar_only": True,
-                "canRenderPixels": False,
+                "mean": float(np.mean(ndvi_arr)),
+                "std": float(np.std(ndvi_arr)),
+                "scalar_only": False,
+                "canRenderPixels": True,
             },
         }
 
@@ -915,6 +1222,8 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
             asmae_result={
                 "snapshot_id": snap_id,
                 "content_hash": f"content_{snap_id}",
+                "publication_authority": "DIAGNOSTIC_ONLY",
+                "claims_numerical_authority": False,
                 "bitemporal_replay_receipt": {
                     "contract_version": "canonical_bitemporal_replay_receipt_v1",
                     "observation_valid_time": evidence_cutoff,
@@ -924,12 +1233,17 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
                 "crop_posterior_lineage": "lineage-afroun-mitidja-v1",
                 "crop_worldline_event_id": post_ev["event_id"],
                 "phenology_worldline_event_id": ev_s2["event_id"],
-                "canRenderPixels": False,
+                "canRenderPixels": True,
+                "supported_layers": ["canopy_vigor", "relative_wetness"],
+                "unsupported_layers": [
+                    {"layer": "surface_temperature", "reason": "thermal_observation_unavailable"}
+                ],
             },
             frontend_payload=frontend_payload,
             job_id=f"job-manifest-{int(datetime.now(timezone.utc).timestamp()*1000)}",
             manifest_hash="manifest-hash-real-s2",
             snapshot_kind="layer10_terminal",
+            publication_authority="DIAGNOSTIC_ONLY",
         )
         self.assertIsNotNone(pub_rec)
 
@@ -948,13 +1262,33 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
 
         self.assertTrue(data.get("available"))
         self.assertEqual(data.get("snapshot_id"), snap_id)
+        self.assertEqual(data.get("publication_authority"), "DIAGNOSTIC_ONLY")
         self.assertEqual(data.get("evidence_cutoff_at"), evidence_cutoff)
         self.assertTrue(data.get("validation", {}).get("temporalBindingValid"))
         self.assertTrue(data.get("validation", {}).get("bindingValid"))
         self.assertTrue(data.get("validation", {}).get("nodeValid"))
 
+        frontend_data = data.get("frontend_payload", {})
+        self.assertEqual(frontend_data.get("publication_authority"), "DIAGNOSTIC_ONLY")
+        self.assertEqual(frontend_data.get("effective_resolution"), "10m native satellite")
+        self.assertEqual(frontend_data.get("calibration_status"), "uncalibrated_diagnostic")
+        self.assertEqual(frontend_data.get("evidence_acquisition_date"), "September 2026")
+        self.assertTrue(frontend_data.get("canRenderPixels"))
+        self.assertEqual(frontend_data.get("supported_layers"), ["canopy_vigor", "relative_wetness"])
+        self.assertEqual(
+            frontend_data.get("unsupported_layers"),
+            [{"layer": "surface_temperature", "reason": "thermal_observation_unavailable"}],
+        )
+
+        surfaces_ret = frontend_data.get("surfaces", [])
+        self.assertEqual(len(surfaces_ret), 2)
+        self.assertEqual(len(surfaces_ret[0]["values"]), 34)
+        self.assertEqual(len(surfaces_ret[0]["values"][0]), 79)
+        self.assertEqual(len(surfaces_ret[1]["values"]), 34)
+        self.assertEqual(len(surfaces_ret[1]["values"][0]), 79)
+
         # Verify admission evaluation predicate
-        eval_res = evaluate_snapshot_admission(data)
+        eval_res = evaluate_snapshot_admission(data, self.plot_namespace)
         self.assertTrue(eval_res.get("is_valid"))
         self.assertEqual(eval_res.get("invalid_integrity_flags"), [])
 

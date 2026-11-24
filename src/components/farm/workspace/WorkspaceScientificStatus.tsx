@@ -15,13 +15,19 @@ export default function WorkspaceScientificStatus() {
   const assessment = useParcelAssessment();
   const layer10 = useLayer10();
   const operational = usePlotTelemetry();
+  const rawPub = assessment.rawPublication || layer10.data;
   const snapshotId = assessment.assessment?.identity?.snapshotId
     ?? layer10.data?.publication_id ?? null;
   const isReady = assessment.status === "ready" && assessment.isApplicable && Boolean(layer10.data);
   const isHistorical = Boolean(assessment.assessment) && !assessment.isApplicable;
   const waiting = assessment.status === "loading"
     || Boolean(assessment.error && /pending|timeout|waiting|queued/i.test(assessment.error));
-  const label = isReady ? "Canonical publication loaded"
+
+  const pubAuth = rawPub?.publication_authority || rawPub?.publicationAuthority || "DIAGNOSTIC_ONLY";
+  const isDiagnostic = pubAuth === "DIAGNOSTIC_ONLY";
+
+  const label = isReady
+    ? (isDiagnostic ? "Admitted diagnostic publication" : "Canonical publication loaded")
     : isHistorical ? "Historical / scope mismatch"
     : waiting ? "Publication pending"
     : assessment.status === "invalid" ? "Publication validation rejected"
@@ -29,24 +35,55 @@ export default function WorkspaceScientificStatus() {
   const Icon = isReady ? CheckCircle2 : waiting ? Clock3 : CircleAlert;
   const level = isReady ? "ready" : waiting ? "pending" : "unavailable";
 
+  const acqDate = rawPub?.evidence_acquisition_date
+    || (rawPub?.evidence_cutoff_at
+        ? new Date(rawPub.evidence_cutoff_at).toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" })
+        : null);
+  const publishedAt = rawPub?.published_at || rawPub?.publishedAt || null;
+  const calibStatus = rawPub?.calibration_status || rawPub?.calibrationStatus || (isDiagnostic ? "uncalibrated_diagnostic" : "calibrated");
+  const effRes = rawPub?.effective_resolution || rawPub?.effectiveResolution || "10m native satellite";
+  const supportedLayers: string[] = rawPub?.supported_layers
+    || rawPub?.supportedLayers
+    || rawPub?.raster_availability?.supported_layers
+    || [];
+  const unsupportedLayers: Array<{ layer: string; reason: string }> = rawPub?.unsupported_layers
+    || rawPub?.unsupportedLayers
+    || rawPub?.raster_availability?.unsupported_layers
+    || [];
+
   return <div className="pw-p07-status" data-testid="p07-scientific-status" data-level={level}>
     <button type="button" className="pw-p07-status-toggle"
       aria-label={`Scientific and operational status: ${label}. Show details`}
       aria-expanded={expanded} aria-controls="pw-p07-scientific-detail"
       onClick={() => setExpanded(previous => !previous)}>
       <Icon size={15} aria-hidden="true"/>
-      <span className="pw-p07-status-label">{isReady ? "Publication available" : "Operational canvas"} · {label}</span>
+      <span className="pw-p07-status-label">{isReady ? (isDiagnostic ? "Diagnostic publication" : "Publication available") : "Operational canvas"} · {label}</span>
       <ChevronDown size={14} aria-hidden="true"/>
     </button>
     {expanded && <div className="pw-p07-status-detail" id="pw-p07-scientific-detail">
       <div className="pw-p07-status-row"><Icon size={16} aria-hidden="true"/>
-        <div><strong>{label}</strong><span>{snapshotId ? `Snapshot: ${snapshotId}` : "Snapshot not reported"}</span></div>
+        <div><strong>Publication Status</strong><span>{label} {snapshotId ? `(Snapshot: ${snapshotId})` : "· Snapshot not reported"}</span></div>
       </div>
-      {assessment.rawPublication?.evidence_cutoff_at && (
+      <div className="pw-p07-status-row"><Clock3 size={16} aria-hidden="true"/>
+        <div><strong>Evidence Acquisition</strong><span>{acqDate || "Unavailable"}</span></div>
+      </div>
+      {publishedAt && (
         <div className="pw-p07-status-row"><Clock3 size={16} aria-hidden="true"/>
-          <div><strong>Publication Cutoff</strong><span>{assessment.rawPublication.evidence_cutoff_at}</span></div>
+          <div><strong>Publication Timestamp</strong><span>{publishedAt}</span></div>
         </div>
       )}
+      <div className="pw-p07-status-row">
+        <div><strong>Scientific Authority</strong><span style={{ fontFamily: "monospace" }}>{pubAuth} {isDiagnostic ? "· Diagnostic only (Numerical authority withheld)" : "· Certified"}</span></div>
+      </div>
+      <div className="pw-p07-status-row">
+        <div><strong>Raster Availability</strong><span>{supportedLayers.length > 0 ? `${supportedLayers.length} supported (${supportedLayers.join(", ")})` : "No supported raster"} · Thermal withheld (unobserved)</span></div>
+      </div>
+      <div className="pw-p07-status-row">
+        <div><strong>Effective Resolution</strong><span>{effRes} · 1m field certification withheld</span></div>
+      </div>
+      <div className="pw-p07-status-row">
+        <div><strong>Calibration Status</strong><span>{calibStatus}</span></div>
+      </div>
       <div className="pw-p07-status-row"><Radio size={16} aria-hidden="true"/>
         <div><strong>Operational IoT · not scientific evidence</strong>
           <span>{operational.transportStatus} · {operational.stream.observations.length} unsealed observation(s)</span></div>
