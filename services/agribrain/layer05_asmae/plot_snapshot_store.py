@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 import time
 import uuid
@@ -29,6 +30,7 @@ PLOT_SNAPSHOT_CONTRACT_VERSION = "canonical_plot_snapshot_v1"
 logger = logging.getLogger(__name__)
 PLOT_SNAPSHOT_RECEIPT_CONTRACT_VERSION = "canonical_plot_snapshot_publication_receipt_v1"
 PLOT_PUBLICATION_CONTRACT_VERSION = "canonical_plot_frontend_publication_v1"
+_HEX64_REGEX = re.compile(r"^[0-9a-f]{64}$")
 PLOT_SNAPSHOT_ROOT = (
     Path(__file__).resolve().parents[1] / "artifacts" / "plot_snapshots"
 )
@@ -415,7 +417,16 @@ def validate_publication_commit_ledger(
         (is_valid, records, error_message)
     """
     commits_file = directory / "commits.jsonl"
+    head_file = directory / "head.json"
+    head = _read(head_file) if head_file.exists() else {}
+    has_post_ledger_head = bool(
+        head.get("commit_seq") is not None
+        or head.get("commit_hash")
+    )
+
     if not commits_file.exists():
+        if has_post_ledger_head:
+            return False, [], "Missing commit ledger: head contains committed ledger markers (explicit authorized recovery required)"
         return True, [], None
 
     try:
@@ -423,10 +434,12 @@ def validate_publication_commit_ledger(
     except OSError as exc:
         return False, [], f"Unreadable commits.jsonl: {exc}"
 
-    lines = content.splitlines()
-    if not lines:
+    if not content.strip():
+        if has_post_ledger_head:
+            return False, [], "Empty commit ledger: head contains committed ledger markers (explicit authorized recovery required)"
         return True, [], None
 
+    lines = content.splitlines()
     records: List[Dict[str, Any]] = []
     seen_entries = set()
     seen_commit_hashes = set()
@@ -469,21 +482,25 @@ def validate_publication_commit_ledger(
         expected_parent = records[-1]["commit_hash"] if records else ("0" * 64)
         if parent_hash != expected_parent:
             return False, [], f"Parent commit hash mismatch at line {line_idx}: expected {expected_parent}, got {parent_hash}"
+        if not bool(_HEX64_REGEX.fullmatch(str(parent_hash or ""))):
+            return False, [], f"Invalid parent_commit_hash at line {line_idx}: expected 64-char lowercase sha256 hex"
+
+        for hkey in ("node_hash", "frontend_publication_hash", "publication_receipt_hash"):
+            hval = rec.get(hkey)
+            if not hval or not isinstance(hval, str) or not bool(_HEX64_REGEX.fullmatch(hval)):
+                return False, [], f"Invalid {hkey} at line {line_idx}: expected 64-char lowercase sha256 hex"
 
         hashable_rec = {k: v for k, v in rec.items() if k != "commit_hash"}
         computed_hash = hashlib.sha256(_json_bytes(hashable_rec)).hexdigest()
         claimed_hash = rec.get("commit_hash")
-        if not claimed_hash or claimed_hash != computed_hash:
+        if not claimed_hash or not bool(_HEX64_REGEX.fullmatch(str(claimed_hash))):
+            return False, [], f"Invalid commit_hash at line {line_idx}: expected 64-char lowercase sha256 hex"
+        if claimed_hash != computed_hash:
             return False, [], f"Commit hash mismatch at line {line_idx}: computed {computed_hash}, claimed {claimed_hash}"
 
         if claimed_hash in seen_commit_hashes:
             return False, [], f"Duplicate commit_hash in commit ledger at line {line_idx}"
         seen_commit_hashes.add(claimed_hash)
-
-        for hkey in ("node_hash", "frontend_publication_hash", "publication_receipt_hash"):
-            hval = rec.get(hkey)
-            if not hval or not isinstance(hval, str) or len(hval) != 64:
-                return False, [], f"Invalid {hkey} at line {line_idx}: expected 64-char sha256 hex"
 
         records.append(rec)
 
@@ -497,7 +514,8 @@ def reconcile_publication_ledger_and_head(
     """Deterministically reconcile ledger commit tip with head.json under crash recovery.
 
     If a writer crashed after appending & fsyncing commits.jsonl but before updating head.json,
-    this function reconciles head.json to the validated ledger tip if all staged artifacts are intact.
+    this function reconciles head.json to the validated ledger tip if all staged artifacts are
+    cryptographically intact and scientifically admissible.
     """
     head_file = _head_path(ns)
     is_valid, records, _ = validate_publication_commit_ledger(directory)
@@ -530,7 +548,8 @@ def reconcile_publication_ledger_and_head(
             "surface_inventory_hash", "validation", "historical"
         )
     }
-    if hashlib.sha256(_json_bytes(hashable_node)).hexdigest() != tip["node_hash"]:
+    computed_node_hash = hashlib.sha256(_json_bytes(hashable_node)).hexdigest()
+    if computed_node_hash != tip["node_hash"]:
         return current_head if current_head else None
 
     job_id_raw = tip.get("publication_job_id") or node.get("job_id") or node.get("publication_job_id") or ""
@@ -542,13 +561,48 @@ def reconcile_publication_ledger_and_head(
 
     pub = _read(pub_path)
     rcpt = _read(rcpt_path)
+
+    # Recompute cryptographic publication hash from content (R2)
+    hashable_pub = {
+        k: v for k, v in pub.items()
+        if not k.endswith("_ref") and k != "publication_hash"
+    }
+    computed_pub_hash = hashlib.sha256(_json_bytes(hashable_pub)).hexdigest()
     if (
-        pub.get("publication_hash") != tip["frontend_publication_hash"]
-        or rcpt.get("receipt_hash") != tip["publication_receipt_hash"]
+        pub.get("publication_hash") != computed_pub_hash
+        or computed_pub_hash != tip["frontend_publication_hash"]
     ):
         return current_head if current_head else None
 
-    # Reconcile head.json to tip
+    # Recompute cryptographic receipt hash from content (R2)
+    hashable_rcpt = {
+        k: v for k, v in rcpt.items()
+        if not k.endswith("_ref") and k != "receipt_hash"
+    }
+    computed_rcpt_hash = hashlib.sha256(_json_bytes(hashable_rcpt)).hexdigest()
+    if (
+        rcpt.get("receipt_hash") != computed_rcpt_hash
+        or computed_rcpt_hash != tip["publication_receipt_hash"]
+    ):
+        return current_head if current_head else None
+
+    # Cross-artifact binding verification (R2)
+    if pub.get("snapshot_id") != tip_sid or rcpt.get("snapshot_id") != tip_sid:
+        return current_head if current_head else None
+    if pub.get("node_hash") != tip["node_hash"] or rcpt.get("node_hash") != tip["node_hash"]:
+        return current_head if current_head else None
+    if rcpt.get("frontend_publication_hash") != tip["frontend_publication_hash"]:
+        return current_head if current_head else None
+
+    pub_frontend = pub.get("frontend_payload") or {}
+    published_schema_version = str(
+        pub_frontend.get("surface_schema_version")
+        or pub_frontend.get("schema_version")
+        or pub_frontend.get("version")
+        or (pub_frontend.get("provenance") or {}).get("surface_schema_version")
+        or ""
+    )
+
     reconciled_head = {
         "contract_version": PLOT_SNAPSHOT_CONTRACT_VERSION,
         "snapshot_kind": node.get("snapshot_kind") or "layer10_terminal",
@@ -569,7 +623,7 @@ def reconcile_publication_ledger_and_head(
         "publication_receipt_hash": tip["publication_receipt_hash"],
         "frontend_publication_ref": str(pub_path),
         "frontend_publication_hash": tip["frontend_publication_hash"],
-        "surface_inventory_hash": pub.get("frontend_payload", {}).get("surface_inventory_hash"),
+        "surface_inventory_hash": pub_frontend.get("surface_inventory_hash"),
         "published_at": pub.get("published_at") or node.get("published_at") or tip["committed_at"],
         "evidence_cutoff_at": pub.get("evidence_cutoff_at") or node.get("evidence_cutoff_at"),
         "observation_window": pub.get("observation_window") or node.get("observation_window"),
@@ -578,7 +632,88 @@ def reconcile_publication_ledger_and_head(
         "commit_seq": tip["commit_seq"],
         "commit_hash": tip["commit_hash"],
     }
+
+    # Verify scientific admission contract before advancing head.json (R2)
+    payload_surfaces = pub_frontend.get("surfaces") or pub_frontend.get("surface_pack") or []
+    try:
+        computed_inv_hash = (
+            compute_surface_inventory_hash(payload_surfaces)
+            if isinstance(payload_surfaces, list) and payload_surfaces
+            else None
+        )
+    except (TypeError, ValueError):
+        computed_inv_hash = None
+
+    derived_publication_status, _ = classify_surface_publication(pub_frontend)
+    declared_status_valid, _, _ = validate_declared_publication_status(pub_frontend)
+
+    # Numerical authority check
+    num_rec = (
+        (node.get("scientific_result") or {}).get("asmae_posterior_numerical_record")
+        or (node.get("asmae") or {}).get("asmae_posterior_numerical_record")
+        or pub_frontend.get("asmae_posterior_numerical_record")
+    )
+    numerical_valid = True
+    if reconciled_head["publication_authority"] == "CERTIFIED_NUMERICAL":
+        try:
+            validate_certified_numerical_publication(
+                num_rec, pub_frontend, node.get("scientific_result") or node.get("asmae") or {}, node=node
+            )
+        except (ValueError, TypeError):
+            numerical_valid = False
+
+    candidate_validation = {
+        "nodeValid": True,
+        "publicationValid": True,
+        "receiptValid": True,
+        "inventoryValid": bool(
+            not payload_surfaces
+            or (
+                reconciled_head.get("surface_inventory_hash")
+                and computed_inv_hash
+                and reconciled_head.get("surface_inventory_hash") == computed_inv_hash
+            )
+        ),
+        "temporalBindingValid": True,
+        "numericalBindingValid": numerical_valid,
+        "nodeAgreementValid": True,
+        "authorityAgreementValid": True,
+        "replayReceiptValid": True,
+        "bindingValid": True,
+        "lineageValid": bool(
+            node.get("snapshot_kind") != "asmae"
+            or (
+                node.get("crop_posterior_lineage")
+                and node.get("crop_worldline_event_id")
+                and node.get("phenology_worldline_event_id")
+                and pub.get("crop_posterior_lineage") == node.get("crop_posterior_lineage")
+                and rcpt.get("crop_posterior_lineage") == node.get("crop_posterior_lineage")
+            )
+        ),
+        "schemaValid": published_schema_version == SURFACES_SCHEMA_VERSION,
+        "contractValid": derived_publication_status in VALID_PUBLICATION_STATUSES and numerical_valid,
+        "publicationStatusValid": declared_status_valid,
+    }
+
+    reconstructed_candidate = {
+        **reconciled_head,
+        "scientific_result": node.get("scientific_result") or node.get("asmae") or {},
+        "frontend_payload": pub_frontend,
+        "publication_receipt": rcpt,
+        "validation": candidate_validation,
+    }
+    admission_report = evaluate_snapshot_admission(reconstructed_candidate, namespace=ns)
+    if not admission_report.get("is_valid", False):
+        # Ledger tip fails scientific admission; do NOT promote to head.json (R2)
+        return current_head if current_head else None
+
+    # All checks passed: atomically update head.json to validated tip
     _atomic(head_file, reconciled_head)
+    with _SNAPSHOT_CACHE_LOCK:
+        keys_to_evict = [k for k in _CANONICAL_SNAPSHOT_CACHE if k[0] == ns.stable_key()]
+        for k in keys_to_evict:
+            _CANONICAL_SNAPSHOT_CACHE.pop(k, None)
+    return reconciled_head
     with _SNAPSHOT_CACHE_LOCK:
         keys_to_evict = [k for k in _CANONICAL_SNAPSHOT_CACHE if k[0] == ns.stable_key()]
         for k in keys_to_evict:
@@ -1228,25 +1363,49 @@ def publish_canonical_plot_snapshot(
         if not is_ledger_valid:
             raise ValueError(f"Cannot publish snapshot: commit ledger is corrupted: {ledger_err}")
 
+        # Post-ledger store missing ledger guard (R1):
+        has_post_ledger_head = bool(
+            current_head_check.get("commit_seq") is not None
+            or current_head_check.get("commit_hash")
+        )
+        if has_post_ledger_head and (not commits_file.exists() or commits_file.stat().st_size == 0):
+            raise ValueError(
+                "Cannot publish snapshot: existing store has committed ledger markers but commits.jsonl is missing or empty; "
+                "explicit authorized recovery required"
+            )
+
+        # Unreconciled tip quarantine guard (R2):
+        if existing_commits and current_head_check:
+            tip = existing_commits[-1]
+            if (
+                current_head_check.get("commit_seq") is not None
+                and current_head_check.get("commit_hash") != tip["commit_hash"]
+            ):
+                raise ValueError(
+                    f"Cannot publish snapshot: commit ledger tip '{tip.get('snapshot_id')}' could not be reconciled with head "
+                    "(quarantined/repair state required)"
+                )
+
         if not commits_file.exists() and current_head_check and current_head_check.get("snapshot_id"):
-            # Bootstrap legacy committed head as genesis commit if upgrading existing plot store
-            leg_id = current_head_check.get("snapshot_id")
-            leg_node_hash = current_head_check.get("node_hash")
-            leg_pub_hash = current_head_check.get("frontend_publication_hash")
-            leg_rcpt_hash = current_head_check.get("publication_receipt_hash")
-            if leg_node_hash and leg_pub_hash and leg_rcpt_hash:
-                leg_rec = {
-                    "commit_seq": 1,
-                    "snapshot_id": leg_id,
-                    "node_hash": leg_node_hash,
-                    "frontend_publication_hash": leg_pub_hash,
-                    "publication_receipt_hash": leg_rcpt_hash,
-                    "publication_job_id": str(current_head_check.get("publication_job_id") or ""),
-                    "committed_at": str(current_head_check.get("published_at") or publication_timestamp),
-                    "parent_commit_hash": "0" * 64,
-                }
-                leg_rec["commit_hash"] = hashlib.sha256(_json_bytes({k: v for k, v in leg_rec.items() if k != "commit_hash"})).hexdigest()
-                existing_commits.append(leg_rec)
+            # Bootstrap legacy committed head as genesis commit ONLY if genuinely pre-ledger (no commit markers)
+            if not has_post_ledger_head:
+                leg_id = current_head_check.get("snapshot_id")
+                leg_node_hash = current_head_check.get("node_hash")
+                leg_pub_hash = current_head_check.get("frontend_publication_hash")
+                leg_rcpt_hash = current_head_check.get("publication_receipt_hash")
+                if leg_node_hash and leg_pub_hash and leg_rcpt_hash:
+                    leg_rec = {
+                        "commit_seq": 1,
+                        "snapshot_id": leg_id,
+                        "node_hash": leg_node_hash,
+                        "frontend_publication_hash": leg_pub_hash,
+                        "publication_receipt_hash": leg_rcpt_hash,
+                        "publication_job_id": str(current_head_check.get("publication_job_id") or ""),
+                        "committed_at": str(current_head_check.get("published_at") or publication_timestamp),
+                        "parent_commit_hash": "0" * 64,
+                    }
+                    leg_rec["commit_hash"] = hashlib.sha256(_json_bytes({k: v for k, v in leg_rec.items() if k != "commit_hash"})).hexdigest()
+                    existing_commits.append(leg_rec)
 
         commit_seq = len(existing_commits) + 1
         parent_commit_hash = existing_commits[-1]["commit_hash"] if existing_commits else ("0" * 64)
@@ -1656,30 +1815,46 @@ def load_latest_plot_snapshot(
     """
     ns = _coerce_namespace(namespace, tenant_id=tenant_id, farm_id=farm_id)
     directory = _plot_dir(ns)
-    commits_file = directory / "commits.jsonl"
-    if commits_file.exists():
-        is_ledger_valid, records, _ = validate_publication_commit_ledger(directory)
-        if not is_ledger_valid:
-            return None
-        with _plot_publication_lock(directory):
-            reconcile_publication_ledger_and_head(directory, ns)
-
     head_file = _head_path(ns)
     if not head_file.exists():
         return None
-    try:
-        head_stat = head_file.stat()
-        head_mtime = head_stat.st_mtime_ns
-        head_size = head_stat.st_size
-    except OSError:
-        head_mtime = 0
-        head_size = 0
 
     head = _read(head_file)
     if head.get("contract_version") != PLOT_SNAPSHOT_CONTRACT_VERSION:
         return None
     if geometry_hash and head.get("geometry_hash") != geometry_hash:
         return None
+
+    has_post_ledger_head = bool(
+        head.get("commit_seq") is not None
+        or head.get("commit_hash")
+    )
+    commits_file = directory / "commits.jsonl"
+
+    if has_post_ledger_head:
+        if not commits_file.exists() or commits_file.stat().st_size == 0:
+            # Post-ledger store missing ledger strictly fails closed (R1)
+            return None
+        is_ledger_valid, records, _ = validate_publication_commit_ledger(directory)
+        if not is_ledger_valid or not records:
+            return None
+        with _plot_publication_lock(directory):
+            reconcile_publication_ledger_and_head(directory, ns)
+        head = _read(head_file)
+        tip = records[-1]
+        if (
+            head.get("commit_hash") != tip["commit_hash"]
+            or head.get("commit_seq") != tip["commit_seq"]
+            or head.get("snapshot_id") != tip["snapshot_id"]
+        ):
+            return None
+    elif commits_file.exists():
+        is_ledger_valid, records, _ = validate_publication_commit_ledger(directory)
+        if not is_ledger_valid:
+            return None
+        with _plot_publication_lock(directory):
+            reconcile_publication_ledger_and_head(directory, ns)
+        head = _read(head_file)
 
     if force_verify and commits_file.exists():
         is_ledger_valid, records, _ = validate_publication_commit_ledger(directory)
@@ -1703,6 +1878,13 @@ def load_latest_plot_snapshot(
     pub_path = directory / "publications" / f"{safe_job_id}.json"
     receipt_path = directory / "receipts" / f"{safe_job_id}.json"
 
+    try:
+        head_stat = head_file.stat()
+        head_mtime = head_stat.st_mtime_ns
+        head_size = head_stat.st_size
+    except OSError:
+        head_mtime = 0
+        head_size = 0
     try:
         node_stat = node_path.stat()
         node_mtime = node_stat.st_mtime_ns
@@ -2143,8 +2325,23 @@ def load_and_validate_plot_snapshot_by_id(
         return None
 
     directory = _plot_dir(ns)
+    head_file = _head_path(ns)
+    head_check = _read(head_file) if head_file.exists() else {}
+    has_post_ledger_head = bool(
+        head_check.get("commit_seq") is not None
+        or head_check.get("commit_hash")
+    )
     commits_file = directory / "commits.jsonl"
-    if commits_file.exists():
+
+    if has_post_ledger_head:
+        if not commits_file.exists() or commits_file.stat().st_size == 0:
+            return None
+        is_ledger_valid, records, _ = validate_publication_commit_ledger(directory)
+        if not is_ledger_valid or not records:
+            return None
+        with _plot_publication_lock(directory):
+            reconcile_publication_ledger_and_head(directory, ns)
+    elif commits_file.exists():
         is_ledger_valid, records, _ = validate_publication_commit_ledger(directory)
         if not is_ledger_valid:
             return None
@@ -2298,6 +2495,9 @@ def load_and_validate_plot_snapshot_by_id(
         if not head_file.exists():
             return None
         current_head = _read(head_file)
+        if current_head.get("commit_seq") is not None or current_head.get("commit_hash"):
+            # Post-ledger store missing ledger strictly fails closed (R1)
+            return None
         legacy_verified = False
         if current_head.get("snapshot_id") == snapshot_id:
             legacy_verified = True

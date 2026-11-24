@@ -120,3 +120,79 @@ test("MESIA-CSI-08: Fully qualified calibrated capture displays '✓ CALIBRATED'
   assert.equal(result.calBadgeText, "✓ CALIBRATED");
   assert.equal(result.calBadgeColor, "#4ade80");
 });
+
+test("MESIA-CSI-09: Explicit is_fresh=false strictly overrides conflicting freshness='FRESH' (R3 fail-closed)", () => {
+  // Contradictory fixture: is_fresh is explicitly false, but freshness claims "FRESH"
+  const contradictoryFreshnessFixture = {
+    physical_waves_measured: true,
+    is_active_stream: true,
+    status: "LIVE_CSI_STREAM",
+    is_fresh: false, // Explicit negative flag
+    freshness: "FRESH", // Conflicting positive string
+  };
+  const result = computeCsiTruthBadges(contradictoryFreshnessFixture, null);
+  assert.equal(result.isFresh, false, "Explicit is_fresh=false must strictly win over freshness='FRESH'");
+  assert.equal(result.csiBadgeText, "○ Archived capture", "Must downgrade to archived capture, never false live stream");
+  assert.equal(result.csiBadgeColor, "#f59e0b");
+});
+
+test("MESIA-CSI-10: presentation_state='REPLAY' or 'ARCHIVED' strictly forbids active live stream (R3 fail-closed)", () => {
+  // Contradictory fixture: is_active_stream claims true, but presentation_state is REPLAY
+  const replayFixture = {
+    physical_waves_measured: true,
+    is_active_stream: true,
+    presentation_state: "REPLAY",
+    status: "LIVE_CSI_STREAM",
+    is_fresh: true,
+    freshness: "FRESH",
+  };
+  const resultReplay = computeCsiTruthBadges(replayFixture, null);
+  assert.equal(resultReplay.isActiveStream, false, "presentation_state='REPLAY' must strictly force isActiveStream=false");
+  assert.equal(resultReplay.csiBadgeText, "● Recorded capture", "Must display recorded capture, never live stream");
+
+  const archivedFixture = {
+    physical_waves_measured: true,
+    is_active_stream: true,
+    presentation_state: "ARCHIVED",
+    status: "LIVE_CSI_STREAM",
+    is_fresh: true,
+    freshness: "FRESH",
+  };
+  const resultArchived = computeCsiTruthBadges(archivedFixture, null);
+  assert.equal(resultArchived.isActiveStream, false, "presentation_state='ARCHIVED' must strictly force isActiveStream=false");
+  assert.equal(resultArchived.csiBadgeText, "● Recorded capture");
+});
+
+test("MESIA-CSI-11: freshness='ARCHIVED' or 'EXPIRED' strictly forces isFresh=false (R3 fail-closed)", () => {
+  const expiredFixture = {
+    physical_waves_measured: true,
+    is_active_stream: false,
+    freshness: "EXPIRED",
+  };
+  const resultExpired = computeCsiTruthBadges(expiredFixture, null);
+  assert.equal(resultExpired.isFresh, false, "freshness='EXPIRED' must strictly force isFresh=false");
+  assert.equal(resultExpired.csiBadgeText, "○ Archived capture");
+
+  const archivedFixture = {
+    physical_waves_measured: true,
+    is_active_stream: false,
+    freshness: "ARCHIVED",
+  };
+  const resultArchived = computeCsiTruthBadges(archivedFixture, null);
+  assert.equal(resultArchived.isFresh, false, "freshness='ARCHIVED' must strictly force isFresh=false");
+  assert.equal(resultArchived.csiBadgeText, "○ Archived capture");
+});
+
+test("MESIA-CSI-12: Ambient fallback strictly respects contradictory freshness and replay overrides (R3 fail-closed)", () => {
+  const ambientContradictory = {
+    physical_waves_measured: true,
+    is_active_stream: true,
+    presentation_state: "REPLAY",
+    is_fresh: false,
+    freshness: "FRESH",
+  };
+  const result = computeCsiTruthBadges(null, ambientContradictory);
+  assert.equal(result.isActiveStream, false, "Ambient replay must force isActiveStream=false");
+  assert.equal(result.isFresh, false, "Ambient is_fresh=false must override freshness='FRESH'");
+  assert.equal(result.csiBadgeText, "○ Archived capture");
+});

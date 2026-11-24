@@ -14,30 +14,51 @@ export function computeCsiTruthBadges(inSituWifi, ambientWifi) {
   );
 
   // Strict fail-closed active stream derivation:
-  // Explicit false or null in inSituWifi strictly rejects active stream, regardless of status string
+  // 1. Explicit false strictly wins.
+  // 2. Conflicting presentation_state ("REPLAY", "ARCHIVED", "STORED") strictly forbids active stream.
+  // 3. Ambient fallback only if authentic and not replay.
   let isActiveStream = false;
   if (inSituWifi) {
-    if (inSituWifi.is_active_stream === true) {
+    if (inSituWifi.is_active_stream === false) {
+      isActiveStream = false;
+    } else if (inSituWifi.presentation_state === "REPLAY" || inSituWifi.presentation_state === "ARCHIVED") {
+      isActiveStream = false;
+    } else if (inSituWifi.is_active_stream === true) {
       isActiveStream = true;
-    } else if (inSituWifi.is_active_stream === false) {
-      isActiveStream = false; // Explicit false strictly wins
     } else {
       isActiveStream = inSituWifi.status === "LIVE_CSI_STREAM" && inSituWifi.presentation_state === "LIVE";
     }
   } else if (ambientWifi) {
-    isActiveStream = ambientWifi.is_active_stream === true && ambientWifi.status === "LIVE_CSI_STREAM";
+    if (ambientWifi.is_active_stream === false || ambientWifi.presentation_state === "REPLAY" || ambientWifi.presentation_state === "ARCHIVED") {
+      isActiveStream = false;
+    } else if (ambientWifi.is_active_stream === true) {
+      isActiveStream = ambientWifi.status === "LIVE_CSI_STREAM";
+    }
   }
 
   // Strict fail-closed freshness derivation:
+  // 1. Explicit negative boolean (is_fresh === false) strictly wins over any freshness string ("FRESH").
+  // 2. Negative freshness strings ("STALE", "ARCHIVED", "EXPIRED") strictly force isFresh = false.
+  // 3. Positive freshness requires is_fresh === true OR (is_fresh !== false AND freshness === "FRESH").
   let isFresh = false;
   if (inSituWifi) {
-    if (inSituWifi.is_fresh === true || inSituWifi.freshness === "FRESH") {
-      isFresh = true;
-    } else {
+    if (inSituWifi.is_fresh === false) {
+      isFresh = false; // Explicit false strictly wins over conflicting freshness="FRESH"
+    } else if (inSituWifi.freshness === "STALE" || inSituWifi.freshness === "ARCHIVED" || inSituWifi.freshness === "EXPIRED") {
       isFresh = false;
+    } else if (inSituWifi.is_fresh === true) {
+      isFresh = true;
+    } else if (inSituWifi.freshness === "FRESH") {
+      isFresh = true;
     }
   } else if (ambientWifi) {
-    isFresh = ambientWifi.is_fresh === true || ambientWifi.freshness === "FRESH";
+    if (ambientWifi.is_fresh === false) {
+      isFresh = false;
+    } else if (ambientWifi.freshness === "STALE" || ambientWifi.freshness === "ARCHIVED" || ambientWifi.freshness === "EXPIRED") {
+      isFresh = false;
+    } else if (ambientWifi.is_fresh === true || ambientWifi.freshness === "FRESH") {
+      isFresh = true;
+    }
   }
 
   let csiBadgeText = "○ No verified CSI capture";
