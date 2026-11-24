@@ -884,6 +884,9 @@ class MesiaProductionService:
         verified_manifest: Optional[SigMFCaptureManifest] = None
         verified_data_file: Optional[Path] = None
         verified_prefix: Optional[str] = None
+        verified_csi_dict: Optional[Dict[str, Any]] = None
+        verified_clf_analysis: Optional[Dict[str, Any]] = None
+        last_rejection_reason: Optional[str] = None
 
         for c_dir in candidate_dirs:
             if not c_dir.exists() or not c_dir.is_dir():
@@ -895,27 +898,47 @@ class MesiaProductionService:
                 manifest_files = sorted(c_dir.glob("*.manifest.json"), key=lambda p: p.stat().st_mtime, reverse=True)
 
             for mf in manifest_files:
-                if verify_capture_integrity(mf, expected_namespace=plot_namespace, storage_root=root):
-                    try:
-                        mf_data = json.loads(Path(mf).read_text(encoding="utf-8"))
-                        mf_obj = SigMFCaptureManifest.from_dict(mf_data)
-                        d_path = Path(mf_obj.data_path).resolve()
-                        m_path = Path(mf_obj.meta_path).resolve()
-                        if d_path.exists() and m_path.exists():
-                            verified_manifest = mf_obj
-                            verified_data_file = d_path
-                            verified_prefix = mf_obj.storage_prefix
-                            break
-                    except Exception:
+                if not verify_capture_integrity(mf, expected_namespace=plot_namespace, storage_root=root):
+                    last_rejection_reason = f"Integrity verification failed for manifest {mf.name}"
+                    continue
+                try:
+                    mf_data = json.loads(Path(mf).read_text(encoding="utf-8"))
+                    mf_obj = SigMFCaptureManifest.from_dict(mf_data)
+                    d_path = Path(mf_obj.data_path).resolve()
+                    m_path = Path(mf_obj.meta_path).resolve()
+                    if not (d_path.exists() and m_path.exists()):
+                        last_rejection_reason = f"Missing data/meta files for capture {mf_obj.capture_id}"
                         continue
+
+                    from services.agribrain.mesia.lanes.wifi.csi_extractor import NativeWifiCsiExtractor, WiHFC_Classifier
+
+                    csi_dict = NativeWifiCsiExtractor.read_sigmf(mf_obj.storage_prefix)
+                    amps = csi_dict.get("amplitudes_linear", [])
+                    phases = csi_dict.get("phases_rad", [])
+                    if not amps:
+                        last_rejection_reason = f"SigMF capture '{mf_obj.capture_id}' contains zero valid OFDM subcarrier amplitudes."
+                        continue
+
+                    clf = WiHFC_Classifier()
+                    analysis = clf.analyze(csi_dict)
+
+                    verified_manifest = mf_obj
+                    verified_data_file = d_path
+                    verified_prefix = mf_obj.storage_prefix
+                    verified_csi_dict = csi_dict
+                    verified_clf_analysis = analysis
+                    break
+                except Exception as decode_err:
+                    last_rejection_reason = f"Sample decode/validation failed for capture '{getattr(mf_obj, 'capture_id', mf.name)}': {decode_err}"
+                    continue
             if verified_manifest:
                 break
 
-        if not verified_manifest or not verified_data_file or not verified_data_file.exists():
+        if not verified_manifest or not verified_data_file or not verified_data_file.exists() or not verified_csi_dict:
             return {
                 "status": "AWAITING_FIELD_RECEIVER_STREAM",
                 "receiver_type": "NONE_DEPLOYED",
-                "message": "Zero verified in-situ Wi-Fi CSI captures detected inside parcel boundary.",
+                "message": last_rejection_reason or "Zero verified in-situ Wi-Fi CSI captures detected inside parcel boundary.",
                 "physical_waves_measured": False,
                 "source_class": "UNVERIFIED",
                 "identity_state": "AWAITING_VERIFIED_CAPTURE",
@@ -925,12 +948,8 @@ class MesiaProductionService:
             }
 
         try:
-            from services.agribrain.mesia.lanes.wifi.csi_extractor import NativeWifiCsiExtractor, WiHFC_Classifier
-
-            csi_dict = NativeWifiCsiExtractor.read_sigmf(verified_prefix)
-            clf = WiHFC_Classifier()
-            analysis = clf.analyze(csi_dict)
-
+            csi_dict = verified_csi_dict
+            analysis = verified_clf_analysis
             amps = csi_dict.get("amplitudes_linear", [])
             phases = csi_dict.get("phases_rad", [])
 

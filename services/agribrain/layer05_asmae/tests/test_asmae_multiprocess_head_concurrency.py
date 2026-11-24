@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 import hashlib
 import json
 import os
@@ -1111,4 +1112,773 @@ def test_authenticated_signed_retrieval_end_to_end(tmp_path):
     # 4. Replay attack with same nonce fails closed (401 Unauthorized)
     resp_replay = client.get(path, headers=headers)
     assert resp_replay.status_code == 401
+
+
+def test_reconciliation_rejects_missing_namespace_fields(tmp_path):
+    """P2-A: A candidate tip whose publication or receipt omits mandatory namespace fields must be rejected."""
+    plot_id = f"parcel-missing-ns-{int(time.time() * 1000)}"
+    tenant_id = "tenant-missing-ns"
+    farm_id = "farm-missing-ns"
+    geom_hash = "geom-missing-ns"
+    ns = PlotNamespace(tenant_id=tenant_id, farm_id=farm_id, plot_id=plot_id)
+    directory = plot_snapshot_store._plot_dir(ns)
+
+    states1 = {"root_zone_moisture": 0.31, "canopy_vigor": 0.69}
+    sigmas1 = {"root_zone_moisture": 0.015, "canopy_vigor": 0.025}
+
+    published1 = _publish_candidate(tenant_id, farm_id, plot_id, geom_hash, "job-ns-1", states1, sigmas1)
+    snap1_id = published1["snapshot_id"]
+    head_file = plot_snapshot_store._head_path(ns)
+    head1_bytes = head_file.read_bytes()
+
+    commits_file = directory / "commits.jsonl"
+    lines1 = [json.loads(l) for l in commits_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+    parent_hash = lines1[-1]["commit_hash"]
+
+    # Stage Commit 2: valid node and receipt, but publication OMITS tenant_id and farm_id
+    snap2_id = f"L10-MISSING-NS-{uuid.uuid4().hex[:8]}"
+    job2_id = "job-missing-ns-2"
+    safe_job2 = hashlib.sha256(job2_id.encode("utf-8")).hexdigest()[:32]
+    now_ts = datetime.now(timezone.utc).isoformat()
+
+    node_payload = {
+        "contract_version": plot_snapshot_store.PLOT_SNAPSHOT_CONTRACT_VERSION,
+        "snapshot_kind": "layer10_terminal",
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "snapshot_id": snap2_id,
+        "tenant_id": tenant_id,
+        "farm_id": farm_id,
+        "plot_id": plot_id,
+        "geometry_hash": geom_hash,
+        "recorded_at": now_ts,
+        "published_at": now_ts,
+        "evidence_cutoff_at": None,
+        "observation_window": None,
+        "crop_cycle_id": "cycle-test",
+        "supersedes_snapshot_id": snap1_id,
+        "job_id": job2_id,
+        "manifest_hash": "manifest-hash-2",
+        "crop_posterior_lineage": None,
+        "crop_worldline_event_id": None,
+        "phenology_worldline_event_id": None,
+        "crop_evidence_ledger_hash": None,
+        "crop_influence_manifest_hash": None,
+        "scientific_result": {"content_hash": "sci-2"},
+        "scientific_content_hash": "sci-2",
+    }
+    hashable_node = {k: v for k, v in node_payload.items() if not k.endswith("_ref")}
+    node_hash = hashlib.sha256(plot_snapshot_store._json_bytes(hashable_node)).hexdigest()
+    node_payload["node_hash"] = node_hash
+
+    frontend_payload = {
+        "surface_schema_version": SURFACES_SCHEMA_VERSION,
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "publication_status": "READY_DIAGNOSTIC_ONLY",
+        "surfaces": [],
+        "intelligence_snapshot_id": snap2_id,
+    }
+    # Publication lacks tenant_id and farm_id
+    pub_payload = {
+        "contract_version": plot_snapshot_store.PLOT_PUBLICATION_CONTRACT_VERSION,
+        "snapshot_kind": "layer10_terminal",
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "plot_id": plot_id,
+        # tenant_id and farm_id omitted!
+        "geometry_hash": geom_hash,
+        "snapshot_id": snap2_id,
+        "job_id": job2_id,
+        "manifest_hash": "manifest-hash-2",
+        "node_ref": f"nodes/{snap2_id}.json",
+        "node_hash": node_hash,
+        "frontend_payload": frontend_payload,
+        "published_at": now_ts,
+        "evidence_cutoff_at": None,
+        "observation_window": None,
+        "crop_cycle_id": "cycle-test",
+        "recorded_at": now_ts,
+    }
+    hashable_pub = {k: v for k, v in pub_payload.items() if not k.endswith("_ref")}
+    pub_hash = hashlib.sha256(plot_snapshot_store._json_bytes(hashable_pub)).hexdigest()
+    pub_payload["publication_hash"] = pub_hash
+
+    rcpt_payload = {
+        "contract_version": plot_snapshot_store.PLOT_SNAPSHOT_RECEIPT_CONTRACT_VERSION,
+        "snapshot_kind": "layer10_terminal",
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "tenant_id": tenant_id,
+        "farm_id": farm_id,
+        "plot_id": plot_id,
+        "geometry_hash": geom_hash,
+        "snapshot_id": snap2_id,
+        "node_ref": f"nodes/{snap2_id}.json",
+        "node_hash": node_hash,
+        "source_node_job_id": job2_id,
+        "source_node_manifest_hash": "manifest-hash-2",
+        "job_id": job2_id,
+        "manifest_hash": "manifest-hash-2",
+        "frontend_publication_ref": f"publications/{safe_job2}.json",
+        "frontend_publication_hash": pub_hash,
+        "equivalence_reason": "scientific_content_hash_equivalent",
+        "recorded_at": now_ts,
+    }
+    hashable_rcpt = {k: v for k, v in rcpt_payload.items() if not k.endswith("_ref")}
+    rcpt_hash = hashlib.sha256(plot_snapshot_store._json_bytes(hashable_rcpt)).hexdigest()
+    rcpt_payload["receipt_hash"] = rcpt_hash
+
+    (directory / "nodes" / f"{snap2_id}.json").write_bytes(plot_snapshot_store._json_bytes(node_payload))
+    (directory / "publications" / f"{safe_job2}.json").write_bytes(plot_snapshot_store._json_bytes(pub_payload))
+    (directory / "receipts" / f"{safe_job2}.json").write_bytes(plot_snapshot_store._json_bytes(rcpt_payload))
+
+    commit2_rec = {
+        "commit_seq": 2,
+        "snapshot_id": snap2_id,
+        "node_hash": node_hash,
+        "frontend_publication_hash": pub_hash,
+        "publication_receipt_hash": rcpt_hash,
+        "publication_job_id": job2_id,
+        "committed_at": now_ts,
+        "parent_commit_hash": parent_hash,
+    }
+    commit2_rec["commit_hash"] = hashlib.sha256(plot_snapshot_store._json_bytes({k: v for k, v in commit2_rec.items() if k != "commit_hash"})).hexdigest()
+    with open(commits_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(commit2_rec) + "\n")
+
+    with plot_snapshot_store._plot_publication_lock(directory):
+        rec_res = plot_snapshot_store.reconcile_publication_ledger_and_head(directory, ns)
+
+    assert rec_res["snapshot_id"] == snap1_id
+    assert head_file.read_bytes() == head1_bytes
+    assert plot_snapshot_store.load_latest_plot_snapshot(ns, force_verify=True) is None
+
+
+def test_reconciliation_rejects_conflicting_authority_declarations(tmp_path):
+    """P2-B: Conflicting authority declarations across node, publication, receipt, or frontend fail closed."""
+    plot_id = f"parcel-conflict-auth-{int(time.time() * 1000)}"
+    tenant_id = "tenant-conflict-auth"
+    farm_id = "farm-conflict-auth"
+    geom_hash = "geom-conflict-auth"
+    ns = PlotNamespace(tenant_id=tenant_id, farm_id=farm_id, plot_id=plot_id)
+    directory = plot_snapshot_store._plot_dir(ns)
+
+    states1 = {"root_zone_moisture": 0.31, "canopy_vigor": 0.69}
+    sigmas1 = {"root_zone_moisture": 0.015, "canopy_vigor": 0.025}
+
+    published1 = _publish_candidate(tenant_id, farm_id, plot_id, geom_hash, "job-auth-1", states1, sigmas1)
+    snap1_id = published1["snapshot_id"]
+    head_file = plot_snapshot_store._head_path(ns)
+    head1_bytes = head_file.read_bytes()
+
+    commits_file = directory / "commits.jsonl"
+    lines1 = [json.loads(l) for l in commits_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+    parent_hash = lines1[-1]["commit_hash"]
+
+    # Stage Commit 2: node claims DIAGNOSTIC_ONLY, but publication claims CERTIFIED_NUMERICAL
+    snap2_id = f"L10-CONFLICT-AUTH-{uuid.uuid4().hex[:8]}"
+    job2_id = "job-conflict-auth-2"
+    safe_job2 = hashlib.sha256(job2_id.encode("utf-8")).hexdigest()[:32]
+    now_ts = datetime.now(timezone.utc).isoformat()
+
+    node_payload = {
+        "contract_version": plot_snapshot_store.PLOT_SNAPSHOT_CONTRACT_VERSION,
+        "snapshot_kind": "layer10_terminal",
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "snapshot_id": snap2_id,
+        "tenant_id": tenant_id,
+        "farm_id": farm_id,
+        "plot_id": plot_id,
+        "geometry_hash": geom_hash,
+        "recorded_at": now_ts,
+        "published_at": now_ts,
+        "evidence_cutoff_at": None,
+        "observation_window": None,
+        "crop_cycle_id": "cycle-test",
+        "supersedes_snapshot_id": snap1_id,
+        "job_id": job2_id,
+        "manifest_hash": "manifest-hash-2",
+        "crop_posterior_lineage": None,
+        "crop_worldline_event_id": None,
+        "phenology_worldline_event_id": None,
+        "crop_evidence_ledger_hash": None,
+        "crop_influence_manifest_hash": None,
+        "scientific_result": {"content_hash": "sci-2"},
+        "scientific_content_hash": "sci-2",
+    }
+    hashable_node = {k: v for k, v in node_payload.items() if not k.endswith("_ref")}
+    node_hash = hashlib.sha256(plot_snapshot_store._json_bytes(hashable_node)).hexdigest()
+    node_payload["node_hash"] = node_hash
+
+    frontend_payload = {
+        "surface_schema_version": SURFACES_SCHEMA_VERSION,
+        "publication_authority": "CERTIFIED_NUMERICAL",
+        "publication_status": "READY_DIAGNOSTIC_ONLY",
+        "surfaces": [],
+        "intelligence_snapshot_id": snap2_id,
+    }
+    pub_payload = {
+        "contract_version": plot_snapshot_store.PLOT_PUBLICATION_CONTRACT_VERSION,
+        "snapshot_kind": "layer10_terminal",
+        "publication_authority": "CERTIFIED_NUMERICAL",
+        "tenant_id": tenant_id,
+        "farm_id": farm_id,
+        "plot_id": plot_id,
+        "geometry_hash": geom_hash,
+        "snapshot_id": snap2_id,
+        "job_id": job2_id,
+        "manifest_hash": "manifest-hash-2",
+        "node_ref": f"nodes/{snap2_id}.json",
+        "node_hash": node_hash,
+        "frontend_payload": frontend_payload,
+        "published_at": now_ts,
+        "evidence_cutoff_at": None,
+        "observation_window": None,
+        "crop_cycle_id": "cycle-test",
+        "recorded_at": now_ts,
+    }
+    hashable_pub = {k: v for k, v in pub_payload.items() if not k.endswith("_ref")}
+    pub_hash = hashlib.sha256(plot_snapshot_store._json_bytes(hashable_pub)).hexdigest()
+    pub_payload["publication_hash"] = pub_hash
+
+    rcpt_payload = {
+        "contract_version": plot_snapshot_store.PLOT_SNAPSHOT_RECEIPT_CONTRACT_VERSION,
+        "snapshot_kind": "layer10_terminal",
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "tenant_id": tenant_id,
+        "farm_id": farm_id,
+        "plot_id": plot_id,
+        "geometry_hash": geom_hash,
+        "snapshot_id": snap2_id,
+        "node_ref": f"nodes/{snap2_id}.json",
+        "node_hash": node_hash,
+        "source_node_job_id": job2_id,
+        "source_node_manifest_hash": "manifest-hash-2",
+        "job_id": job2_id,
+        "manifest_hash": "manifest-hash-2",
+        "frontend_publication_ref": f"publications/{safe_job2}.json",
+        "frontend_publication_hash": pub_hash,
+        "equivalence_reason": "scientific_content_hash_equivalent",
+        "recorded_at": now_ts,
+    }
+    hashable_rcpt = {k: v for k, v in rcpt_payload.items() if not k.endswith("_ref")}
+    rcpt_hash = hashlib.sha256(plot_snapshot_store._json_bytes(hashable_rcpt)).hexdigest()
+    rcpt_payload["receipt_hash"] = rcpt_hash
+
+    (directory / "nodes" / f"{snap2_id}.json").write_bytes(plot_snapshot_store._json_bytes(node_payload))
+    (directory / "publications" / f"{safe_job2}.json").write_bytes(plot_snapshot_store._json_bytes(pub_payload))
+    (directory / "receipts" / f"{safe_job2}.json").write_bytes(plot_snapshot_store._json_bytes(rcpt_payload))
+
+    commit2_rec = {
+        "commit_seq": 2,
+        "snapshot_id": snap2_id,
+        "node_hash": node_hash,
+        "frontend_publication_hash": pub_hash,
+        "publication_receipt_hash": rcpt_hash,
+        "publication_job_id": job2_id,
+        "committed_at": now_ts,
+        "parent_commit_hash": parent_hash,
+    }
+    commit2_rec["commit_hash"] = hashlib.sha256(plot_snapshot_store._json_bytes({k: v for k, v in commit2_rec.items() if k != "commit_hash"})).hexdigest()
+    with open(commits_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(commit2_rec) + "\n")
+
+    with plot_snapshot_store._plot_publication_lock(directory):
+        rec_res = plot_snapshot_store.reconcile_publication_ledger_and_head(directory, ns)
+
+    assert rec_res["snapshot_id"] == snap1_id
+    assert head_file.read_bytes() == head1_bytes
+    assert plot_snapshot_store.load_latest_plot_snapshot(ns, force_verify=True) is None
+
+
+def test_reconciliation_rejects_missing_or_conflicting_replay_companion(tmp_path):
+    """P2-C: Bitemporal replay receipt companion must be consistently present across node, pub, and rcpt."""
+    plot_id = f"parcel-replay-comp-{int(time.time() * 1000)}"
+    tenant_id = "tenant-replay-comp"
+    farm_id = "farm-replay-comp"
+    geom_hash = "geom-replay-comp"
+    ns = PlotNamespace(tenant_id=tenant_id, farm_id=farm_id, plot_id=plot_id)
+    directory = plot_snapshot_store._plot_dir(ns)
+
+    states1 = {"root_zone_moisture": 0.31, "canopy_vigor": 0.69}
+    sigmas1 = {"root_zone_moisture": 0.015, "canopy_vigor": 0.025}
+
+    published1 = _publish_candidate(tenant_id, farm_id, plot_id, geom_hash, "job-comp-1", states1, sigmas1)
+    snap1_id = published1["snapshot_id"]
+    head_file = plot_snapshot_store._head_path(ns)
+    head1_bytes = head_file.read_bytes()
+
+    commits_file = directory / "commits.jsonl"
+    lines1 = [json.loads(l) for l in commits_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+    parent_hash = lines1[-1]["commit_hash"]
+
+    # Stage Commit 2: node and rcpt have replay receipt, but publication OMITS it
+    snap2_id = f"L10-REPLAY-COMP-{uuid.uuid4().hex[:8]}"
+    job2_id = "job-comp-2"
+    safe_job2 = hashlib.sha256(job2_id.encode("utf-8")).hexdigest()[:32]
+    now_ts = datetime.now(timezone.utc).isoformat()
+    replay_receipt = {
+        "receipt_id": "rr-test-1234",
+        "evidence_set_digest": "digest-valid-1234",
+    }
+
+    node_payload = {
+        "contract_version": plot_snapshot_store.PLOT_SNAPSHOT_CONTRACT_VERSION,
+        "snapshot_kind": "layer10_terminal",
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "snapshot_id": snap2_id,
+        "tenant_id": tenant_id,
+        "farm_id": farm_id,
+        "plot_id": plot_id,
+        "geometry_hash": geom_hash,
+        "recorded_at": now_ts,
+        "published_at": now_ts,
+        "evidence_cutoff_at": None,
+        "observation_window": None,
+        "crop_cycle_id": "cycle-test",
+        "supersedes_snapshot_id": snap1_id,
+        "job_id": job2_id,
+        "manifest_hash": "manifest-hash-2",
+        "crop_posterior_lineage": None,
+        "crop_worldline_event_id": None,
+        "phenology_worldline_event_id": None,
+        "crop_evidence_ledger_hash": None,
+        "crop_influence_manifest_hash": None,
+        "scientific_result": {"content_hash": "sci-2"},
+        "scientific_content_hash": "sci-2",
+        "bitemporal_replay_receipt": replay_receipt,
+        "evidence_set_digest": "digest-valid-1234",
+    }
+    hashable_node = {k: v for k, v in node_payload.items() if not k.endswith("_ref")}
+    node_hash = hashlib.sha256(plot_snapshot_store._json_bytes(hashable_node)).hexdigest()
+    node_payload["node_hash"] = node_hash
+
+    frontend_payload = {
+        "surface_schema_version": SURFACES_SCHEMA_VERSION,
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "publication_status": "READY_DIAGNOSTIC_ONLY",
+        "surfaces": [],
+        "intelligence_snapshot_id": snap2_id,
+    }
+    # Publication lacks bitemporal_replay_receipt
+    pub_payload = {
+        "contract_version": plot_snapshot_store.PLOT_PUBLICATION_CONTRACT_VERSION,
+        "snapshot_kind": "layer10_terminal",
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "tenant_id": tenant_id,
+        "farm_id": farm_id,
+        "plot_id": plot_id,
+        "geometry_hash": geom_hash,
+        "snapshot_id": snap2_id,
+        "job_id": job2_id,
+        "manifest_hash": "manifest-hash-2",
+        "node_ref": f"nodes/{snap2_id}.json",
+        "node_hash": node_hash,
+        "frontend_payload": frontend_payload,
+        "published_at": now_ts,
+        "evidence_cutoff_at": None,
+        "observation_window": None,
+        "crop_cycle_id": "cycle-test",
+        "recorded_at": now_ts,
+    }
+    hashable_pub = {k: v for k, v in pub_payload.items() if not k.endswith("_ref")}
+    pub_hash = hashlib.sha256(plot_snapshot_store._json_bytes(hashable_pub)).hexdigest()
+    pub_payload["publication_hash"] = pub_hash
+
+    rcpt_payload = {
+        "contract_version": plot_snapshot_store.PLOT_SNAPSHOT_RECEIPT_CONTRACT_VERSION,
+        "snapshot_kind": "layer10_terminal",
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "tenant_id": tenant_id,
+        "farm_id": farm_id,
+        "plot_id": plot_id,
+        "geometry_hash": geom_hash,
+        "snapshot_id": snap2_id,
+        "node_ref": f"nodes/{snap2_id}.json",
+        "node_hash": node_hash,
+        "source_node_job_id": job2_id,
+        "source_node_manifest_hash": "manifest-hash-2",
+        "job_id": job2_id,
+        "manifest_hash": "manifest-hash-2",
+        "frontend_publication_ref": f"publications/{safe_job2}.json",
+        "frontend_publication_hash": pub_hash,
+        "bitemporal_replay_receipt": replay_receipt,
+        "evidence_set_digest": "digest-valid-1234",
+        "equivalence_reason": "scientific_content_hash_equivalent",
+        "recorded_at": now_ts,
+    }
+    hashable_rcpt = {k: v for k, v in rcpt_payload.items() if not k.endswith("_ref")}
+    rcpt_hash = hashlib.sha256(plot_snapshot_store._json_bytes(hashable_rcpt)).hexdigest()
+    rcpt_payload["receipt_hash"] = rcpt_hash
+
+    (directory / "nodes" / f"{snap2_id}.json").write_bytes(plot_snapshot_store._json_bytes(node_payload))
+    (directory / "publications" / f"{safe_job2}.json").write_bytes(plot_snapshot_store._json_bytes(pub_payload))
+    (directory / "receipts" / f"{safe_job2}.json").write_bytes(plot_snapshot_store._json_bytes(rcpt_payload))
+
+    commit2_rec = {
+        "commit_seq": 2,
+        "snapshot_id": snap2_id,
+        "node_hash": node_hash,
+        "frontend_publication_hash": pub_hash,
+        "publication_receipt_hash": rcpt_hash,
+        "publication_job_id": job2_id,
+        "committed_at": now_ts,
+        "parent_commit_hash": parent_hash,
+    }
+    commit2_rec["commit_hash"] = hashlib.sha256(plot_snapshot_store._json_bytes({k: v for k, v in commit2_rec.items() if k != "commit_hash"})).hexdigest()
+    with open(commits_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(commit2_rec) + "\n")
+
+    with plot_snapshot_store._plot_publication_lock(directory):
+        rec_res = plot_snapshot_store.reconcile_publication_ledger_and_head(directory, ns)
+
+    assert rec_res["snapshot_id"] == snap1_id
+    assert head_file.read_bytes() == head1_bytes
+    assert plot_snapshot_store.load_latest_plot_snapshot(ns, force_verify=True) is None
+
+
+def test_gate_a_same_publication_retry_fails_closed_on_deleted_or_empty_ledger(tmp_path):
+    """Gate A: Verify same-publication retry strictly fails closed on missing, empty, or corrupt ledger."""
+    plot_id = f"parcel-gate-a-{int(time.time() * 1000)}"
+    tenant_id = "tenant-gate-a"
+    farm_id = "farm-gate-a"
+    geom_hash = "geom-gate-a"
+    ns = PlotNamespace(tenant_id=tenant_id, farm_id=farm_id, plot_id=plot_id)
+    directory = plot_snapshot_store._plot_dir(ns)
+
+    states = {"root_zone_moisture": 0.42, "canopy_vigor": 0.75}
+    sigmas = {"root_zone_moisture": 0.02, "canopy_vigor": 0.03}
+
+    # 1. First publish succeeds
+    published = _publish_candidate(tenant_id, farm_id, plot_id, geom_hash, "job-gate-a", states, sigmas)
+    snap_id = published["snapshot_id"]
+    commits_file = directory / "commits.jsonl"
+    assert commits_file.exists()
+
+    # 2. Identical re-publication succeeds idempotently when ledger is intact
+    republished = _publish_candidate(tenant_id, farm_id, plot_id, geom_hash, "job-gate-a", states, sigmas)
+    assert republished["snapshot_id"] == snap_id
+
+    # 3. Delete commits.jsonl -> identical re-publication must fail closed (ValueError)
+    commits_file.unlink()
+    with pytest.raises(ValueError, match="Cannot publish snapshot"):
+        _publish_candidate(tenant_id, farm_id, plot_id, geom_hash, "job-gate-a", states, sigmas)
+
+    # 4. Empty commits.jsonl -> identical re-publication must fail closed (ValueError)
+    commits_file.write_text("", encoding="utf-8")
+    with pytest.raises(ValueError, match="Cannot publish snapshot"):
+        _publish_candidate(tenant_id, farm_id, plot_id, geom_hash, "job-gate-a", states, sigmas)
+
+    # 5. Corrupted commits.jsonl -> identical re-publication must fail closed (ValueError)
+    commits_file.write_text("{bad json\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Cannot publish snapshot: commit ledger is corrupted"):
+        _publish_candidate(tenant_id, farm_id, plot_id, geom_hash, "job-gate-a", states, sigmas)
+
+
+def test_gate_b_geometry_filtering_after_recovery_fails_closed(tmp_path):
+    """Gate B: Verify geometry filtering is re-evaluated after reconciliation and fails closed on mismatch."""
+    plot_id = f"parcel-gate-b-{int(time.time() * 1000)}"
+    tenant_id = "tenant-gate-b"
+    farm_id = "farm-gate-b"
+    geom_hash_1 = "geom-gate-b-1"
+    geom_hash_2 = "geom-gate-b-2"
+    ns = PlotNamespace(tenant_id=tenant_id, farm_id=farm_id, plot_id=plot_id)
+
+    states = {"root_zone_moisture": 0.40, "canopy_vigor": 0.65}
+    sigmas = {"root_zone_moisture": 0.02, "canopy_vigor": 0.03}
+
+    # 1. Publish snapshot 1 under geom_hash_1
+    published1 = _publish_candidate(tenant_id, farm_id, plot_id, geom_hash_1, "job-b-1", states, sigmas)
+    assert plot_snapshot_store.load_latest_plot_snapshot(ns, geometry_hash=geom_hash_1) is not None
+
+    # 2. Publish snapshot 2 under geom_hash_2
+    published2 = _publish_candidate(tenant_id, farm_id, plot_id, geom_hash_2, "job-b-2", states, sigmas)
+
+    # 3. Requesting geom_hash_1 when latest is geom_hash_2 must return None (fail closed)
+    res_mismatch = plot_snapshot_store.load_latest_plot_snapshot(ns, geometry_hash=geom_hash_1, force_verify=True)
+    assert res_mismatch is None
+
+    # 4. Requesting geom_hash_2 must succeed
+    res_match = plot_snapshot_store.load_latest_plot_snapshot(ns, geometry_hash=geom_hash_2, force_verify=True)
+    assert res_match is not None
+    assert res_match["snapshot_id"] == published2["snapshot_id"]
+
+
+def test_gate_c_certified_numerical_record_parity_and_conflict_rejection(tmp_path):
+    """Gate C: Verify writer/reader parity and conflict rejection for certified numerical records."""
+    plot_id = f"parcel-gate-c-{int(time.time() * 1000)}"
+    tenant_id = "tenant-gate-c"
+    farm_id = "farm-gate-c"
+    geom_hash = "geom-gate-c"
+    ns = PlotNamespace(tenant_id=tenant_id, farm_id=farm_id, plot_id=plot_id)
+
+    states = {"root_zone_moisture": 0.45, "canopy_vigor": 0.72}
+    sigmas = {"root_zone_moisture": 0.02, "canopy_vigor": 0.03}
+    num_hash = compute_asmae_vector_numerical_hash(states, sigmas)
+    num_rec = {
+        "states": states,
+        "sigmas": sigmas,
+        "numerical_vector_hash": num_hash,
+    }
+
+    # Construct payload with record ONLY in asmae_result (scientific_result)
+    fe_payload = {
+        "version": SURFACES_SCHEMA_VERSION,
+        "surface_schema_version": SURFACES_SCHEMA_VERSION,
+        "publication_authority": "CERTIFIED_NUMERICAL",
+        "claims_numerical_authority": True,
+        "publication_status": "VALID_NORMAL",
+        "surfaces": [],
+        "intelligence_snapshot_id": "L10-GATE-C-01",
+        "asmae_proof": {
+            "proof_id": "proof-c-1",
+            "numerical_vector_hash": num_hash,
+        },
+        "scientific_evidence_lineage": {
+            "crop_posterior_lineage": "lineage-c",
+            "crop_worldline_event_id": "event-crop-c",
+            "phenology_worldline_event_id": "event-pheno-c",
+            "asmae_posterior_vector_hash": num_hash,
+        },
+    }
+    sci_result = {
+        "snapshot_id": "L10-GATE-C-01",
+        "content_hash": "sci-hash-c",
+        "crop_posterior_lineage": "lineage-c",
+        "crop_worldline_event_id": "event-crop-c",
+        "phenology_worldline_event_id": "event-pheno-c",
+        "asmae_posterior_numerical_record": num_rec,
+        "asmae_numerical_digest": num_hash,
+        "publication_authority": "CERTIFIED_NUMERICAL",
+        "claims_numerical_authority": True,
+    }
+
+    # 1. Positive control: publication succeeds and copies num_rec into frontend payload
+    head = plot_snapshot_store.publish_canonical_plot_snapshot(
+        namespace=ns,
+        snapshot_id="L10-GATE-C-01",
+        frontend_payload=fe_payload,
+        asmae_result=sci_result,
+        job_id="job-gate-c-1",
+        manifest_hash="manifest-c-1",
+        geometry_hash=geom_hash,
+        publication_authority="CERTIFIED_NUMERICAL",
+        snapshot_kind="layer10_terminal",
+    )
+    assert head["snapshot_id"] == "L10-GATE-C-01"
+
+    # Both latest and exact readers certify the numerical authority
+    latest = plot_snapshot_store.load_latest_plot_snapshot(ns, force_verify=True)
+    assert latest is not None
+    assert latest["publication_authority"] == "CERTIFIED_NUMERICAL"
+    assert latest["validation"]["numericalBindingValid"] is True
+
+    exact = plot_snapshot_store.load_and_validate_plot_snapshot_by_id("L10-GATE-C-01", namespace=ns)
+    assert exact is not None
+    assert exact["publication_authority"] == "CERTIFIED_NUMERICAL"
+    assert exact["validation"]["numericalBindingValid"] is True
+
+    # 2. Negative control: conflicting numerical records reject publication
+    conflicting_num_rec = copy.deepcopy(num_rec)
+    conflicting_num_rec["numerical_vector_hash"] = "0" * 64
+    fe_payload_conflict = copy.deepcopy(fe_payload)
+    fe_payload_conflict["intelligence_snapshot_id"] = "L10-GATE-C-02"
+    fe_payload_conflict["asmae_posterior_numerical_record"] = conflicting_num_rec
+    sci_result_conflict = copy.deepcopy(sci_result)
+    sci_result_conflict["snapshot_id"] = "L10-GATE-C-02"
+
+    with pytest.raises(ValueError, match="Contradictory certified numerical records"):
+        plot_snapshot_store.publish_canonical_plot_snapshot(
+            namespace=ns,
+            snapshot_id="L10-GATE-C-02",
+            frontend_payload=fe_payload_conflict,
+            asmae_result=sci_result_conflict,
+            job_id="job-gate-c-2",
+            manifest_hash="manifest-c-2",
+            geometry_hash=geom_hash,
+            publication_authority="CERTIFIED_NUMERICAL",
+            snapshot_kind="layer10_terminal",
+        )
+
+
+def test_gate_f_exact_history_resolves_committed_publication_job(tmp_path):
+    """Gate F: Exact reader resolves committed publication_job_id from commits.jsonl."""
+    plot_id = f"parcel-gate-f-{int(time.time() * 1000)}"
+    tenant_id = "tenant-gate-f"
+    farm_id = "farm-gate-f"
+    geom_hash = "geom-gate-f"
+    ns = PlotNamespace(tenant_id=tenant_id, farm_id=farm_id, plot_id=plot_id)
+    directory = plot_snapshot_store._plot_dir(ns)
+    node_dir = directory / "nodes"
+    pub_dir = directory / "publications"
+    rcpt_dir = directory / "receipts"
+    node_dir.mkdir(parents=True, exist_ok=True)
+    pub_dir.mkdir(parents=True, exist_ok=True)
+    rcpt_dir.mkdir(parents=True, exist_ok=True)
+
+    snap_id = f"L10-GATE-F-{uuid.uuid4().hex[:8]}"
+    compute_job_id = "job-compute-original-1"
+    pub_job_id = "job-publish-committed"
+    safe_pub_job = hashlib.sha256(pub_job_id.encode("utf-8")).hexdigest()[:32]
+    now_ts = datetime.now(timezone.utc).isoformat()
+
+    # Node has job_id = compute_job_id
+    node_payload = {
+        "contract_version": plot_snapshot_store.PLOT_SNAPSHOT_CONTRACT_VERSION,
+        "snapshot_kind": "layer10_terminal",
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "snapshot_id": snap_id,
+        "tenant_id": tenant_id,
+        "farm_id": farm_id,
+        "plot_id": plot_id,
+        "geometry_hash": geom_hash,
+        "recorded_at": now_ts,
+        "published_at": now_ts,
+        "evidence_cutoff_at": None,
+        "observation_window": None,
+        "crop_cycle_id": "cycle-test",
+        "job_id": compute_job_id,
+        "manifest_hash": "manifest-hash-f",
+        "crop_posterior_lineage": None,
+        "crop_worldline_event_id": None,
+        "phenology_worldline_event_id": None,
+        "crop_evidence_ledger_hash": None,
+        "crop_influence_manifest_hash": None,
+        "scientific_result": {"content_hash": "sci-f"},
+        "scientific_content_hash": "sci-f",
+    }
+    hashable_node = {k: v for k, v in node_payload.items() if not k.endswith("_ref")}
+    node_hash = hashlib.sha256(plot_snapshot_store._json_bytes(hashable_node)).hexdigest()
+    node_payload["node_hash"] = node_hash
+
+    # Publication has job_id = pub_job_id
+    frontend_payload = {
+        "surface_schema_version": SURFACES_SCHEMA_VERSION,
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "publication_status": "READY_DIAGNOSTIC_ONLY",
+        "surfaces": [],
+        "intelligence_snapshot_id": snap_id,
+    }
+    pub_payload = {
+        "contract_version": plot_snapshot_store.PLOT_PUBLICATION_CONTRACT_VERSION,
+        "snapshot_kind": "layer10_terminal",
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "tenant_id": tenant_id,
+        "farm_id": farm_id,
+        "plot_id": plot_id,
+        "geometry_hash": geom_hash,
+        "snapshot_id": snap_id,
+        "job_id": pub_job_id,
+        "manifest_hash": "manifest-hash-f",
+        "node_ref": f"nodes/{snap_id}.json",
+        "node_hash": node_hash,
+        "frontend_payload": frontend_payload,
+        "published_at": now_ts,
+        "evidence_cutoff_at": None,
+        "observation_window": None,
+        "crop_cycle_id": "cycle-test",
+        "recorded_at": now_ts,
+    }
+    hashable_pub = {k: v for k, v in pub_payload.items() if not k.endswith("_ref")}
+    pub_hash = hashlib.sha256(plot_snapshot_store._json_bytes(hashable_pub)).hexdigest()
+    pub_payload["publication_hash"] = pub_hash
+
+    # Receipt has job_id = pub_job_id, source_node_job_id = compute_job_id
+    rcpt_payload = {
+        "contract_version": plot_snapshot_store.PLOT_SNAPSHOT_RECEIPT_CONTRACT_VERSION,
+        "snapshot_kind": "layer10_terminal",
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "tenant_id": tenant_id,
+        "farm_id": farm_id,
+        "plot_id": plot_id,
+        "geometry_hash": geom_hash,
+        "snapshot_id": snap_id,
+        "node_ref": f"nodes/{snap_id}.json",
+        "node_hash": node_hash,
+        "source_node_job_id": compute_job_id,
+        "source_node_manifest_hash": "manifest-hash-f",
+        "job_id": pub_job_id,
+        "manifest_hash": "manifest-hash-f",
+        "frontend_publication_ref": f"publications/{safe_pub_job}.json",
+        "frontend_publication_hash": pub_hash,
+        "equivalence_reason": "scientific_content_hash_equivalent",
+        "recorded_at": now_ts,
+    }
+    hashable_rcpt = {k: v for k, v in rcpt_payload.items() if not k.endswith("_ref")}
+    rcpt_hash = hashlib.sha256(plot_snapshot_store._json_bytes(hashable_rcpt)).hexdigest()
+    rcpt_payload["receipt_hash"] = rcpt_hash
+
+    # Write files to disk
+    (node_dir / f"{snap_id}.json").write_bytes(plot_snapshot_store._json_bytes(node_payload))
+    (pub_dir / f"{safe_pub_job}.json").write_bytes(plot_snapshot_store._json_bytes(pub_payload))
+    (rcpt_dir / f"{safe_pub_job}.json").write_bytes(plot_snapshot_store._json_bytes(rcpt_payload))
+
+    # Commit record has publication_job_id = pub_job_id
+    commit_rec = {
+        "commit_seq": 1,
+        "snapshot_id": snap_id,
+        "node_hash": node_hash,
+        "frontend_publication_hash": pub_hash,
+        "publication_receipt_hash": rcpt_hash,
+        "publication_job_id": pub_job_id,
+        "committed_at": now_ts,
+        "parent_commit_hash": "0" * 64,
+    }
+    commit_rec["commit_hash"] = hashlib.sha256(plot_snapshot_store._json_bytes({k: v for k, v in commit_rec.items() if k != "commit_hash"})).hexdigest()
+    commits_file = directory / "commits.jsonl"
+    commits_file.write_text(json.dumps(commit_rec) + "\n", encoding="utf-8")
+
+    # Head points to this commit
+    head = {
+        "contract_version": plot_snapshot_store.PLOT_SNAPSHOT_CONTRACT_VERSION,
+        "snapshot_kind": "layer10_terminal",
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "tenant_id": tenant_id,
+        "farm_id": farm_id,
+        "plot_id": plot_id,
+        "geometry_hash": geom_hash,
+        "snapshot_id": snap_id,
+        "node_ref": str(node_dir / f"{snap_id}.json"),
+        "node_hash": node_hash,
+        "publication_job_id": pub_job_id,
+        "publication_manifest_hash": "manifest-hash-f",
+        "publication_receipt_ref": str(rcpt_dir / f"{safe_pub_job}.json"),
+        "publication_receipt_hash": rcpt_hash,
+        "frontend_publication_ref": str(pub_dir / f"{safe_pub_job}.json"),
+        "frontend_publication_hash": pub_hash,
+        "published_at": now_ts,
+        "commit_seq": 1,
+        "commit_hash": commit_rec["commit_hash"],
+    }
+    (directory / "head.json").write_bytes(plot_snapshot_store._json_bytes(head))
+
+    # Exact lookup succeeds by resolving publication_job_id from commits.jsonl
+    exact = plot_snapshot_store.load_and_validate_plot_snapshot_by_id(snap_id, namespace=ns)
+    assert exact is not None
+    assert exact["snapshot_id"] == snap_id
+
+
+def test_gate_g_commit_ledger_parser_type_safety_on_non_string_hashes(tmp_path):
+    """Gate G: validate_publication_commit_ledger strictly validates hash types before set hashing."""
+    plot_id = f"parcel-gate-g-{int(time.time() * 1000)}"
+    tenant_id = "tenant-gate-g"
+    farm_id = "farm-gate-g"
+    ns = PlotNamespace(tenant_id=tenant_id, farm_id=farm_id, plot_id=plot_id)
+    directory = plot_snapshot_store._plot_dir(ns)
+    directory.mkdir(parents=True, exist_ok=True)
+    commits_file = directory / "commits.jsonl"
+
+    # Line with dict as publication_receipt_hash
+    bad_line = {
+        "commit_seq": 1,
+        "snapshot_id": "snap-bad",
+        "parent_commit_hash": "0" * 64,
+        "node_hash": "a" * 64,
+        "frontend_publication_hash": "b" * 64,
+        "publication_receipt_hash": {"nested": "dict"},
+        "commit_hash": "c" * 64,
+    }
+    commits_file.write_text(json.dumps(bad_line) + "\n", encoding="utf-8")
+
+    is_valid, records, err = plot_snapshot_store.validate_publication_commit_ledger(directory)
+    assert is_valid is False
+    assert records == []
+    assert "Invalid publication_receipt_hash at line 1" in err
 

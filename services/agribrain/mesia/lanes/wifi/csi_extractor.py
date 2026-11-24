@@ -162,6 +162,11 @@ class NativeWifiCsiExtractor:
         for i in range(num_complex):
             offset = i * 8
             real, imag = struct.unpack("<ff", raw_bytes[offset:offset+8])
+            if not math.isfinite(real) or not math.isfinite(imag):
+                from services.agribrain.mesia.contracts.capture_manifest import QuarantinedCaptureException
+                raise QuarantinedCaptureException(
+                    f"Non-finite CSI sample detected at index {i}: real={real}, imag={imag}"
+                )
             amp = math.sqrt(real * real + imag * imag)
             phase = math.atan2(imag, real)
             amplitudes_linear.append(round(amp, 6))

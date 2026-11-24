@@ -249,3 +249,112 @@ def test_truth_tier_and_epistemic_classification():
     assert rf_res["truth_tier"] == TruthTier.NATIVE_RF_CAPTURE.value
     assert rf_res["truth_class"] == TruthClass.MEASURED_NATIVE.value
     assert rf_res["is_derived_model_inference"] is False
+
+
+# ---------------------------------------------------------------------------
+# 6. Gates D & E: Wi-Fi CSI Non-finite Validation and In-Situ Fallback
+# ---------------------------------------------------------------------------
+
+def test_sigmf_nonfinite_samples_quarantined_gate_d(tmp_path: Path):
+    """Gate D: SigMF samples with NaN or Infinity must raise QuarantinedCaptureException and never issue measured waves."""
+    import struct
+    tenant_id = "tenant_gate_d"
+    plot_id = "plot_gate_d"
+
+    # Construct 32 complex float32 samples with NaN at index 5
+    samples = []
+    for idx in range(32):
+        if idx == 5:
+            samples.extend([float("nan"), 0.5])
+        else:
+            samples.extend([1.0, 0.5])
+    raw_nan_bytes = struct.pack("<64f", *samples)
+
+    meta = {
+        "global": {"core:datatype": "cf32_le", "core:sample_rate": 20.0e6, "core:hw": "iwlwifi_test"},
+        "captures": [{"core:sample_start": 0, "core:frequency": 2.437e9, "core:datetime": "2026-05-10T14:30:00+00:00"}],
+        "annotations": [{"core:sample_start": 0, "core:sample_count": 32, "mesia:agc_gain_db": 28.5}],
+    }
+
+    manifest = ingest_sigmf_capture(
+        tenant_id=tenant_id,
+        plot_id=plot_id,
+        raw_data_bytes=raw_nan_bytes,
+        metadata_dict=meta,
+        storage_root=tmp_path,
+    )
+
+    # Directly reading via NativeWifiCsiExtractor raises QuarantinedCaptureException
+    with pytest.raises(QuarantinedCaptureException, match="Non-finite CSI sample detected"):
+        NativeWifiCsiExtractor.read_sigmf(manifest.storage_prefix)
+
+    # Calling MesiaProductionService._process_real_in_situ_wifi_csi returns awaiting/unverified, never MEASURED_IN_SITU_RADIO_WAVES
+    from services.agribrain.mesia.service import MesiaProductionService
+    from services.agribrain.common.plot_namespace import PlotNamespace
+
+    res = MesiaProductionService._process_real_in_situ_wifi_csi(
+        plot_namespace=PlotNamespace(tenant_id=tenant_id, farm_id="default_farm", plot_id=plot_id),
+        storage_root=tmp_path,
+    )
+    assert res["status"] != "MEASURED_IN_SITU_RADIO_WAVES"
+    assert res["physical_waves_measured"] is False
+    assert "Sample decode/validation failed" in res.get("message", "")
+
+
+def test_mesia_manifest_search_falls_back_to_older_valid_capture_gate_e(tmp_path: Path):
+    """Gate E: When the newest capture fails decode or finite validation, fall back to older valid capture."""
+    import struct
+    import time
+    tenant_id = "tenant_gate_e"
+    plot_id = "plot_gate_e"
+
+    # 1. Ingest older valid capture (32 valid complex samples)
+    valid_samples = [1.0, 0.5] * 32
+    raw_valid_bytes = struct.pack("<64f", *valid_samples)
+    meta_valid = {
+        "global": {"core:datatype": "cf32_le", "core:sample_rate": 20.0e6, "core:hw": "iwlwifi_test"},
+        "captures": [{"core:sample_start": 0, "core:frequency": 2.437e9, "core:datetime": "2026-05-10T14:00:00+00:00"}],
+        "annotations": [{"core:sample_start": 0, "core:sample_count": 32, "mesia:agc_gain_db": 28.5}],
+    }
+    manifest_old = ingest_sigmf_capture(
+        tenant_id=tenant_id,
+        plot_id=plot_id,
+        raw_data_bytes=raw_valid_bytes,
+        metadata_dict=meta_valid,
+        storage_root=tmp_path,
+    )
+
+    time.sleep(0.02)
+
+    # 2. Ingest newer invalid capture (with Infinity)
+    inf_samples = []
+    for idx in range(32):
+        if idx == 0:
+            inf_samples.extend([float("inf"), 0.5])
+        else:
+            inf_samples.extend([1.0, 0.5])
+    raw_inf_bytes = struct.pack("<64f", *inf_samples)
+    meta_inf = {
+        "global": {"core:datatype": "cf32_le", "core:sample_rate": 20.0e6, "core:hw": "iwlwifi_test"},
+        "captures": [{"core:sample_start": 0, "core:frequency": 2.437e9, "core:datetime": "2026-05-10T14:30:00+00:00"}],
+        "annotations": [{"core:sample_start": 0, "core:sample_count": 32, "mesia:agc_gain_db": 28.5}],
+    }
+    manifest_new = ingest_sigmf_capture(
+        tenant_id=tenant_id,
+        plot_id=plot_id,
+        raw_data_bytes=raw_inf_bytes,
+        metadata_dict=meta_inf,
+        storage_root=tmp_path,
+    )
+
+    # 3. Call _process_real_in_situ_wifi_csi: should reject the newer invalid capture and select the older valid capture
+    from services.agribrain.mesia.service import MesiaProductionService
+    from services.agribrain.common.plot_namespace import PlotNamespace
+
+    res = MesiaProductionService._process_real_in_situ_wifi_csi(
+        plot_namespace=PlotNamespace(tenant_id=tenant_id, farm_id="default_farm", plot_id=plot_id),
+        storage_root=tmp_path,
+    )
+    assert res["status"] == "MEASURED_IN_SITU_RADIO_WAVES"
+    assert res["physical_waves_measured"] is True
+    assert res["capture_id"] == manifest_old.capture_id

@@ -461,14 +461,27 @@ def validate_publication_commit_ledger(
 
         seq = rec.get("commit_seq")
         expected_seq = len(records) + 1
-        if seq != expected_seq:
+        if not isinstance(seq, int) or seq != expected_seq:
             return False, [], f"Ledger sequence discontinuity at line {line_idx}: expected {expected_seq}, got {seq}"
 
         sid = rec.get("snapshot_id")
         if not sid or not isinstance(sid, str):
             return False, [], f"Missing or invalid snapshot_id at line {line_idx}"
 
-        rcpt_hash = rec.get("publication_receipt_hash")
+        parent_hash = rec.get("parent_commit_hash")
+        expected_parent = records[-1]["commit_hash"] if records else ("0" * 64)
+        if not isinstance(parent_hash, str) or not bool(_HEX64_REGEX.fullmatch(parent_hash)):
+            return False, [], f"Invalid parent_commit_hash at line {line_idx}: expected 64-char lowercase sha256 hex"
+        if parent_hash != expected_parent:
+            return False, [], f"Parent commit hash mismatch at line {line_idx}: expected {expected_parent}, got {parent_hash}"
+
+        # Strictly validate all hash fields are 64-character lowercase hexadecimal strings before any set hashing (Gate G)
+        for hkey in ("node_hash", "frontend_publication_hash", "publication_receipt_hash", "commit_hash"):
+            hval = rec.get(hkey)
+            if not isinstance(hval, str) or not bool(_HEX64_REGEX.fullmatch(hval)):
+                return False, [], f"Invalid {hkey} at line {line_idx}: expected 64-char lowercase sha256 hex"
+
+        rcpt_hash = rec["publication_receipt_hash"]
         commit_entry_key = (sid, rcpt_hash)
         if commit_entry_key in seen_entries:
             return False, [], f"Duplicate commit entry for snapshot '{sid}' in commit ledger at line {line_idx}"
@@ -478,23 +491,9 @@ def validate_publication_commit_ledger(
             return False, [], f"Duplicate publication_receipt_hash in commit ledger at line {line_idx}"
         seen_receipt_hashes.add(rcpt_hash)
 
-        parent_hash = rec.get("parent_commit_hash")
-        expected_parent = records[-1]["commit_hash"] if records else ("0" * 64)
-        if parent_hash != expected_parent:
-            return False, [], f"Parent commit hash mismatch at line {line_idx}: expected {expected_parent}, got {parent_hash}"
-        if not bool(_HEX64_REGEX.fullmatch(str(parent_hash or ""))):
-            return False, [], f"Invalid parent_commit_hash at line {line_idx}: expected 64-char lowercase sha256 hex"
-
-        for hkey in ("node_hash", "frontend_publication_hash", "publication_receipt_hash"):
-            hval = rec.get(hkey)
-            if not hval or not isinstance(hval, str) or not bool(_HEX64_REGEX.fullmatch(hval)):
-                return False, [], f"Invalid {hkey} at line {line_idx}: expected 64-char lowercase sha256 hex"
-
         hashable_rec = {k: v for k, v in rec.items() if k != "commit_hash"}
         computed_hash = hashlib.sha256(_json_bytes(hashable_rec)).hexdigest()
-        claimed_hash = rec.get("commit_hash")
-        if not claimed_hash or not bool(_HEX64_REGEX.fullmatch(str(claimed_hash))):
-            return False, [], f"Invalid commit_hash at line {line_idx}: expected 64-char lowercase sha256 hex"
+        claimed_hash = rec["commit_hash"]
         if claimed_hash != computed_hash:
             return False, [], f"Commit hash mismatch at line {line_idx}: computed {computed_hash}, claimed {claimed_hash}"
 
@@ -571,20 +570,19 @@ def reconcile_publication_ledger_and_head(
     pub = _read(pub_path)
     rcpt = _read(rcpt_path)
 
-    # Check namespace & snapshot bindings in pub and rcpt
-    if pub.get("snapshot_id") != tip_sid or rcpt.get("snapshot_id") != tip_sid:
-        return current_head if current_head else None
-    if pub.get("plot_id") and pub.get("plot_id") != ns.plot_id:
-        return current_head if current_head else None
-    if rcpt.get("plot_id") and rcpt.get("plot_id") != ns.plot_id:
-        return current_head if current_head else None
-    if pub.get("tenant_id") and pub.get("tenant_id") != ns.tenant_id:
-        return current_head if current_head else None
-    if rcpt.get("tenant_id") and rcpt.get("tenant_id") != ns.tenant_id:
-        return current_head if current_head else None
-    if pub.get("farm_id") and pub.get("farm_id") != ns.farm_id:
-        return current_head if current_head else None
-    if rcpt.get("farm_id") and rcpt.get("farm_id") != ns.farm_id:
+    # Mandatory namespace & snapshot bindings in pub and rcpt (P2-A)
+    if (
+        pub.get("snapshot_id") != tip_sid
+        or rcpt.get("snapshot_id") != tip_sid
+        or pub.get("plot_id") != ns.plot_id
+        or rcpt.get("plot_id") != ns.plot_id
+        or pub.get("tenant_id") != ns.tenant_id
+        or rcpt.get("tenant_id") != ns.tenant_id
+        or pub.get("farm_id") != ns.farm_id
+        or rcpt.get("farm_id") != ns.farm_id
+        or pub.get("geometry_hash") != node.get("geometry_hash")
+        or rcpt.get("geometry_hash") != node.get("geometry_hash")
+    ):
         return current_head if current_head else None
 
     # Recompute cryptographic publication hash from content (R2)
@@ -628,44 +626,48 @@ def reconcile_publication_ledger_and_head(
     if published_schema_version != SURFACES_SCHEMA_VERSION:
         return current_head if current_head else None
 
-    # Cryptographic temporal binding verification (P1-02)
-    authoritative_published_at = (
-        pub.get("published_at")
-        or node.get("published_at")
-        or node.get("recorded_at")
-    )
-    authoritative_evidence_cutoff = (
-        pub.get("evidence_cutoff_at")
-        or node.get("evidence_cutoff_at")
-    )
-    authoritative_observation_window = (
-        pub.get("observation_window")
-        or node.get("observation_window")
-    )
-    temporal_binding_valid = bool(
-        (not pub.get("published_at") or not node.get("published_at") or pub.get("published_at") == node.get("published_at"))
-        and (not pub.get("evidence_cutoff_at") or not node.get("evidence_cutoff_at") or pub.get("evidence_cutoff_at") == node.get("evidence_cutoff_at"))
-        and (not pub.get("observation_window") or not node.get("observation_window") or pub.get("observation_window") == node.get("observation_window"))
-        and authoritative_published_at is not None
-    )
-    if not temporal_binding_valid:
+    # Cross-artifact authority agreement verification (P2-B)
+    node_auth = node.get("publication_authority")
+    pub_auth_claim = pub.get("publication_authority")
+    rcpt_auth = rcpt.get("publication_authority")
+    fe_auth = pub_frontend.get("publication_authority")
+    declared_authorities = {
+        auth for auth in (node_auth, pub_auth_claim, rcpt_auth, fe_auth) if auth
+    }
+    if len(declared_authorities) > 1:
+        # Conflicting authority declarations across artifacts strictly fail closed (P2-B)
+        return current_head if current_head else None
+    pub_auth = declared_authorities.pop() if declared_authorities else "DIAGNOSTIC_ONLY"
+
+    # Cryptographic temporal binding verification (P2-C)
+    if not pub.get("published_at") or not node.get("published_at") or pub.get("published_at") != node.get("published_at"):
+        return current_head if current_head else None
+    if (pub.get("evidence_cutoff_at") or None) != (node.get("evidence_cutoff_at") or None):
+        return current_head if current_head else None
+    if (pub.get("observation_window") or None) != (node.get("observation_window") or None):
         return current_head if current_head else None
 
-    # Cryptographic bitemporal replay receipt verification (P1-02)
-    replay_receipt_valid = True
-    if node.get("bitemporal_replay_receipt"):
+    authoritative_published_at = pub.get("published_at")
+    authoritative_evidence_cutoff = pub.get("evidence_cutoff_at")
+    authoritative_observation_window = pub.get("observation_window")
+    temporal_binding_valid = True
+
+    # Cryptographic bitemporal replay receipt companion verification (P2-C)
+    has_node_rr = bool(node.get("bitemporal_replay_receipt"))
+    has_pub_rr = bool(pub.get("bitemporal_replay_receipt"))
+    has_rcpt_rr = bool(rcpt.get("bitemporal_replay_receipt"))
+    if has_node_rr or has_pub_rr or has_rcpt_rr:
+        if not (has_node_rr and has_pub_rr and has_rcpt_rr):
+            return current_head if current_head else None
         n_rr = node.get("bitemporal_replay_receipt") or {}
         p_rr = pub.get("bitemporal_replay_receipt") or {}
         r_rr = rcpt.get("bitemporal_replay_receipt") or {}
         expected_digest = node.get("evidence_set_digest")
         if not expected_digest or n_rr.get("evidence_set_digest") != expected_digest:
-            replay_receipt_valid = False
-        if p_rr and p_rr.get("evidence_set_digest") != expected_digest:
-            replay_receipt_valid = False
-        if r_rr and r_rr.get("evidence_set_digest") != expected_digest:
-            replay_receipt_valid = False
-    if not replay_receipt_valid:
-        return current_head if current_head else None
+            return current_head if current_head else None
+        if p_rr.get("evidence_set_digest") != expected_digest or r_rr.get("evidence_set_digest") != expected_digest:
+            return current_head if current_head else None
+    replay_receipt_valid = True
 
     # Lineage verification (P1-02)
     lineage_valid = bool(
@@ -682,13 +684,6 @@ def reconcile_publication_ledger_and_head(
     )
     if not lineage_valid:
         return current_head if current_head else None
-
-    pub_auth = (
-        pub.get("publication_authority")
-        or node.get("publication_authority")
-        or pub_frontend.get("publication_authority")
-        or "DIAGNOSTIC_ONLY"
-    )
 
     reconciled_head = {
         "contract_version": PLOT_SNAPSHOT_CONTRACT_VERSION,
@@ -966,10 +961,20 @@ def publish_canonical_plot_snapshot(
         immutable_frontend_payload["claims_numerical_authority"] = False
         scientific_result["claims_numerical_authority"] = False
     elif pub_auth == "CERTIFIED_NUMERICAL":
-        num_rec = (
-            immutable_frontend_payload.get("asmae_posterior_numerical_record")
-            or scientific_result.get("asmae_posterior_numerical_record")
-        )
+        num_rec_fe = immutable_frontend_payload.get("asmae_posterior_numerical_record")
+        num_rec_sci = scientific_result.get("asmae_posterior_numerical_record")
+        if num_rec_fe and num_rec_sci and num_rec_fe != num_rec_sci:
+            raise ValueError("Contradictory certified numerical records in frontend_payload and scientific_result")
+        num_rec = num_rec_fe or num_rec_sci
+        if not num_rec:
+            raise ValueError("CERTIFIED_NUMERICAL publication requires asmae_posterior_numerical_record")
+
+        # Gate C: Canonically populate immutable_frontend_payload and scientific_result
+        immutable_frontend_payload["asmae_posterior_numerical_record"] = copy.deepcopy(num_rec)
+        scientific_result["asmae_posterior_numerical_record"] = copy.deepcopy(num_rec)
+        if isinstance(scientific_result.get("asmae"), dict):
+            scientific_result["asmae"]["asmae_posterior_numerical_record"] = copy.deepcopy(num_rec)
+
         actual_num_hash = validate_certified_numerical_publication(
             num_rec,
             immutable_frontend_payload,
@@ -1463,30 +1468,13 @@ def publish_canonical_plot_snapshot(
         reconcile_publication_ledger_and_head(directory, ns)
         current_head_check = _read(_head_path(ns))
 
-        # Idempotent re-publication guard: if snapshot is already the committed head with identical hashes, no-op
-        if current_head_check.get("snapshot_id") == snapshot_id:
-            if (
-                current_head_check.get("node_hash") == envelope.get("node_hash")
-                and current_head_check.get("frontend_publication_hash") == publication.get("publication_hash")
-                and current_head_check.get("publication_receipt_hash") == receipt.get("receipt_hash")
-            ):
-                return current_head_check
-
-        if not allow_overwrite:
-            if current_head_check.get("snapshot_id") != snapshot_id:
-                if prior_head and current_head_check:
-                    if current_head_check.get("snapshot_id") != prior_head.get("snapshot_id"):
-                        raise ValueError("concurrent publication collision: head was superseded by another process")
-                elif not prior_head and current_head_check:
-                    raise ValueError("concurrent publication collision: head was initialized by another process")
-
         # ── Publication Commit Ledger (Append-only hash-bound commit index) ──
         commits_file = directory / "commits.jsonl"
         is_ledger_valid, existing_commits, ledger_err = validate_publication_commit_ledger(directory)
         if not is_ledger_valid:
             raise ValueError(f"Cannot publish snapshot: commit ledger is corrupted: {ledger_err}")
 
-        # Post-ledger store missing ledger guard (R1):
+        # Post-ledger store missing ledger guard (R1, Gate A):
         has_post_ledger_head = bool(
             current_head_check.get("commit_seq") is not None
             or current_head_check.get("commit_hash")
@@ -1508,6 +1496,38 @@ def publish_canonical_plot_snapshot(
                     f"Cannot publish snapshot: commit ledger tip '{tip.get('snapshot_id')}' could not be reconciled with head "
                     "(quarantined/repair state required)"
                 )
+
+        # Idempotent re-publication guard (Gate A):
+        # Executed strictly AFTER validating commits.jsonl and post-ledger missing checks.
+        if current_head_check.get("snapshot_id") == snapshot_id:
+            if (
+                current_head_check.get("node_hash") == envelope.get("node_hash")
+                and current_head_check.get("frontend_publication_hash") == publication.get("publication_hash")
+                and current_head_check.get("publication_receipt_hash") == receipt.get("receipt_hash")
+            ):
+                matching_commit = next(
+                    (
+                        c for c in existing_commits
+                        if c.get("snapshot_id") == snapshot_id
+                        and c.get("node_hash") == envelope.get("node_hash")
+                        and c.get("frontend_publication_hash") == publication.get("publication_hash")
+                        and c.get("publication_receipt_hash") == receipt.get("receipt_hash")
+                    ),
+                    None,
+                )
+                if matching_commit or (not has_post_ledger_head and not commits_file.exists()):
+                    return current_head_check
+                raise ValueError(
+                    "Cannot publish snapshot: snapshot is claimed as head but no matching committed record exists in ledger"
+                )
+
+        if not allow_overwrite:
+            if current_head_check.get("snapshot_id") != snapshot_id:
+                if prior_head and current_head_check:
+                    if current_head_check.get("snapshot_id") != prior_head.get("snapshot_id"):
+                        raise ValueError("concurrent publication collision: head was superseded by another process")
+                elif not prior_head and current_head_check:
+                    raise ValueError("concurrent publication collision: head was initialized by another process")
 
         if not commits_file.exists() and current_head_check and current_head_check.get("snapshot_id"):
             # Bootstrap legacy committed head as genesis commit ONLY if genuinely pre-ledger (no commit markers)
@@ -1975,6 +1995,8 @@ def load_latest_plot_snapshot(
         with _plot_publication_lock(directory):
             reconcile_publication_ledger_and_head(directory, ns)
         head = _read(head_file)
+        if geometry_hash and head.get("geometry_hash") != geometry_hash:
+            return None
         tip = records[-1]
         if (
             head.get("commit_hash") != tip["commit_hash"]
@@ -1989,6 +2011,8 @@ def load_latest_plot_snapshot(
         with _plot_publication_lock(directory):
             reconcile_publication_ledger_and_head(directory, ns)
         head = _read(head_file)
+        if geometry_hash and head.get("geometry_hash") != geometry_hash:
+            return None
 
     if force_verify and commits_file.exists():
         is_ledger_valid, records, _ = validate_publication_commit_ledger(directory)
@@ -2001,6 +2025,9 @@ def load_latest_plot_snapshot(
             or head.get("snapshot_id") != tip["snapshot_id"]
         ):
             return None
+
+    if geometry_hash and head.get("geometry_hash") != geometry_hash:
+        return None
 
     snapshot_id = head.get("snapshot_id")
     if not snapshot_id:
@@ -2067,6 +2094,8 @@ def load_latest_plot_snapshot(
         with _SNAPSHOT_CACHE_LOCK:
             cached = _CANONICAL_SNAPSHOT_CACHE.get(cache_key)
             if cached is not None:
+                if geometry_hash and cached.get("geometry_hash") != geometry_hash:
+                    return None
                 return copy.deepcopy(cached)
 
     if not node_path.exists():
@@ -2080,6 +2109,8 @@ def load_latest_plot_snapshot(
         or node.get("farm_id") != ns.farm_id
         or node.get("snapshot_id") != snapshot_id
     ):
+        return None
+    if geometry_hash and node.get("geometry_hash") != geometry_hash:
         return None
 
     try:
@@ -2095,6 +2126,11 @@ def load_latest_plot_snapshot(
 
     publication = _read(pub_path)
     receipt = _read(receipt_path)
+    if geometry_hash and (
+        publication.get("geometry_hash") != geometry_hash
+        or receipt.get("geometry_hash") != geometry_hash
+    ):
+        return None
 
     node["snapshot_ref"] = f"nodes/{snapshot_id}.json"
     node["publication_receipt_ref"] = head.get("publication_receipt_ref")
@@ -2174,8 +2210,13 @@ def load_latest_plot_snapshot(
         and head.get("observation_window") == authoritative_observation_window
     )
 
-    # Cryptographic ASMAE numerical binding validation (R12-06 production reader)
-    num_rec = publication_frontend.get("asmae_posterior_numerical_record")
+    # Cryptographic ASMAE numerical binding validation (R12-06 production reader, Gate C parity)
+    num_rec = (
+        publication_frontend.get("asmae_posterior_numerical_record")
+        or (node.get("frontend_payload") or {}).get("asmae_posterior_numerical_record")
+        or (node.get("scientific_result") or {}).get("asmae_posterior_numerical_record")
+        or (node.get("asmae") or {}).get("asmae_posterior_numerical_record")
+    )
     numerical_binding_valid: Optional[bool] = None
 
     # Check cross-artifact agreement between immutable node and published frontend
@@ -2523,7 +2564,19 @@ def load_and_validate_plot_snapshot_by_id(
     if not node.get("node_hash") or node.get("node_hash") != computed_node_hash:
         return None
 
-    job_id = node.get("job_id") or node.get("publication_job_id")
+    # Look up committed publication_job_id from commits.jsonl when available (Gate F)
+    # A scientific node may have been created in an earlier job or reused across jobs;
+    # exact history must resolve the committed publication job rather than the node's original computation job.
+    committed_job_id = None
+    commits_file = directory / "commits.jsonl"
+    if commits_file.exists():
+        is_ledger_valid, records, _ = validate_publication_commit_ledger(directory)
+        if is_ledger_valid and records:
+            matching_commits = [r for r in records if r.get("snapshot_id") == snapshot_id]
+            if matching_commits:
+                committed_job_id = matching_commits[-1].get("publication_job_id")
+
+    job_id = committed_job_id or node.get("publication_job_id") or node.get("job_id")
     if not job_id:
         return None
 
@@ -2721,8 +2774,13 @@ def load_and_validate_plot_snapshot_by_id(
         if r_rr and r_rr.get("evidence_set_digest") != expected_digest:
             replay_receipt_valid = False
 
-    # Numerical binding verification
-    num_rec = publication_frontend.get("asmae_posterior_numerical_record")
+    # Numerical binding verification (Gate C parity)
+    num_rec = (
+        publication_frontend.get("asmae_posterior_numerical_record")
+        or (node.get("frontend_payload") or {}).get("asmae_posterior_numerical_record")
+        or (node.get("scientific_result") or {}).get("asmae_posterior_numerical_record")
+        or (node.get("asmae") or {}).get("asmae_posterior_numerical_record")
+    )
     node_num_hash = (
         (node.get("scientific_result") or {}).get("asmae_numerical_digest")
         or ((node.get("frontend_payload") or {}).get("asmae_posterior_numerical_record") or {}).get("numerical_vector_hash")

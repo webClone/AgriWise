@@ -1030,6 +1030,7 @@ def test_certified_publication_omitting_required_proof_or_lineage_fails_closed_a
     # 2. Candidate A: Complete numerical record but MISSING asmae_proof.numerical_vector_hash
     num_rec_2, vec_hash_2 = _make_certified_numerical_record(0.42)
     res_2 = _base_diagnostic_asmae_result(plot_id=plot_id)
+    res_2["content_hash"] = "content-hash-bad-proof"
     res_2["publication_authority"] = "CERTIFIED_NUMERICAL"
     res_2["claims_numerical_authority"] = True
     res_2["asmae_posterior_numerical_record"] = num_rec_2
@@ -1073,6 +1074,7 @@ def test_certified_publication_omitting_required_proof_or_lineage_fails_closed_a
     # 3. Candidate B: Complete numerical record but MISSING scientific_evidence_lineage.asmae_posterior_vector_hash
     num_rec_3, vec_hash_3 = _make_certified_numerical_record(0.45)
     res_3 = _base_diagnostic_asmae_result(plot_id=plot_id)
+    res_3["content_hash"] = "content-hash-bad-lineage"
     res_3["publication_authority"] = "CERTIFIED_NUMERICAL"
     res_3["claims_numerical_authority"] = True
     res_3["asmae_posterior_numerical_record"] = num_rec_3
