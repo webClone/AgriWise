@@ -328,7 +328,7 @@ def test_certified_numerical_snapshot_with_missing_record_rejected():
     fe_payload["publication_authority"] = "CERTIFIED_NUMERICAL"
     fe_payload["claims_numerical_authority"] = True
 
-    with pytest.raises(ValueError, match="CERTIFIED_NUMERICAL publication requires complete uncertainty"):
+    with pytest.raises(ValueError, match=r"CERTIFIED_NUMERICAL publication requires (?:complete uncertainty|asmae_posterior_numerical_record)"):
         plot_snapshot_store.publish_canonical_plot_snapshot(
             namespace=ns,
             geometry_hash="geom-neg",

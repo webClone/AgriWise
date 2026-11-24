@@ -130,7 +130,7 @@ def test_snapshot_identity_reuse_with_differing_numerical_vector_fails_closed():
     conflicting_science["snapshot_ref"] = ref
     conflicting_frontend = _base_frontend_payload(snap_id, num_val=0.800)
 
-    with pytest.raises(ValueError, match="numerical record mismatch|numerical digest mismatch"):
+    with pytest.raises(ValueError, match=r"numerical record mismatch|numerical digest mismatch|Contradictory certified numerical records"):
         plot_snapshot_store.publish_canonical_plot_snapshot(
             namespace=ns,
             geometry_hash=geom_hash,
@@ -223,7 +223,7 @@ def test_numerical_authority_claimed_without_record_fails_closed():
     frontend["claims_numerical_authority"] = True
 
     # P1-A: Write boundary fails closed before canonical head changes
-    with pytest.raises(ValueError, match="CERTIFIED_NUMERICAL publication requires complete uncertainty"):
+    with pytest.raises(ValueError, match=r"CERTIFIED_NUMERICAL publication requires (?:complete uncertainty|asmae_posterior_numerical_record)"):
         plot_snapshot_store.publish_canonical_plot_snapshot(
             namespace=ns,
             geometry_hash=geom_hash,
