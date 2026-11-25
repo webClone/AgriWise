@@ -13,8 +13,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-# Ensure imports work from service root
-sys.path.append(str(Path(__file__).parent.parent))
+# Ensure imports work from both repo root (services.agribrain.*) and service root
+_REPO_ROOT = str(Path(__file__).resolve().parents[3])
+_SERVICE_ROOT = str(Path(__file__).resolve().parent.parent)
+for _p in (_REPO_ROOT, _SERVICE_ROOT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from rollout.asmae_rollout_registry import ARCHIVE_PILOT_REGISTRY, is_archive_pilot_plot
 from layer0.archive.archive_policy import ARCHIVE_MODES, PILOT_BUDGETS
@@ -83,9 +87,18 @@ def _fetch_real_daily_weather(
     if offline is True or os.environ.get("AGRIWISE_ARCHIVE_OFFLINE", "false").lower() == "true":
         return {}, {"status": "unavailable", "reason": "offline_mode", "provider": "era5-open-meteo"}
     role_val = role_for_data_kind("historical_reanalysis").value
-    raw = fetch_historical_weather(lat, lng, start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
-    records = raw.get("records") if isinstance(raw, dict) else (raw if isinstance(raw, list) else None)
-    source_name = str((raw or {}).get("source") or "era5-open-meteo") if isinstance(raw, dict) else "era5-open-meteo"
+    records: List[Dict[str, Any]] = []
+    source_name = "era5-open-meteo"
+    cursor = start_dt
+    while cursor <= end_dt:
+        win_end = min(end_dt, cursor + timedelta(days=730))
+        raw = fetch_historical_weather(lat, lng, cursor.strftime("%Y-%m-%d"), win_end.strftime("%Y-%m-%d"))
+        chunk_recs = raw.get("records") if isinstance(raw, dict) else (raw if isinstance(raw, list) else None)
+        if isinstance(raw, dict) and raw.get("source"):
+            source_name = str(raw["source"])
+        if chunk_recs:
+            records.extend(chunk_recs)
+        cursor = win_end + timedelta(days=1)
     if not records:
         return {}, {"status": "unavailable", "reason": "weather_provider_empty_or_failed", "provider": "unavailable"}
     tagged = []
@@ -459,6 +472,141 @@ def run_pilot_for_plot(
         import shutil
         shutil.rmtree(cache_dir, ignore_errors=True)
 
+def _build_local_cache_fetcher(
+    plot_id: str,
+    geom_geojson: Dict[str, Any],
+    scene_store: Any,
+    bootstrap_svc: Any,
+):
+    """Build deterministic ArchiveBootstrapService fetcher reading real verified .SAFE scenes from SceneProductStore."""
+    from datetime import datetime as _dt
+    from types import SimpleNamespace as _NS
+
+    base_path = Path(scene_store.base_dir)
+    plot_dir = base_path if getattr(scene_store, "plot_id", None) == plot_id else base_path / plot_id
+    norm_geom, _, _, _ = bootstrap_svc._extract_polygon_geometry(geom_geojson)
+    cached_records: List[Dict[str, Any]] = []
+    if plot_dir.is_dir():
+        for safe_dir in sorted(plot_dir.iterdir()):
+            meta_p = safe_dir / "metadata.json"
+            if not safe_dir.is_dir() or not meta_p.is_file():
+                continue
+            try:
+                meta = json.loads(meta_p.read_text(encoding="utf-8"))
+                acq_raw = str(meta.get("acquisition_datetime") or "")
+                if not acq_raw:
+                    continue
+                acq_dt = _dt.fromisoformat(acq_raw.replace("Z", "+00:00"))
+                band_refs: Dict[str, str] = {}
+                mask_refs: Dict[str, str] = {}
+                for b in ("B04", "B08", "B11", "SCL", "VV", "VH"):
+                    bp = safe_dir / f"{b}.npz"
+                    if bp.is_file():
+                        band_refs[b] = str(bp)
+                for m in ("SCL", "dataMask", "DATAMASK"):
+                    mp = safe_dir / f"{m}.npz"
+                    if mp.is_file():
+                        mask_refs[m] = str(mp)
+                sensor = str(meta.get("sensor") or "").upper()
+                sp = _NS(
+                    scene_id=str(meta.get("scene_id") or safe_dir.name),
+                    sensor=sensor,
+                    acquisition_datetime=acq_dt,
+                    crs=meta.get("crs"),
+                    transform=meta.get("transform"),
+                    width=meta.get("width"),
+                    height=meta.get("height"),
+                    band_refs=band_refs,
+                    mask_refs=mask_refs,
+                    band_units=meta.get("band_units") or {},
+                    quality=meta.get("quality") or {},
+                )
+                if "S2" in sensor or "B04" in band_refs:
+                    cached_records.append(bootstrap_svc._build_s2_observation_record(sp, norm_geom))
+                elif "S1" in sensor or "VV" in band_refs:
+                    cached_records.append(bootstrap_svc._build_s1_observation_record(sp, norm_geom))
+            except Exception:
+                continue
+
+    def _fetcher(win_start: str, win_end: str) -> List[Dict[str, Any]]:
+        s_day = win_start[:10]
+        e_day = win_end[:10]
+        return [r for r in cached_records if s_day <= str(r.get("acquisition_time") or "")[:10] < e_day]
+
+    return _fetcher
+
+
+def run_historical_intelligence_for_plot(
+    plot_id: str,
+    workspace_root: str = ".",
+    offline: Optional[bool] = None,
+    skip_bootstrap: bool = False,
+    local_scene_cache: bool = False,
+) -> Dict[str, Any]:
+    """Run full 2015–present Historical State Intelligence reconstruction + event memory + retrovalidation."""
+    repo_root = str(Path(__file__).resolve().parents[3])
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    from services.agribrain.layer0.asmae_scene_products.scene_product_store import SceneProductStore
+    from services.agribrain.layer05_asmae.history.archive_bootstrap_service import MISSION_START_DATE
+    from services.agribrain.layer05_asmae.history.historical_state_intelligence import HistoricalStateIntelligenceService
+    from services.agribrain.world_model.canonical_worldline import CanonicalWorldlineService
+
+    geom_wkt = COHORT_GEOMETRIES.get(plot_id)
+    if not geom_wkt:
+        raise ValueError(f"No geometry defined for plot {plot_id}")
+    geom_geojson, centroid_lat, centroid_lng = _wkt_to_geojson_and_centroid(geom_wkt)
+    canonical_geom_hash = compute_geometry_hash(geom_geojson)
+
+    start_dt = datetime(2015, 6, 23, tzinfo=timezone.utc)
+    end_dt = datetime.now(timezone.utc)
+    daily_weather, weather_meta = _fetch_real_daily_weather(
+        centroid_lat, centroid_lng, start_dt, end_dt, offline=offline
+    )
+
+    ws_path = Path(workspace_root).resolve()
+    artifacts_dir = ws_path / "services" / "agribrain" / "artifacts"
+    worldline = CanonicalWorldlineService(
+        root=artifacts_dir / "historical_intelligence_worldlines",
+        require_durable_anchor=False,
+    )
+    scene_store = SceneProductStore(plot_id)
+    service = HistoricalStateIntelligenceService(
+        worldline=worldline,
+        bootstrap_root=artifacts_dir / "historical_intelligence_bootstrap",
+        checkpoint_root=artifacts_dir / "historical_intelligence_checkpoints",
+        scene_store=scene_store,
+    )
+    if local_scene_cache:
+        service.bootstrap._fetcher_factory = _build_local_cache_fetcher(
+            plot_id, geom_geojson, scene_store, service.bootstrap
+        )
+    res = service.run_full_intelligence(
+        plot_id=plot_id,
+        geometry_hash=canonical_geom_hash,
+        tenant_id="69ad7b6f7e6843e8234afcf6" if plot_id == "6a09d9e91dd0c7ed6fce7d50" else "default_tenant",
+        namespace="default",
+        start_date=MISSION_START_DATE,
+        target_end_date=end_dt.isoformat(),
+        window_days=180,
+        polygon_geojson=geom_geojson,
+        daily_weather=daily_weather,
+        crop_context={"crop_type": "citrus", "crop_coefficient": 0.75},
+        skip_bootstrap=skip_bootstrap,
+    )
+    out_dir = artifacts_dir / "archive_pilot_reports" / plot_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = out_dir / "historical_state_intelligence_summary.json"
+    summary_payload = {
+        "plot_id": plot_id,
+        "geometry_hash": canonical_geom_hash,
+        "weather_meta": weather_meta,
+        **res,
+    }
+    summary_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
+    return summary_payload
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Run Controlled Historical Archive Pilot Benchmark")
@@ -466,7 +614,27 @@ def main():
     parser.add_argument("--depth", default="historical_3y", help="Lookback depth mode")
     parser.add_argument("--budget", default="offline_fixture", help="Budget profile")
     parser.add_argument("--context", default="regular_asmae_run", help="Trigger context")
+    parser.add_argument("--mode", default="pilot", choices=["pilot", "intelligence"], help="Run legacy pilot benchmark or full Historical State Intelligence")
+    parser.add_argument("--skip-bootstrap", action="store_true", help="Skip live STAC queries and reconstruct from existing worldline observations")
+    parser.add_argument("--local-scene-cache", action="store_true", help="Ingest verified real .SAFE scenes from SceneProductStore without re-downloading")
     args = parser.parse_args()
+
+    if args.mode == "intelligence":
+        target_plot = args.plot_id or "6a09d9e91dd0c7ed6fce7d50"
+        res = run_historical_intelligence_for_plot(
+            target_plot,
+            skip_bootstrap=bool(args.skip_bootstrap),
+            local_scene_cache=bool(args.local_scene_cache),
+        )
+        recon = res.get("reconstruction") or {}
+        retro = (recon.get("retrovalidation") or {}).get("summary") or {}
+        mem = (recon.get("event_memory") or {}).get("summary") or {}
+        print(
+            f"[INTELLIGENCE] plot={target_plot} obs={recon.get('observation_count')} "
+            f"checkpoints={len(recon.get('checkpoints') or [])} events={mem.get('total_events')} "
+            f"rmse={retro.get('rmse')} skill_pers={retro.get('skill_vs_persistence')}"
+        )
+        sys.exit(0)
 
     plots = [args.plot_id] if args.plot_id else list(ARCHIVE_PILOT_REGISTRY.keys())
     print(f"Starting pilot run for plots: {plots} | Depth: {args.depth} | Budget: {args.budget}")

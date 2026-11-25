@@ -10,9 +10,11 @@ Architectural Guarantees:
      Tracks progress window-by-window in durable checkpoints. If interrupted,
      resumes precisely at the unfinished cursor without duplicate STAC queries.
   2. Chronological Lineage & Deterministic DAG:
-     Historical observations are committed as ARCHIVE_POSTERIOR_VALIDATED
-     canonical worldline events in strict temporal sequence, linking parent
-     hashes to form an immutable audit trail.
+     Historical satellite acquisitions are committed strictly as
+     OBSERVATION_QUALIFIED worldline events in chronological sequence, linking
+     parent hashes to form an immutable observation audit trail. Validated
+     posteriors (ARCHIVE_POSTERIOR_VALIDATED) are issued separately only after
+     ASMAE model assimilation, uncertainty evaluation, and retrovalidation.
   3. Strict Temporal Separation:
      observation_or_valid_time ($T$) is fixed to the scene observation timestamp.
      committed_at ($K$) is fixed to the bootstrap ingestion time.
@@ -541,6 +543,7 @@ class ArchiveBootstrapService:
 
         content_hash = self._compute_scene_content_hash(scene)
         acq = scene.acquisition_datetime.isoformat()
+        raw_transform = getattr(scene, "transform", None)
         return {
             "scene_id": scene.scene_id,
             "acquisition_time": acq,
@@ -551,6 +554,11 @@ class ArchiveBootstrapService:
             "source_content_hash": content_hash,
             "valid_pixel_fraction": valid_pixel_fraction,
             "resolution_m": 10.0,
+            "crs": getattr(scene, "crs", None),
+            "transform": list(raw_transform) if raw_transform else None,
+            "width": getattr(scene, "width", None),
+            "height": getattr(scene, "height", None),
+            "band_units": dict(getattr(scene, "band_units", None) or {}),
             "effective_resolution": "10m native satellite",
             "calibration_status": "uncalibrated_diagnostic",
             "publication_authority": "DIAGNOSTIC_ONLY",
@@ -617,6 +625,7 @@ class ArchiveBootstrapService:
 
         content_hash = self._compute_scene_content_hash(scene)
         acq = scene.acquisition_datetime.isoformat()
+        raw_transform = getattr(scene, "transform", None)
         return {
             "scene_id": scene.scene_id,
             "acquisition_time": acq,
@@ -627,6 +636,11 @@ class ArchiveBootstrapService:
             "source_content_hash": content_hash,
             "valid_pixel_fraction": valid_pixel_fraction,
             "resolution_m": 10.0,
+            "crs": getattr(scene, "crs", None),
+            "transform": list(raw_transform) if raw_transform else None,
+            "width": getattr(scene, "width", None),
+            "height": getattr(scene, "height", None),
+            "band_units": dict(getattr(scene, "band_units", None) or {}),
             "effective_resolution": "10m native satellite",
             "calibration_status": "uncalibrated_proxy",
             "publication_authority": "DIAGNOSTIC_ONLY",
@@ -755,7 +769,12 @@ class ArchiveBootstrapService:
         scene: Dict[str, Any],
         parent_event_id: Optional[str],
     ) -> Optional[str]:
-        """Commit an admitted historical observation into the canonical worldline."""
+        """Commit a qualified satellite acquisition into the canonical worldline.
+
+        Records the scene strictly as OBSERVATION_QUALIFIED without claiming a
+        validated model posterior. ARCHIVE_POSTERIOR_VALIDATED events are issued
+        separately only after chronological ASMAE assimilation and validation.
+        """
         acq_time = (
             scene.get("acquisition_time")
             or scene.get("observation_time")
@@ -764,50 +783,53 @@ class ArchiveBootstrapService:
         if not acq_time:
             return None
 
-        # Build payload with full provenance and indices consistent with ASMAE state model
-        archive_posterior = {
+        source_name = str(scene.get("source", "sentinel2"))
+        supported_obs = (
+            ["ndvi", "ndmi"] if "s1" not in source_name.lower() and "sentinel1" not in source_name.lower()
+            else ["vv_db", "vh_db"]
+        )
+        observation_qualified = {
+            "schema_version": "observation_qualified_v1",
+            "observation_role": "qualified_satellite_observation",
+            "assimilated": False,
             "geometry_hash": geometry_hash,
             "scene_id": scene.get("scene_id", f"scene_{acq_time}"),
-            "source": scene.get("source", "sentinel2"),
+            "source": source_name,
             "product_level": scene.get("product_level", "L2A"),
+            "acquisition_time": acq_time,
             "cloud_score": scene.get("cloud_score", 0.0),
             "quality_score": scene.get("quality_score", 1.0),
             "metrics": scene.get("metrics", {}),
             "valid_pixel_fraction": scene.get("valid_pixel_fraction", 1.0),
             "raw_resolution_m": scene.get("resolution_m", 10.0),
+            "crs": scene.get("crs"),
+            "transform": scene.get("transform"),
+            "width": scene.get("width"),
+            "height": scene.get("height"),
+            "band_units": scene.get("band_units"),
             "source_content_hash": scene.get("source_content_hash", "hash_mock"),
             "publication_authority": scene.get("publication_authority", "DIAGNOSTIC_ONLY"),
             "claims_numerical_authority": False,
-            "supported_layers": scene.get("supported_layers", ["canopy_vigor", "relative_wetness"]),
-            "unsupported_layers": scene.get(
-                "unsupported_layers",
-                [{"layer": "surface_temperature", "reason": "thermal_observation_unavailable"}],
-            ),
+            "observable_quantities": supported_obs,
             "effective_resolution": scene.get("effective_resolution", "10m native satellite"),
             "calibration_status": scene.get("calibration_status", "uncalibrated_diagnostic"),
             "can_render_pixels": scene.get("can_render_pixels", bool(scene.get("values") is not None)),
         }
-        if "biophysical_state" in scene:
-            archive_posterior["biophysical_state"] = scene["biophysical_state"]
-        elif "posterior" in scene:
-            archive_posterior["biophysical_state"] = scene["posterior"]
-        elif "metrics" in scene:
-            archive_posterior["biophysical_state"] = scene["metrics"]
 
-        payload = {"archive_posterior": archive_posterior}
+        payload = {"observation_qualified": observation_qualified}
 
         parents = [parent_event_id] if parent_event_id else []
 
         proposal = WorldlineEventProposal(
-            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            event_type="OBSERVATION_QUALIFIED",
             geometry_version=geometry_hash[:16],
             evidence_set_hash=scene.get("source_content_hash", "hash_mock"),
             payload=payload,
-            model_version="asmae_archive_bootstrap_v1",
-            calibration_version="cal_archive_v1",
+            model_version="asmae_archive_observation_v1",
+            calibration_version="unassimilated_observation_v1",
             authority_contract_version="auth_copernicus_v1",
-            authority_ref=f"stac_{scene.get('source', 'sentinel2')}",
-            state_schema_version="state_v1",
+            authority_ref=f"stac_{source_name}",
+            state_schema_version="observation_qualified_v1",
             observation_or_valid_time=acq_time,
             parent_event_ids=parents,
         )

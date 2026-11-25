@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { computeGeometryHash, useParcelAssessment } from "@/hooks/useParcelAssessment";
 import { useLayer10 } from "@/hooks/useLayer10";
 import { usePlotIntelligence } from "@/hooks/usePlotIntelligence";
@@ -45,11 +45,15 @@ export function useWorkspaceScientificAdapter({ farm, plot }: ScientificAdapterP
   // 4. Derive presentation state strictly from canonical assessment
   const injectData = pi.injectData;
   const publicationId = l10.data?.publication_id || (l10.data as any)?.snapshot_id || "";
+  const plotIdForInject = (plot as any)?.id || "";
+  const lastInjectedSigRef = useRef<string>("");
   useEffect(() => {
-    if (l10.data && publicationId) {
-      injectData(l10.data, (plot as any)?.id, l10.isApplicable);
-    }
-  }, [publicationId, l10.isApplicable, injectData, (plot as any)?.id]);
+    if (!l10.data || !publicationId) return;
+    const sig = `${plotIdForInject}:${publicationId}:${l10.isApplicable}`;
+    if (lastInjectedSigRef.current === sig) return;
+    lastInjectedSigRef.current = sig;
+    injectData(l10.data, (plot as any)?.id, l10.isApplicable);
+  }, [publicationId, l10.isApplicable, injectData, plotIdForInject]);
 
   return {
     parcelAssessment,

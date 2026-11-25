@@ -249,7 +249,7 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
   const boundPlotIdRef = useRef<string | null>(null);
 
   // Normalize Python engine card shape → EngineStatus interface
-  const normalizeEngine = (e: any): EngineStatus => {
+  const normalizeEngine = useCallback((e: any): EngineStatus => {
     const statusLabelMap: Record<string, string> = {
       OK: "Good",
       DEGRADED: "Watch",
@@ -289,7 +289,7 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
       data: (e.data ?? e.expert ?? {}) as Record<string, unknown>,
       raw: e.raw,
     };
-  };
+  }, []);
 
   // Map API response to internal data shape
   const mapResponse = useCallback((json: any): PlotIntelligenceData => {

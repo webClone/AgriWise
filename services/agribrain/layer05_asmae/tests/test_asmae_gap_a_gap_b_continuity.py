@@ -395,8 +395,10 @@ def test_archive_bootstrap_real_band_metrics_and_incremental_continuity(
 
     events_inc = wl_inc.load_all_events(pub_script.PLOT_ID)
     assert len(events_inc) == 4
-    s2_ap = events_inc[0]["payload"]["archive_posterior"]
-    s1_ap = events_inc[1]["payload"]["archive_posterior"]
+    assert all(ev["event_type"] == "OBSERVATION_QUALIFIED" for ev in events_inc)
+    s2_ap = events_inc[0]["payload"]["observation_qualified"]
+    s1_ap = events_inc[1]["payload"]["observation_qualified"]
+    assert s2_ap["assimilated"] is False
     assert s2_ap["metrics"]["ndvi_mean"] == pytest.approx(0.666667, abs=1e-4)
     assert not str(s2_ap["source_content_hash"]).startswith("hash_")
     assert len(s2_ap["source_content_hash"]) == 64
@@ -414,10 +416,10 @@ def test_archive_bootstrap_real_band_metrics_and_incremental_continuity(
     )
     events_cold = wl_cold.load_all_events(pub_script.PLOT_ID)
     assert [
-        (e["payload"]["archive_posterior"]["scene_id"], e["payload"]["archive_posterior"]["source_content_hash"], e["payload"]["archive_posterior"]["metrics"])
+        (e["payload"]["observation_qualified"]["scene_id"], e["payload"]["observation_qualified"]["source_content_hash"], e["payload"]["observation_qualified"]["metrics"])
         for e in events_inc
     ] == [
-        (e["payload"]["archive_posterior"]["scene_id"], e["payload"]["archive_posterior"]["source_content_hash"], e["payload"]["archive_posterior"]["metrics"])
+        (e["payload"]["observation_qualified"]["scene_id"], e["payload"]["observation_qualified"]["source_content_hash"], e["payload"]["observation_qualified"]["metrics"])
         for e in events_cold
     ]
 

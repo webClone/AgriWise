@@ -279,10 +279,10 @@ class ASMAEIR05GenuineProviderQualificationTests(unittest.TestCase):
         last_event_id = boot_res["last_committed_event_id"]
         self.assertIsNotNone(last_event_id)
 
-        # 2. Select eligible historical events up to target_cutoff
+        # 2. Select eligible historical observation events up to target_cutoff
         eligible = self.worldline.select_eligible_events(
             plot_id=self.plot_id,
-            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            event_type="OBSERVATION_QUALIFIED",
             valid_time_T=target_cutoff,
             knowledge_cutoff_K=datetime.now(timezone.utc).isoformat(),
             tenant_id=self.tenant_id,

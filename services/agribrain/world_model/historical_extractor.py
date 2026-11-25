@@ -99,7 +99,7 @@ class TrainingTrajectoryWindow:
 
     def get_observations(self) -> List[Dict[str, Any]]:
         """Return observation events active in this window."""
-        obs_types = {"OBSERVATION", "CROP_OBSERVATION", "SATELLITE_SCENE", "PROBE_TELEMETRY", "WEATHER_OBSERVATION"}
+        obs_types = {"OBSERVATION", "OBSERVATION_QUALIFIED", "CROP_OBSERVATION", "SATELLITE_SCENE", "PROBE_TELEMETRY", "WEATHER_OBSERVATION"}
         return [
             e for e in self.active_events
             if str(e.get("event_type", "")).upper() in obs_types

@@ -99,7 +99,9 @@ class ASMAEIR05ArchiveBootstrapTests(unittest.TestCase):
         # Verify strict sequence numbering and unbroken parent chaining
         for i, ev in enumerate(events):
             self.assertEqual(ev["sequence"], i + 1)
-            self.assertEqual(ev["event_type"], "ARCHIVE_POSTERIOR_VALIDATED")
+            self.assertEqual(ev["event_type"], "OBSERVATION_QUALIFIED")
+            self.assertNotIn("archive_posterior", ev["payload"])
+            self.assertFalse(ev["payload"]["observation_qualified"]["assimilated"])
             if i == 0:
                 self.assertEqual(ev.get("parent_event_ids"), [])
             else:
@@ -230,7 +232,7 @@ class ASMAEIR05ArchiveBootstrapTests(unittest.TestCase):
         t_early = "2016-01-01T00:00:00+00:00"
         eligible_early = self.worldline.select_eligible_events(
             plot_id=self.plot_id,
-            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            event_type="OBSERVATION_QUALIFIED",
             valid_time_T=t_early,
             knowledge_cutoff_K=now_iso,
             tenant_id=self.tenant_id,
@@ -246,7 +248,7 @@ class ASMAEIR05ArchiveBootstrapTests(unittest.TestCase):
         t_pre = "2014-01-01T00:00:00+00:00"
         eligible_pre = self.worldline.select_eligible_events(
             plot_id=self.plot_id,
-            event_type="ARCHIVE_POSTERIOR_VALIDATED",
+            event_type="OBSERVATION_QUALIFIED",
             valid_time_T=t_pre,
             knowledge_cutoff_K=now_iso,
             tenant_id=self.tenant_id,
