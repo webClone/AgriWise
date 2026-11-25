@@ -1458,6 +1458,7 @@ def run_orchestrator(
     l1_coarse_output = None
     coarse_evidence_priors = {}
     coarse_weather: List[Any] = []
+    specialist_pre_bundle: Optional[Dict[str, Any]] = None
     try:
         l1_coarse_record = {
             "requested": False,
@@ -1480,6 +1481,9 @@ def run_orchestrator(
             l1_coarse_output = l1_coarse_res.output
             l1_coarse_context = getattr(l1_coarse_res.output, "_context_package", None)
             from layer05_asmae.priors.coarse_context import build_coarse_layer_outputs
+            from services.agribrain.layer05_asmae.cross_layer_intelligence import (
+                CrossLayerSpecialistBridge,
+            )
             coarse_env_pkg = (
                 (l0_output.layer0_source_packages.get("environment") or [None])[0]
                 if l0_output else None
@@ -1491,6 +1495,57 @@ def run_orchestrator(
                 weather_records=coarse_weather,
                 management_events=op_ctx.get("management_events", []),
             )
+            # Execute full L2-L8 canonical specialist pre-pass strictly from pre-ASMAE evidence
+            try:
+                bridge = CrossLayerSpecialistBridge()
+                l1_soil = getattr(l1_coarse_output, "static", {}) or op_ctx.get("soil_context", {})
+                c_st = bridge.initialize_chrono_state(
+                    crop_context=inputs.crop_config or {}, soil_context=l1_soil
+                )
+                w_daily_map: Dict[str, Dict[str, Any]] = {}
+                for row in coarse_weather or []:
+                    if isinstance(row, dict):
+                        d_k = str(row.get("date") or row.get("timestamp") or "")[:10]
+                        if d_k:
+                            w_daily_map[d_k] = dict(row)
+                end_dt_pre = ts_now if isinstance(ts_now, datetime) else datetime.now(timezone.utc)
+                if end_dt_pre.tzinfo is None:
+                    end_dt_pre = end_dt_pre.replace(tzinfo=timezone.utc)
+                start_dt_pre = min(
+                    [datetime.fromisoformat(d).replace(tzinfo=timezone.utc) for d in w_daily_map]
+                    or [end_dt_pre - timedelta(days=5)]
+                )
+                bridge.advance_chrono_state(
+                    c_st,
+                    start_time=start_dt_pre,
+                    end_time=end_dt_pre,
+                    weather_daily_series=w_daily_map,
+                    crop_context=inputs.crop_config or {},
+                    soil_context=l1_soil,
+                    management_events=op_ctx.get("management_events", []),
+                )
+                for row in (getattr(l1_coarse_output, "plot_timeseries", []) or [])[-10:]:
+                    if isinstance(row, dict):
+                        d_k = str(row.get("date") or row.get("timestamp") or "")[:10]
+                        nd_v = row.get("ndvi_clean") or row.get("ndvi")
+                        nm_v = row.get("ndmi")
+                        if d_k and isinstance(nd_v, (int, float)):
+                            c_st.recent_ndvi_window.append((d_k, float(nd_v), float(nd_v)))
+                        if isinstance(nm_v, (int, float)):
+                            c_st.recent_ndmi_window.append(float(nm_v))
+                specialist_pre_bundle = bridge.evaluate_step_priors(
+                    state=c_st,
+                    timestamp=end_dt_pre,
+                    knowledge_cutoff=end_dt_pre,
+                    crop_context=inputs.crop_config or {},
+                    soil_context=l1_soil,
+                )
+                for l_key, l_val in (specialist_pre_bundle.get("coarse_layer_outputs") or {}).items():
+                    if l_key not in coarse_evidence_priors or coarse_evidence_priors[l_key].get("status") == "unavailable":
+                        coarse_evidence_priors[l_key] = l_val
+                coarse_evidence_priors["specialist_pre_pass"] = specialist_pre_bundle
+            except Exception as sp_exc:
+                logger.warning("Specialist L2-L8 pre-pass degraded cleanly: %s", sp_exc)
             coarse_evidence_priors.update(
                 op_ctx.get("coarse_evidence_priors")
                 or op_ctx.get("coarse_layer_outputs", {})
@@ -2318,6 +2373,31 @@ def run_orchestrator(
             "reason": "execution_error",
             "error": str(e)
         }
+
+    # --- Post-ASMAE Cross-Layer Specialist Refinement (non-circular, non-assimilable) ---
+    if (
+        isinstance(asmae_output, dict)
+        and isinstance(specialist_pre_bundle, dict)
+        and not reintegration_evidence_replay
+    ):
+        try:
+            from services.agribrain.layer05_asmae.cross_layer_intelligence import (
+                CrossLayerSpecialistBridge,
+            )
+            ps = asmae_output.get("plot_state_artifact") or {}
+            sm = ps.get("state_means") or asmae_output.get("state_means") or {}
+            ss = ps.get("state_stds") or asmae_output.get("state_stds") or {}
+            if sm:
+                refined_bundle = CrossLayerSpecialistBridge().refine_after_asmae(
+                    pre_bundle=specialist_pre_bundle,
+                    posterior_means=sm,
+                    posterior_stds=ss,
+                    state_support_ledger=asmae_output.get("state_support_ledger"),
+                    crop_context=inputs.crop_config or {},
+                )
+                asmae_output["cross_layer_intelligence"] = refined_bundle
+        except Exception as ref_exc:
+            logger.warning("Post-ASMAE cross-layer specialist refinement failed cleanly: %s", ref_exc)
 
     # --- Layer 1 ---
     # Pass l0_output, raster_composites, asmae_output, and asmae_run_record into run_layer1_fusion

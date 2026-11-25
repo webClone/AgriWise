@@ -867,8 +867,36 @@ def forecast_step(
     base_temperature = number(crop_context, ("t_base", "base_temperature")) or 5.0
 
     has_water_drivers = isinstance(rain, (int, float)) and isinstance(et0, (int, float))
+    def _prior_float(val: Any) -> Optional[float]:
+        if isinstance(val, bool) or val is None:
+            return None
+        try:
+            out = float(val)
+            return out if math.isfinite(out) else None
+        except (TypeError, ValueError):
+            return None
+
+    priors_map = priors if isinstance(priors, dict) else {}
+    l2_prior = priors_map.get("layer2") if isinstance(priors_map.get("layer2"), dict) else {}
+    l3_prior = priors_map.get("layer3") if isinstance(priors_map.get("layer3"), dict) else {}
+    l4_prior = priors_map.get("layer4") if isinstance(priors_map.get("layer4"), dict) else {}
+    l5_prior = priors_map.get("layer5") if isinstance(priors_map.get("layer5"), dict) else {}
+    l7_prior = priors_map.get("layer7") if isinstance(priors_map.get("layer7"), dict) else {}
+
+    l3_et0 = _prior_float(l3_prior.get("et0")) if l3_prior.get("usable_as_prior") else None
+    et0_eff = float(et0) if isinstance(et0, (int, float)) else (float(l3_et0) if l3_et0 is not None else 0.0)
+    if l3_et0 is not None and not isinstance(et0, (int, float)):
+        has_water_drivers = True
+
     effective_rain = float(rain or 0.0) * (1.0 - max(0.0, min(1.0, runoff_fraction or 0.0)))
-    atmospheric_demand = crop_coefficient * float(et0 or 0.0)
+    atmospheric_demand = crop_coefficient * et0_eff
+
+    l2_growth_pos = _prior_float(l2_prior.get("growth_position")) if l2_prior.get("usable_as_prior") else None
+    l2_expected_vigor = _prior_float(l2_prior.get("expected_vigor")) if l2_prior.get("usable_as_prior") else None
+    l2_expected_lai = _prior_float(l2_prior.get("expected_lai")) if l2_prior.get("usable_as_prior") else None
+    l3_water_lim = _prior_float(l3_prior.get("water_limitation_probability")) if l3_prior.get("usable_as_prior") else None
+    l7_unc_scale = _prior_float(l7_prior.get("forecast_uncertainty")) if l7_prior.get("usable_as_prior") else None
+    shock_unc_mult = max(1.0, min(1.35, float(l7_unc_scale))) if l7_unc_scale is not None else 1.0
 
     # Physical soil hydrology parameters: Delta theta_v = flux_mm / root_depth_mm
     root_depth_mm = max(100.0, (rooting_depth or 0.4) * 1000.0)
@@ -895,7 +923,7 @@ def forecast_step(
     storage_mm = max(25.0, paw_capacity_mm)
     normalized_daily_water_delta = daily_water_balance / storage_mm
 
-    missing_driver_scale = 1.0 if has_water_drivers else 1.8
+    missing_driver_scale = (1.0 if has_water_drivers else 1.8) * shock_unc_mult
     import numpy as np
 
     node_ids = list(ensemble)
@@ -922,12 +950,16 @@ def forecast_step(
             drainage_coeff = max(0.0, min(1.0, drainage_fraction if drainage_fraction is not None else 0.5))
             drainage_rate = excess_water * drainage_coeff * delta_days
 
+            l3_rzw_prior = _prior_float(l3_prior.get("root_zone_water_prior")) if l3_prior.get("usable_as_prior") else None
+            rzw_nudge = 0.04 * min(5.0, delta_days) * (l3_rzw_prior - current) if l3_rzw_prior is not None else 0.0
+
             updated = (
                 current
                 + delta_theta_rain
                 + delta_theta_irrig
                 - delta_theta_et
                 - drainage_rate
+                + rzw_nudge
                 + generator.normal(0.0, 0.01 * missing_driver_scale * sqrt_delta_days, member_shape)
             )
             # Clip to physical soil bounds [theta_wp * 0.5, theta_sat]
@@ -948,16 +980,25 @@ def forecast_step(
             updated = decay * current + (1.0 - decay) * heat + generator.normal(
                 0.0, 0.02 * (1.0 if temp_max is not None else 1.8) * sqrt_delta_days, member_shape,
             )
-        elif name == "phenology_progress" and temp_mean is not None:
-            degree_day_progress = max(0.0, temp_mean - base_temperature) / 1800.0
-            updated = current + degree_day_progress * delta_days + generator.normal(
+        elif name == "phenology_progress" and (temp_mean is not None or l2_growth_pos is not None):
+            degree_day_progress = (
+                max(0.0, temp_mean - base_temperature) / 1800.0
+                if temp_mean is not None else 0.0
+            )
+            l2_nudge = (
+                0.08 * min(5.0, delta_days) * (l2_growth_pos - current)
+                if l2_growth_pos is not None else 0.0
+            )
+            updated = current + degree_day_progress * delta_days + l2_nudge + generator.normal(
                 0.0, 0.005 * sqrt_delta_days, member_shape,
             )
         elif name == "biotic_confounder_risk" and humidity is not None and temp_mean is not None:
             humidity_pressure = max(0.0, min(1.0, (humidity - 60.0) / 35.0))
             temperature_pressure = max(0.0, 1.0 - abs(temp_mean - 24.0) / 16.0)
+            l5_suit = _prior_float(l5_prior.get("weather_disease_suitability"))
+            pressure = max(humidity_pressure * temperature_pressure, float(l5_suit or 0.0))
             decay = 0.85 ** delta_days
-            updated = decay * current + (1.0 - decay) * humidity_pressure * temperature_pressure
+            updated = decay * current + (1.0 - decay) * pressure
         elif name == "salinity_stress" and soil_salinity is not None:
             baseline = max(0.0, min(1.0, soil_salinity / 8.0))
             leaching = max(0.0, daily_water_balance * delta_days + irrigation) / max(storage_mm, 1.0)
@@ -967,16 +1008,29 @@ def forecast_step(
             updated = current + min(3.0, fertilization / 20.0) + generator.normal(
                 0.0, 0.5 * sqrt_delta_days, member_shape,
             )
-        elif name == "vigor" and radiation is not None:
-            radiation_factor = max(0.0, min(1.0, radiation / 25.0))
-            updated = current + delta_days * (
-                0.01 * radiation_factor - 0.01 * max(0.0, -normalized_daily_water_delta)
-            ) + generator.normal(
-                0.0, 0.035 * missing_driver_scale * sqrt_delta_days, member_shape,
+        elif name == "vigor" and (radiation is not None or l3_water_lim is not None):
+            radiation_factor = max(0.0, min(1.0, radiation / 25.0)) if radiation is not None else 0.52
+            water_lim_val = float(l3_water_lim) if l3_water_lim is not None else 0.35
+            ks_growth = max(0.0, 1.0 - water_lim_val)
+            # Differential physiological growth/senescence forcing without pulling toward a fixed NDVI target
+            l3_growth_delta = (
+                delta_days * (0.0025 * ks_growth * radiation_factor - 0.003 * max(0.0, water_lim_val - 0.65))
+                if l3_water_lim is not None else 0.0
+            )
+            net_rad_delta = delta_days * (0.008 * radiation_factor - 0.008 * max(0.0, -normalized_daily_water_delta)) if radiation is not None else 0.0
+            sigma_v = (0.016 if l3_water_lim is not None else 0.03) * missing_driver_scale
+            updated = current + net_rad_delta + l3_growth_delta + generator.normal(
+                0.0, sigma_v * sqrt_delta_days, member_shape,
+            )
+        elif name == "lai" and l3_water_lim is not None:
+            water_lim_val = float(l3_water_lim)
+            l3_lai_delta = delta_days * (0.006 * max(0.0, 0.5 - water_lim_val) - 0.008 * max(0.0, water_lim_val - 0.7))
+            updated = current + l3_lai_delta + generator.normal(
+                0.0, (hi - lo) * 0.014 * missing_driver_scale * sqrt_delta_days, member_shape,
             )
         elif name == "stress_memory":
             heat_signal = max(0.0, min(1.0, (float(temp_max) - optimal_temperature) / (maximum_temperature - optimal_temperature))) if temp_max is not None else 0.0
-            water_signal = max(0.0, -normalized_daily_water_delta * 5.0)
+            water_signal = max(0.0, -normalized_daily_water_delta * 5.0, float(l3_water_lim or 0.0))
             decay = 0.97 ** delta_days
             updated = decay * current + (1.0 - decay) * max(heat_signal, water_signal)
         else:

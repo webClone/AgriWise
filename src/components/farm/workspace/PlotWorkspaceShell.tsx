@@ -29,11 +29,13 @@ import type { PlotWorkspaceProps } from "./PlotWorkspaceFeatureGate";
 import type { PlotScope } from "./workspace-types";
 import "./plot-workspace-v2.css";
 import {
+  ASMAE_13_STATE_CATALOG,
   ASMAE_13_STATE_ORDER,
   resolveAsmaeStateAvailability,
   sampleSirePixel,
   type AsmaeStateKey,
 } from "@/lib/agribrain/asmae-13-states";
+import { type HistoricalIntelligencePayload } from "./HistoricalIntelligencePanel";
 import { classifyCanonicalHeadValidation } from "@/lib/agribrain/layer10-request-state.mjs";
 import { geometryBounds } from "@/lib/agribrain/workspace-geometry.mjs";
 
@@ -201,6 +203,65 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
     coordinate: [number, number];
   } | null>(null);
 
+  const [historicalAsOfDate, setHistoricalAsOfDate] = useState<string | null>(null);
+  const [historicalData, setHistoricalData] = useState<HistoricalIntelligencePayload | null>(null);
+  const [historicalLoading, setHistoricalLoading] = useState(false);
+  const [historicalError, setHistoricalError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setHistoricalAsOfDate(null);
+    setHistoricalData(null);
+    setHistoricalError(null);
+  }, [plotId]);
+
+  useEffect(() => {
+    if (!historicalAsOfDate || !plotId) return;
+    const ctrl = new AbortController();
+    let cancelled = false;
+    setHistoricalLoading(true);
+    setHistoricalError(null);
+    const params = new URLSearchParams({ plotId, asOf: historicalAsOfDate });
+    if (farmId) params.set("farmId", farmId);
+    fetch(`/api/agribrain/historical-intelligence?${params.toString()}`, {
+      signal: ctrl.signal,
+      cache: "no-store",
+    })
+      .then(async (res) => {
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          throw new Error(json?.error || `HTTP ${res.status}`);
+        }
+        if (!cancelled) {
+          setHistoricalData(json.data as HistoricalIntelligencePayload);
+        }
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        setHistoricalError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setHistoricalLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      ctrl.abort();
+    };
+  }, [plotId, farmId, historicalAsOfDate]);
+
+  const handleSelectHistoricalDate = useCallback(
+    (dateIso: string) => {
+      setHistoricalAsOfDate(dateIso);
+      setAsmaeSeenLensSeq(scientific.l10.userLensSelectionSeq);
+    },
+    [scientific.l10.userLensSelectionSeq],
+  );
+
+  const handleReturnHistoricalToLive = useCallback(() => {
+    setHistoricalAsOfDate(null);
+    setHistoricalError(null);
+  }, []);
+
   // Authoritative ASMAE 13-state availability & statistics derivation
   const rawPub = scientific.parcelAssessment?.rawPublication;
   const posteriorRecord = rawPub?.asmae_posterior_numerical_record || null;
@@ -208,24 +269,84 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
   const pubInventory = rawPub?.surface_inventory || null;
   const validationState = classifyCanonicalHeadValidation(rawPub?.validation);
 
+  const isHistoricalActive = Boolean(historicalAsOfDate && historicalData?.available);
+
+  const effectivePubSurfaces = useMemo(() => {
+    if (isHistoricalActive && Array.isArray(historicalData?.spatial_surfaces)) {
+      return historicalData.spatial_surfaces;
+    }
+    return pubSurfaces;
+  }, [isHistoricalActive, historicalData, pubSurfaces]);
+
+  const effectivePosteriorRecord = useMemo(() => {
+    if (isHistoricalActive && historicalData) {
+      const ledger = historicalData.state_support_ledger || {};
+      const states: Record<string, number> = {};
+      const sigmas: Record<string, number> = {};
+      for (const sKey of ASMAE_13_STATE_ORDER) {
+        const st = ledger[sKey]?.support_status;
+        if (st && st !== "unsupported") {
+          const m = historicalData.state_means?.[sKey];
+          const sd = historicalData.state_stds?.[sKey];
+          if (typeof m === "number" && Number.isFinite(m)) states[sKey] = m;
+          if (typeof sd === "number" && Number.isFinite(sd)) sigmas[sKey] = sd;
+        }
+      }
+      return { states, sigmas };
+    }
+    return posteriorRecord;
+  }, [isHistoricalActive, historicalData, posteriorRecord]);
+
+  const effectivePubInventory = useMemo(() => {
+    if (isHistoricalActive && historicalData) {
+      const inv: Record<string, any> = {};
+      const ledger = historicalData.state_support_ledger || {};
+      for (const sKey of ASMAE_13_STATE_ORDER) {
+        const surfType = ASMAE_13_STATE_CATALOG[sKey].surfaceType;
+        const entry = ledger[sKey];
+        if (!entry || entry.support_status === "unsupported" || entry.spatial_support === "unavailable") {
+          inv[surfType] = {
+            status: "withheld",
+            reason:
+              (entry?.block_reasons && entry.block_reasons[0]) ||
+              "Withheld by Truthfulness Gate: no direct observable physical signal supports this state.",
+          };
+        }
+      }
+      return inv;
+    }
+    return pubInventory;
+  }, [isHistoricalActive, historicalData, pubInventory]);
+
+  const effectiveValidationState = isHistoricalActive ? "valid" : (
+    scientific.parcelAssessment.status === "invalid"
+      ? "corrupt"
+      : scientific.parcelAssessment.status === "stale"
+        ? "stale"
+        : validationState
+  );
+
   const asmaeStatesSummary = useMemo(() => {
     return ASMAE_13_STATE_ORDER.map((sKey) =>
-      resolveAsmaeStateAvailability(sKey, pubSurfaces, posteriorRecord, pubInventory, {
-        validationState: scientific.parcelAssessment.status === "invalid" ? "corrupt" : scientific.parcelAssessment.status === "stale" ? "stale" : validationState,
-        isBlocked: scientific.parcelAssessment.status === "invalid",
-        blockReason: scientific.parcelAssessment.status === "invalid" ? "Publication failed cryptographic integrity validation." : undefined,
+      resolveAsmaeStateAvailability(sKey, effectivePubSurfaces, effectivePosteriorRecord, effectivePubInventory, {
+        validationState: effectiveValidationState,
+        isBlocked: !isHistoricalActive && scientific.parcelAssessment.status === "invalid",
+        blockReason:
+          !isHistoricalActive && scientific.parcelAssessment.status === "invalid"
+            ? "Publication failed cryptographic integrity validation."
+            : undefined,
       })
     );
-  }, [pubSurfaces, posteriorRecord, pubInventory, validationState, scientific.parcelAssessment.status]);
+  }, [effectivePubSurfaces, effectivePosteriorRecord, effectivePubInventory, effectiveValidationState, isHistoricalActive, scientific.parcelAssessment.status]);
 
   const activeAsmaeAvailability = useMemo(() => {
     return (
       asmaeStatesSummary.find((s) => s.state.key === activeAsmaeKey) ||
-      resolveAsmaeStateAvailability(activeAsmaeKey, pubSurfaces, posteriorRecord, pubInventory, {
-        validationState,
+      resolveAsmaeStateAvailability(activeAsmaeKey, effectivePubSurfaces, effectivePosteriorRecord, effectivePubInventory, {
+        validationState: effectiveValidationState,
       })
     );
-  }, [asmaeStatesSummary, activeAsmaeKey, pubSurfaces, posteriorRecord, pubInventory, validationState]);
+  }, [asmaeStatesSummary, activeAsmaeKey, effectivePubSurfaces, effectivePosteriorRecord, effectivePubInventory, effectiveValidationState]);
 
   const plotBounds = useMemo(() => {
     const geo = (props.plot as any)?.geoJson?.geometry || (props.plot as any)?.geoJson;
@@ -379,6 +500,69 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
       <section className="pw-map-slot" aria-label="Shared plot map and visualization">
         <div className="pw-scientific-status">
           <WorkspaceScientificStatus />
+        </div>
+        <div
+          data-testid="hist-floating-bar"
+          style={{
+            position: "absolute",
+            left: "14px",
+            bottom: "14px",
+            zIndex: 18,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "5px",
+            padding: "4px 8px",
+            borderRadius: "999px",
+            background: isHistoricalActive ? "rgba(14, 116, 144, 0.9)" : "rgba(15, 23, 42, 0.84)",
+            border: isHistoricalActive ? "1px solid #38bdf8" : "1px solid rgba(148, 163, 184, 0.28)",
+            fontSize: "10px",
+            color: "#e2e8f0",
+            whiteSpace: "nowrap",
+            backdropFilter: "blur(8px)",
+          }}
+        >
+          <span style={{ fontWeight: 700, color: isHistoricalActive ? "#e0f2fe" : "#94a3b8" }}>
+            {isHistoricalActive ? `HIST ${historicalAsOfDate}` : "TIME-TRAVEL"}
+          </span>
+          {(["2018-07-15", "2021-04-15", "2026-09-01"] as const).map((dt) => (
+            <button
+              key={dt}
+              type="button"
+              data-testid={`hist-quick-${dt.slice(0, 4)}`}
+              onClick={() => handleSelectHistoricalDate(dt)}
+              style={{
+                padding: "2px 7px",
+                borderRadius: "999px",
+                border: "none",
+                background: historicalAsOfDate === dt ? "#38bdf8" : "rgba(255,255,255,0.1)",
+                color: historicalAsOfDate === dt ? "#082f49" : "#e2e8f0",
+                fontWeight: 700,
+                fontSize: "10px",
+                cursor: "pointer",
+              }}
+            >
+              {dt.slice(0, 4)}
+            </button>
+          ))}
+          {historicalAsOfDate && (
+            <button
+              type="button"
+              data-testid="hist-quick-live"
+              onClick={handleReturnHistoricalToLive}
+              style={{
+                padding: "2px 7px",
+                borderRadius: "999px",
+                border: "none",
+                background: "rgba(248, 113, 113, 0.24)",
+                color: "#fecaca",
+                fontWeight: 700,
+                fontSize: "10px",
+                cursor: "pointer",
+              }}
+            >
+              Live
+            </button>
+          )}
         </div>
         <button
           type="button"
@@ -537,6 +721,12 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
           onSelectAsmaeState={handleSelectAsmaeState}
           activeAsmaeAvailability={activeAsmaeAvailability}
           sirePixelHover={sirePixelHover}
+          historicalAsOfDate={historicalAsOfDate}
+          historicalLoading={historicalLoading}
+          historicalError={historicalError}
+          historicalData={historicalData}
+          onSelectHistoricalDate={handleSelectHistoricalDate}
+          onReturnHistoricalToLive={handleReturnHistoricalToLive}
           onCollapse={() => {
             if (window.matchMedia("(max-width: 820px)").matches) {
               setMobileInspectorOpen(false);

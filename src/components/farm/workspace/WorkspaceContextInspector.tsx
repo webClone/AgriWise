@@ -42,6 +42,7 @@ import type {
   SoilDepthProfile,
 } from "@/lib/agribrain/physical-sensor-contract";
 import type { ChannelStatus } from "@/lib/agribrain/physical-observation-store";
+import HistoricalIntelligencePanel, { type HistoricalIntelligencePayload } from "./HistoricalIntelligencePanel";
 
 export default function WorkspaceContextInspector({
   farmId,
@@ -57,6 +58,12 @@ export default function WorkspaceContextInspector({
   onSelectAsmaeState,
   activeAsmaeAvailability,
   sirePixelHover,
+  historicalAsOfDate = null,
+  historicalLoading = false,
+  historicalError = null,
+  historicalData = null,
+  onSelectHistoricalDate,
+  onReturnHistoricalToLive,
 }: {
   farmId: string;
   plotId: string;
@@ -71,6 +78,12 @@ export default function WorkspaceContextInspector({
   onSelectAsmaeState?: (key: AsmaeStateKey) => void;
   activeAsmaeAvailability?: AsmaeStateAvailabilityResult;
   sirePixelHover?: { value: number | null; row: number; col: number; coordinate: [number, number] } | null;
+  historicalAsOfDate?: string | null;
+  historicalLoading?: boolean;
+  historicalError?: string | null;
+  historicalData?: HistoricalIntelligencePayload | null;
+  onSelectHistoricalDate?: (dateIso: string) => void;
+  onReturnHistoricalToLive?: () => void;
 }) {
   const [labViewMode, setLabViewMode] = useState<"farmer" | "expert">("farmer");
   const layer10 = useLayer10();
@@ -1124,6 +1137,15 @@ export default function WorkspaceContextInspector({
                 </div>
               </div>
             )}
+
+            <HistoricalIntelligencePanel
+              activeAsOfDate={historicalAsOfDate}
+              loading={historicalLoading}
+              error={historicalError}
+              data={historicalData}
+              onSelectDate={(d) => onSelectHistoricalDate?.(d)}
+              onReturnToLive={() => onReturnHistoricalToLive?.()}
+            />
           </div>
 
           <div className="pw-section-title" style={{ marginTop: "1rem" }}>

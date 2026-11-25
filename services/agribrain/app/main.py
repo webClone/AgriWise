@@ -691,6 +691,197 @@ def api_v2_canonical_plot_snapshot(
     )
 
 
+_HIST_INTEL_RESPONSE_CACHE: Dict[Tuple[str, str, str, str], bytes] = {}
+_HIST_INTEL_RESPONSE_CACHE_LOCK = _threading.Lock()
+
+
+@app.get("/v2/plots/{plot_id}/historical-intelligence")
+def api_v2_historical_intelligence(
+    plot_id: str,
+    as_of: Optional[str] = Query(default=None),
+    knowledge_cutoff: Optional[str] = Query(default=None),
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
+    """Causal time-travel query for spatially resolved 13-state ASMAE + L2-8 cross-layer intelligence."""
+    if namespace.plot_id != plot_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Header X-Plot-Id does not match URL path parameter plot_id",
+        )
+
+    clean_as_of = str(as_of).strip() if as_of else ""
+    if clean_as_of and len(clean_as_of) == 10 and "T" not in clean_as_of:
+        target_T = f"{clean_as_of}T23:59:59+00:00"
+    elif clean_as_of:
+        target_T = clean_as_of
+    else:
+        target_T = datetime.now(timezone.utc).isoformat()
+    clean_kc = str(knowledge_cutoff).strip() if knowledge_cutoff else ""
+    cache_key = (namespace.stable_key(), plot_id, target_T, clean_kc)
+
+    with _HIST_INTEL_RESPONSE_CACHE_LOCK:
+        cached = _HIST_INTEL_RESPONSE_CACHE.get(cache_key)
+    if cached is not None:
+        return Response(content=cached, media_type="application/json", headers={"Cache-Control": "no-cache"})
+
+    artifacts_dir = Path(__file__).resolve().parents[1] / "artifacts"
+    report_dir = artifacts_dir / "archive_pilot_reports" / plot_id
+    summary_path = report_dir / "historical_state_intelligence_summary.json"
+    weather_cache_path = report_dir / "historical_weather_cache.json"
+
+    summary_data: Dict[str, Any] = {}
+    if summary_path.is_file():
+        try:
+            summary_data = json.loads(summary_path.read_text(encoding="utf-8"))
+        except Exception:
+            summary_data = {}
+
+    daily_weather: Dict[str, Dict[str, Any]] = {}
+    if weather_cache_path.is_file():
+        try:
+            wc = json.loads(weather_cache_path.read_text(encoding="utf-8"))
+            daily_weather = dict(wc.get("daily_weather") or {})
+        except Exception:
+            daily_weather = {}
+
+    from services.agribrain.layer0.asmae_scene_products.scene_product_store import SceneProductStore
+    from services.agribrain.layer05_asmae.history.historical_state_reconstructor import HistoricalStateReconstructor
+    from services.agribrain.scripts.run_archive_pilot import COHORT_GEOMETRIES, _wkt_to_geojson_and_centroid
+    from services.agribrain.world_model.canonical_worldline import CanonicalWorldlineService, _parse_utc_iso
+
+    polygon_geojson: Optional[Dict[str, Any]] = None
+    if plot_id in COHORT_GEOMETRIES:
+        polygon_geojson, _, _ = _wkt_to_geojson_and_centroid(COHORT_GEOMETRIES[plot_id])
+
+    geometry_hash = str(summary_data.get("geometry_hash") or "")
+    if not geometry_hash:
+        try:
+            head_snap = _plot_snapshot_store.load_snapshot(namespace=namespace, plot_id=plot_id)
+            if isinstance(head_snap, dict):
+                geometry_hash = str(head_snap.get("geometry_hash") or "")
+        except Exception:
+            geometry_hash = ""
+    if not geometry_hash:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Historical intelligence archive not initialized for this plot",
+        )
+
+    worldline = CanonicalWorldlineService(
+        root=artifacts_dir / "historical_intelligence_worldlines",
+        require_durable_anchor=False,
+    )
+    reconstructor = HistoricalStateReconstructor(
+        worldline=worldline,
+        checkpoint_root=artifacts_dir / "historical_intelligence_checkpoints",
+        scene_store=SceneProductStore(plot_id),
+    )
+
+    # Tenant isolation strictly enforces authenticated namespace.tenant_id
+    q_res = reconstructor.query_as_of(
+        plot_id=plot_id,
+        geometry_hash=geometry_hash,
+        valid_time_T=target_T,
+        knowledge_cutoff_K=clean_kc or None,
+        tenant_id=namespace.tenant_id,
+        namespace="default",
+        daily_weather=daily_weather,
+        crop_context={"crop_type": "citrus", "crop_coefficient": 0.75},
+        polygon_geojson=polygon_geojson,
+        forecast_horizons_days=(7, 14, 28),
+    )
+
+    # Strictly filter historical event memory <= target_T without leaking future outcomes
+    recon_sum = summary_data.get("reconstruction") or {}
+    raw_mem = (recon_sum.get("event_memory") or {}).get("events") or []
+    t_dt = _parse_utc_iso(target_T)
+    causal_events: List[Dict[str, Any]] = []
+    for ev in raw_mem:
+        ev_start = ev.get("start_time")
+        if not ev_start:
+            continue
+        if _parse_utc_iso(ev_start) > t_dt:
+            continue
+        ev_copy = dict(ev)
+        peak_raw = ev_copy.get("peak_time") or ev_start
+        om = dict(ev_copy.get("outcome_measurement") or {})
+        horizon_days = int(om.get("followup_horizon_days") or 0)
+        if horizon_days > 0 and (_parse_utc_iso(peak_raw) + timedelta(days=horizon_days)) > t_dt:
+            ev_copy["hypothesis_status"] = (
+                "forcing_recorded" if ev_copy.get("epistemic_class") == "meteorological_forcing_reanalysis"
+                else ("confirmed" if ev_copy.get("epistemic_class") == "agronomic_event_confirmed" else "unresolved_insufficient_followup")
+            )
+            ev_copy["outcome_measurement"] = {
+                "outcome_epistemic_class": "subsequent_outcome",
+                "status": "pending_after_valid_time_cutoff",
+                "consistency_is_not_proof": True,
+                "independent_observation_outcome": {"status": "pending_after_cutoff"},
+                "model_state_inferred_outcome": {"status": "pending_after_cutoff"},
+            }
+        causal_events.append(ev_copy)
+
+    retro = recon_sum.get("retrovalidation") or {}
+    payload = {
+        "available": bool(q_res.get("available")),
+        "reason": q_res.get("reason"),
+        "plot_id": plot_id,
+        "tenant_id": namespace.tenant_id,
+        "geometry_hash": geometry_hash,
+        "as_of_date": target_T[:10],
+        "valid_time_T": q_res.get("valid_time_T") or target_T,
+        "knowledge_cutoff_K": q_res.get("knowledge_cutoff_K"),
+        "publication_authority": "DIAGNOSTIC_ONLY",
+        "claims_numerical_authority": False,
+        "worldline_authority": recon_sum.get("worldline_posterior_event_type") or "ARCHIVE_POSTERIOR_DIAGNOSTIC",
+        "qualification": retro.get("qualification") or {},
+        "available_dates": q_res.get("available_dates") or [],
+        "assimilated_observation_count": q_res.get("assimilated_observation_count", 0),
+        "last_observation_time": q_res.get("last_observation_time"),
+        "days_since_last_observation": q_res.get("days_since_last_observation"),
+        "state_means": q_res.get("state_means") or {},
+        "state_stds": q_res.get("state_stds") or {},
+        "state_support_ledger": q_res.get("state_support_ledger") or {},
+        "canonical_grid": q_res.get("canonical_grid"),
+        "has_spatial_observations": bool(q_res.get("has_spatial_observations")),
+        "spatial_surfaces": q_res.get("spatial_surfaces") or [],
+        "cross_layer_pre_priors": q_res.get("cross_layer_pre_priors") or {},
+        "cross_layer_intelligence": q_res.get("cross_layer_intelligence") or {},
+        "causal_forecasts": q_res.get("causal_forecasts") or [],
+        "event_memory": {
+            "events": causal_events[-60:],
+            "total_events_to_date": len(causal_events),
+            "meteorological_forcing_count": sum(
+                1 for e in causal_events if e.get("epistemic_class") == "meteorological_forcing_reanalysis"
+            ),
+            "confirmed_agronomic_count": sum(
+                1 for e in causal_events if e.get("epistemic_class") == "agronomic_event_confirmed"
+            ),
+            "hypothesis_count": sum(
+                1 for e in causal_events if e.get("epistemic_class") == "model_hypothesis"
+            ),
+        },
+        "retrovalidation_summary": {
+            "raw_uncalibrated_summary": retro.get("raw_uncalibrated_summary") or {},
+            "summary": retro.get("summary") or {},
+            "by_channel": retro.get("by_channel") or {},
+            "baselines": retro.get("baselines") or {},
+            "multi_horizon": retro.get("multi_horizon") or {},
+            "bma": retro.get("bma") or {},
+            "qualification": retro.get("qualification") or {},
+        },
+        "cross_layer_ablation": summary_data.get("cross_layer_ablation") or {},
+        "manifest_reconciliation": summary_data.get("manifest_reconciliation") or {},
+    }
+
+    raw_bytes = json.dumps(payload, default=str).encode("utf-8")
+    with _HIST_INTEL_RESPONSE_CACHE_LOCK:
+        if len(_HIST_INTEL_RESPONSE_CACHE) > 32:
+            _HIST_INTEL_RESPONSE_CACHE.clear()
+        _HIST_INTEL_RESPONSE_CACHE[cache_key] = raw_bytes
+
+    return Response(content=raw_bytes, media_type="application/json", headers={"Cache-Control": "no-cache"})
+
+
 def _parse_timestamp(ts_str: Optional[str]) -> Optional[datetime]:
     if not ts_str:
         return None

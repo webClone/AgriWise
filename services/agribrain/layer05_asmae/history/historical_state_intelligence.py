@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import tempfile
 from typing import Any, Dict, List, Optional
 
 from services.agribrain.layer0.asmae_scene_products.scene_product_store import SceneProductStore
@@ -78,6 +79,8 @@ class HistoricalStateIntelligenceService:
         knowledge_cutoff_K: Optional[Any] = None,
         skip_bootstrap: bool = False,
         emit_worldline_posterior: bool = True,
+        use_cross_layer_priors: bool = True,
+        compare_ablation: bool = True,
     ) -> Dict[str, Any]:
         """Bootstrap/extend OBSERVATION_QUALIFIED acquisitions and reconstruct 13-state intelligence."""
         end_iso = target_end_date or datetime.now(timezone.utc).isoformat()
@@ -107,10 +110,44 @@ class HistoricalStateIntelligenceService:
             management_events=management_events,
             polygon_geojson=polygon_geojson,
             emit_worldline_posterior=emit_worldline_posterior,
+            use_cross_layer_priors=use_cross_layer_priors,
             event_memory_fn=lambda traj, ctx: self.event_memory.reconstruct_memory(traj, ctx),
             retrovalidation_fn=lambda traj, ctx: self.retrovalidator.evaluate(traj, ctx),
         )
 
+        ablation_res: Dict[str, Any] = {}
+        if compare_ablation and use_cross_layer_priors:
+            with tempfile.TemporaryDirectory() as tmp_cp_dir:
+                ablation_recon = HistoricalStateReconstructor(
+                    worldline=self.worldline,
+                    checkpoint_root=Path(tmp_cp_dir),
+                    scene_store=self.reconstructor.scene_store,
+                    n_ensemble=self.reconstructor.n_ensemble,
+                    checkpoint_stride=self.reconstructor.checkpoint_stride,
+                )
+                s1_s2_only_res = ablation_recon.reconstruct(
+                    plot_id=plot_id,
+                    geometry_hash=geometry_hash,
+                    tenant_id=tenant_id,
+                    namespace=namespace,
+                    valid_time_T=valid_time_T or end_iso,
+                    knowledge_cutoff_K=knowledge_cutoff_K,
+                    daily_weather=daily_weather,
+                    crop_context=crop_context,
+                    soil_context=soil_context,
+                    management_events=management_events,
+                    polygon_geojson=polygon_geojson,
+                    emit_worldline_posterior=False,
+                    use_cross_layer_priors=False,
+                    event_memory_fn=None,
+                    retrovalidation_fn=lambda traj, ctx: self.retrovalidator.evaluate(traj, ctx),
+                )
+            ablation_res = self.retrovalidator.compare_cross_layer_ablation(
+                recon_res.get("retrovalidation") or {},
+                s1_s2_only_res.get("retrovalidation") or {},
+            )
+
+        manifest_reconcile = dict(bootstrap_res.get("manifest_reconciliation") or {})
         return {
             "status": recon_res.get("status"),
             "plot_id": plot_id,
@@ -120,6 +157,10 @@ class HistoricalStateIntelligenceService:
                 "resumed": bootstrap_res.get("resumed"),
                 "total_events_committed": bootstrap_res.get("total_events_committed"),
                 "total_gaps_recorded": bootstrap_res.get("total_gaps_recorded"),
+                "manifest_reconciliation": manifest_reconcile,
             },
+            "manifest_reconciliation": manifest_reconcile,
+            "cross_layer_intelligence": recon_res.get("cross_layer_intelligence") or {},
+            "cross_layer_ablation": ablation_res,
             "reconstruction": recon_res,
         }

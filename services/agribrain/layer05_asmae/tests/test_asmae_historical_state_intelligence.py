@@ -16,6 +16,7 @@ Tests:
 from __future__ import annotations
 
 import copy
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -23,6 +24,8 @@ from typing import Any, Dict, List
 import numpy as np
 import pytest
 
+from services.agribrain.layer0.archive.raster_store import RasterStore
+from services.agribrain.layer0.asmae_scene_products.scene_product_store import SceneProductStore
 from services.agribrain.layer05_asmae.config import N_STATES, STATE_NAMES, STATE_SCHEMA_VERSION
 from services.agribrain.layer05_asmae.history.archive_bootstrap_service import ArchiveBootstrapService
 from services.agribrain.layer05_asmae.history.historical_event_memory import HistoricalEventMemory
@@ -131,7 +134,10 @@ def test_safeguard_b_observation_qualified_never_claims_validated_posterior(tmp_
     events_before = wl.load_all_events(plot_id)
     assert len(events_before) == len(scenes)
     assert all(ev["event_type"] == "OBSERVATION_QUALIFIED" for ev in events_before)
-    assert not any(ev["event_type"] == "ARCHIVE_POSTERIOR_VALIDATED" for ev in events_before)
+    assert not any(
+        ev["event_type"] in ("ARCHIVE_POSTERIOR_VALIDATED", "ARCHIVE_POSTERIOR_DIAGNOSTIC")
+        for ev in events_before
+    )
     assert events_before[0]["payload"]["observation_qualified"]["assimilated"] is False
 
     weather = _build_synthetic_weather(2023, 2024)
@@ -147,6 +153,7 @@ def test_safeguard_b_observation_qualified_never_claims_validated_posterior(tmp_
         geometry_hash=geom_hash,
         daily_weather=weather,
         skip_bootstrap=True,
+        compare_ablation=False,
     )
     recon = res["reconstruction"]
     assert recon["status"] == "COMPLETED"
@@ -163,13 +170,20 @@ def test_safeguard_b_observation_qualified_never_claims_validated_posterior(tmp_
         assert ledger[withheld_state]["spatial_support"] == "unavailable"
         assert ledger[withheld_state]["field_approval_eligible"] is False
 
-    # Verify ARCHIVE_POSTERIOR_VALIDATED is now committed once after assimilation
-    post_events = [ev for ev in wl.load_all_events(plot_id) if ev["event_type"] == "ARCHIVE_POSTERIOR_VALIDATED"]
+    # Verify authority gating: VALIDATED only if qualification passes, else DIAGNOSTIC with block reasons
+    expected_ev_type = "ARCHIVE_POSTERIOR_VALIDATED" if recon["qualification_passed"] else "ARCHIVE_POSTERIOR_DIAGNOSTIC"
+    assert recon["worldline_posterior_event_type"] == expected_ev_type
+    post_events = [ev for ev in wl.load_all_events(plot_id) if ev["event_type"] == expected_ev_type]
     assert len(post_events) == 1
+    if not recon["qualification_passed"]:
+        assert not [ev for ev in wl.load_all_events(plot_id) if ev["event_type"] == "ARCHIVE_POSTERIOR_VALIDATED"]
+        assert len(recon["validation_block_reasons"]) > 0
     ap = post_events[0]["payload"]["archive_posterior"]
     assert ap["model_version"] == RECONSTRUCTOR_MODEL_VERSION
     assert ap["state_schema_version"] == STATE_SCHEMA_VERSION
     assert ap["calibration_version"] == CALIBRATION_VERSION
+    assert ap["publication_authority"] == "DIAGNOSTIC_ONLY"
+    assert ap["claims_numerical_authority"] is False
     assert ap["observation_count"] == len(scenes)
     assert set(ap["state_means"].keys()) == set(STATE_NAMES)
 
@@ -383,14 +397,26 @@ def test_event_memory_separates_observed_from_hypotheses_and_measures_outcomes()
     )
     evs = mem["events"]
     cats = {e["event_category"] for e in evs}
-    assert {"rainfall_response", "planting_emergence", "candidate_irrigation", "canopy_change", "stress_onset", "recovery"} <= cats
+    assert {"rainfall_forcing", "planting_emergence", "candidate_irrigation", "canopy_change", "stress_onset", "recovery"} <= cats
 
-    rain_evs = [e for e in evs if e["event_category"] == "rainfall_response"]
+    rain_evs = [e for e in evs if e["event_category"] == "rainfall_forcing"]
+    plant_evs = [e for e in evs if e["event_category"] == "planting_emergence"]
     cand_irrig = [e for e in evs if e["event_category"] == "candidate_irrigation"]
-    assert all(e["epistemic_class"] == "observed_event" for e in rain_evs)
+    assert all(e["epistemic_class"] == "meteorological_forcing_reanalysis" for e in rain_evs)
+    assert any(
+        e["epistemic_class"] == "agronomic_event_confirmed"
+        and e.get("trigger_evidence", {}).get("source") == "management_log"
+        for e in plant_evs
+    )
     assert all(e["epistemic_class"] == "model_hypothesis" for e in cand_irrig)
-    assert cand_irrig[0]["hypothesis_status"] == "supported"
-    assert cand_irrig[0]["outcome_measurement"]["delta_obs_ndvi"] > 0
+    assert cand_irrig[0]["hypothesis_status"] == "consistent_with_followup"
+    assert abs(sum(cand_irrig[0]["competing_explanations"].values()) - 1.0) < 0.02
+    om = cand_irrig[0]["outcome_measurement"]
+    assert om["outcome_epistemic_class"] == "subsequent_outcome"
+    assert om["consistency_is_not_proof"] is True
+    assert "independent_observation_outcome" in om
+    assert "model_state_inferred_outcome" in om
+    assert om["independent_observation_outcome"]["delta_obs_ndvi"] > 0
 
 
 def test_retrovalidation_bma_baselines_calibration_and_seasonal_scorecard(tmp_path: Path):
@@ -431,3 +457,285 @@ def test_retrovalidation_bma_baselines_calibration_and_seasonal_scorecard(tmp_pa
     assert bma["can_promote_to_production"] is False
     assert abs(sum(bma["weights"].values()) - 1.0) < 1e-4
     assert {"persistence", "doy_climatology", "damped_linear_trend", "asmae_enkf", "bma_consensus"} <= set(retro["baselines"].keys())
+    assert "multi_horizon" in retro and "qualification" in retro
+
+
+def test_authority_gating_never_validates_without_retrovalidation_or_skill(tmp_path: Path):
+    """Safeguard B: without retrovalidation or when skill/calibration fails, NEVER emit ARCHIVE_POSTERIOR_VALIDATED."""
+    wl = CanonicalWorldlineService(root=tmp_path / "wl_gate", require_durable_anchor=False)
+    plot_id = "afroun_gate"
+    geom_hash = "sha256:gate_geom"
+    scenes = _make_seasonal_scenes([2022])
+    _commit_obs_sequence(wl, plot_id, geom_hash, scenes)
+
+    recon_svc = HistoricalStateReconstructor(
+        worldline=wl, checkpoint_root=tmp_path / "cp_gate", n_ensemble=10, checkpoint_stride=5
+    )
+    res_no_retro = recon_svc.reconstruct(
+        plot_id=plot_id,
+        geometry_hash=geom_hash,
+        daily_weather=_build_synthetic_weather(2022, 2022),
+        retrovalidation_fn=None,
+        emit_worldline_posterior=True,
+    )
+    assert res_no_retro["qualification_passed"] is False
+    assert res_no_retro["worldline_posterior_event_type"] == "ARCHIVE_POSTERIOR_DIAGNOSTIC"
+    assert "retrovalidation_not_executed" in res_no_retro["validation_block_reasons"]
+    events = wl.load_all_events(plot_id)
+    assert not any(ev["event_type"] == "ARCHIVE_POSTERIOR_VALIDATED" for ev in events)
+    diag = [ev for ev in events if ev["event_type"] == "ARCHIVE_POSTERIOR_DIAGNOSTIC"]
+    assert len(diag) == 1
+    assert diag[0]["payload"]["archive_posterior"]["qualification_passed"] is False
+
+
+def test_cross_layer_bridge_l2_l8_coupling_and_non_circularity(tmp_path: Path):
+    """Cross-layer intelligence executes L2-L8 engines, preserves non-assimilable guard, and scores L2-8 vs S1/S2 ablation."""
+    wl = CanonicalWorldlineService(root=tmp_path / "wl_cl", require_durable_anchor=False)
+    plot_id = "afroun_cl"
+    geom_hash = "sha256:cl_geom"
+    scenes = _make_seasonal_scenes([2022, 2023])
+    _commit_obs_sequence(wl, plot_id, geom_hash, scenes)
+
+    svc = HistoricalStateIntelligenceService(
+        worldline=wl, bootstrap_root=tmp_path / "bs_cl", checkpoint_root=tmp_path / "cp_cl", n_ensemble=10
+    )
+    res = svc.run_full_intelligence(
+        plot_id=plot_id,
+        geometry_hash=geom_hash,
+        daily_weather=_build_synthetic_weather(2022, 2023),
+        skip_bootstrap=True,
+        use_cross_layer_priors=True,
+        compare_ablation=True,
+    )
+    cl = res["cross_layer_intelligence"]
+    assert cl["observation_role"] == "refined_specialist_output_non_assimilable"
+    assert cl["eligible_for_asmae_assimilation"] is False
+    assert len(cl["engines_executed"]) >= 25
+    assert cl["layers_refined"]["layer8_constraints"]["is_constraint_only"] is True
+    assert cl["layers_refined"]["layer8_constraints"]["never_physical_ground_truth"] is True
+    assert cl["layers_refined"]["layer8_constraints"]["contains_recommendations"] is False
+    assert "observation_type" in cl["next_best_observation"]
+
+    abl = res["cross_layer_ablation"]
+    assert abl["cross_layer_rmse"] is not None
+    assert abl["s1_s2_only_rmse"] is not None
+    assert abl["delta_rmse_cross_minus_s1s2"] is not None
+
+
+def test_spatial_canonical_grid_reprojection_and_causal_time_travel(tmp_path: Path):
+    """Multi-resolution SAFE rasters reproject onto one canonical parcel grid & query_as_of stays strictly causal."""
+    plot_id = "afroun_spatial"
+    geom_hash = "sha256:spatial_geom"
+    poly = {
+        "type": "Feature",
+        "properties": {},
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[2.6555, 36.5072], [2.6625, 36.5072], [2.6625, 36.5105], [2.6555, 36.5105], [2.6555, 36.5072]]],
+        },
+    }
+    scenes_dir = tmp_path / "scenes"
+    scenes_dir.mkdir(parents=True, exist_ok=True)
+    store = SceneProductStore.__new__(SceneProductStore)
+    store.plot_id = plot_id
+    store.run_id = None
+    store.provider_product_id = None
+    store.base_dir = str(scenes_dir)
+    store.raster_store = RasterStore()
+
+    # Create 3 synthetic real-format .SAFE dirs with distinct raster dimensions (18x22 vs 24x28 vs 20x24)
+    for idx, (day_iso, shape, ndvi_val, ndmi_val) in enumerate([
+        ("2023-03-10T10:30:00+00:00", (18, 22), 0.45, 0.14),
+        ("2023-06-15T10:30:00+00:00", (24, 28), 0.72, 0.25),
+        ("2024-04-20T10:30:00+00:00", (20, 24), 0.64, 0.18),
+    ]):
+        sid = f"S2A_MSIL2A_{day_iso[:10].replace('-', '')}"
+        sdir = scenes_dir / sid
+        sdir.mkdir(parents=True, exist_ok=True)
+        h, w = shape
+        dx = (2.6625 - 2.6555) / w
+        dy = (36.5105 - 36.5072) / h
+        # Ramp across east-west columns so spatial pattern is non-flat
+        col_ramp = np.linspace(-0.08, 0.08, w, dtype=np.float32)[None, :].repeat(h, axis=0)
+        b04 = np.full((h, w), 0.08, dtype=np.float32)
+        b08 = np.clip(b04 * (1.0 + ndvi_val + col_ramp) / np.maximum(0.1, 1.0 - (ndvi_val + col_ramp)), 0.05, 0.9).astype(np.float32)
+        b11 = np.clip(b08 * (1.0 - ndmi_val) / np.maximum(0.1, 1.0 + ndmi_val), 0.05, 0.9).astype(np.float32)
+        scl = np.full((h, w), 4, dtype=np.int16)
+        store.raster_store.save_band(str(sdir / "B04.npz"), b04)
+        store.raster_store.save_band(str(sdir / "B08.npz"), b08)
+        store.raster_store.save_band(str(sdir / "B11.npz"), b11)
+        store.raster_store.save_band(str(sdir / "SCL.npz"), scl)
+        meta = {
+            "scene_id": sid,
+            "sensor": "sentinel2",
+            "acquisition_datetime": day_iso,
+            "crs": "EPSG:4326",
+            "transform": [2.6555, dx, 0.0, 36.5105, 0.0, -dy],
+            "width": w,
+            "height": h,
+        }
+        (sdir / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    # Add a Sentinel-1 SAR .SAFE scene with yet another raster shape (22x26)
+    s1_day = "2023-06-20T17:30:00+00:00"
+    s1_id = "S1A_IW_GRDH_20230620"
+    s1_dir = scenes_dir / s1_id
+    s1_dir.mkdir(parents=True, exist_ok=True)
+    h1, w1 = 22, 26
+    dx1 = (2.6625 - 2.6555) / w1
+    dy1 = (36.5105 - 36.5072) / h1
+    row_ramp = np.linspace(-1.5, 1.5, h1, dtype=np.float32)[:, None].repeat(w1, axis=1)
+    vv_db = (-12.5 + row_ramp).astype(np.float32)
+    vh_db = (-19.2 + row_ramp * 0.7).astype(np.float32)
+    store.raster_store.save_band(str(s1_dir / "VV.npz"), vv_db)
+    store.raster_store.save_band(str(s1_dir / "VH.npz"), vh_db)
+    (s1_dir / "metadata.json").write_text(json.dumps({
+        "scene_id": s1_id,
+        "sensor": "sentinel1",
+        "acquisition_datetime": s1_day,
+        "crs": "EPSG:4326",
+        "transform": [2.6555, dx1, 0.0, 36.5105, 0.0, -dy1],
+        "width": w1,
+        "height": h1,
+        "band_units": {"VV": "db", "VH": "db"},
+    }), encoding="utf-8")
+
+    wl = CanonicalWorldlineService(root=tmp_path / "wl_sp", require_durable_anchor=False)
+    scene_records = []
+    for sd in sorted(scenes_dir.iterdir()):
+        meta = json.loads((sd / "metadata.json").read_text(encoding="utf-8"))
+        if meta["sensor"] == "sentinel2":
+            b04 = store.raster_store.load_band(str(sd / "B04.npz"))
+            b08 = store.raster_store.load_band(str(sd / "B08.npz"))
+            b11 = store.raster_store.load_band(str(sd / "B11.npz"))
+            ndvi = (b08 - b04) / np.maximum(1e-6, b08 + b04)
+            ndmi = (b08 - b11) / np.maximum(1e-6, b08 + b11)
+            scene_records.append({
+                "scene_id": meta["scene_id"],
+                "acquisition_time": meta["acquisition_datetime"],
+                "source": "sentinel2",
+                "product_level": "L2A",
+                "cloud_score": 0.02,
+                "quality_score": 0.96,
+                "valid_pixel_fraction": 0.98,
+                "source_content_hash": f"sp_{meta['scene_id']}".ljust(64, "0"),
+                "metrics": {"ndvi_mean": float(np.mean(ndvi)), "ndmi_mean": float(np.mean(ndmi))},
+            })
+        else:
+            vv = store.raster_store.load_band(str(sd / "VV.npz"))
+            vh = store.raster_store.load_band(str(sd / "VH.npz"))
+            scene_records.append({
+                "scene_id": meta["scene_id"],
+                "acquisition_time": meta["acquisition_datetime"],
+                "source": "sentinel1",
+                "product_level": "GRD",
+                "cloud_score": 0.0,
+                "quality_score": 0.95,
+                "valid_pixel_fraction": 0.98,
+                "source_content_hash": f"sp_{meta['scene_id']}".ljust(64, "0"),
+                "metrics": {"vv_mean_db": float(np.mean(vv)), "vh_mean_db": float(np.mean(vh))},
+            })
+    scene_records.sort(key=lambda r: r["acquisition_time"])
+    _commit_obs_sequence(wl, plot_id, geom_hash, scene_records)
+
+    recon = HistoricalStateReconstructor(
+        worldline=wl, checkpoint_root=tmp_path / "cp_sp", scene_store=store, n_ensemble=10, checkpoint_stride=1
+    )
+    weather = _build_synthetic_weather(2023, 2024)
+    res = recon.reconstruct(
+        plot_id=plot_id, geometry_hash=geom_hash, daily_weather=weather, polygon_geojson=poly,
+        retrovalidation_fn=None, emit_worldline_posterior=False,
+    )
+    assert res["has_spatial_observations"] is True
+    assert res["spatial_surfaces_count"] >= 6
+
+    # Time-travel query as of 2023-07-01 must NOT include 2024-04-20 observation (only 3 observations before cutoff)
+    q = recon.query_as_of(
+        plot_id=plot_id,
+        geometry_hash=geom_hash,
+        valid_time_T="2023-07-01T00:00:00+00:00",
+        daily_weather=weather,
+        polygon_geojson=poly,
+    )
+    assert q["available"] is True
+    assert q["assimilated_observation_count"] == 3
+    assert len(q["causal_forecasts"]) == 3
+    # Explicit pre-ingest knowledge_cutoff_K must enforce strict bitemporal recorded_at gating
+    q_early_k = recon.query_as_of(
+        plot_id=plot_id,
+        geometry_hash=geom_hash,
+        valid_time_T="2023-07-01T00:00:00+00:00",
+        knowledge_cutoff_K="2020-01-01T00:00:00+00:00",
+        daily_weather=weather,
+        polygon_geojson=poly,
+    )
+    assert q_early_k["available"] is False
+    surf_types = {s["surface_type"] for s in q["spatial_surfaces"]}
+    assert "ASMAE_VIGOR" in surf_types
+    assert "ASMAE_THERMAL_STRESS" not in surf_types
+    assert "ASMAE_SALINITY_STRESS" not in surf_types
+    assert "ASMAE_BIOTIC_CONFOUNDER_RISK" not in surf_types
+    # Every spatial surface grid matches one canonical grid shape and preserves uncertainty grid
+    shapes = {(len(s["values"]), len(s["values"][0])) for s in q["spatial_surfaces"]}
+    assert len(shapes) == 1
+    assert all(len(s["uncertainty"]) == len(s["values"]) for s in q["spatial_surfaces"])
+    assert q["cross_layer_intelligence"]["observation_role"] == "refined_specialist_output_non_assimilable"
+
+
+def test_fastapi_historical_intelligence_endpoint_auth_and_tenant_isolation():
+    """Verify /v2/plots/{plot_id}/historical-intelligence enforces plot/tenant scope and serves signed requests."""
+    import uuid
+    import time
+    from fastapi.testclient import TestClient
+    from services.agribrain.app.main import app
+    from services.agribrain.app.internal_service_auth import compute_request_signature
+
+    client = TestClient(app)
+
+    def _signed_headers(plot_id: str, tenant_id: str, farm_id: str, header_plot: str = "", query_pairs=None):
+        ts = str(int(time.time()))
+        nonce = uuid.uuid4().hex
+        p_hdr = header_plot or plot_id
+        path = f"/v2/plots/{plot_id}/historical-intelligence"
+        sig = compute_request_signature("GET", path, query_pairs or [], tenant_id, farm_id, p_hdr, b"", ts, nonce, "v1")
+        return {
+            "X-AgriBrain-Signature": sig,
+            "X-AgriBrain-Timestamp": ts,
+            "X-AgriBrain-Nonce": nonce,
+            "X-AgriBrain-Key-Version": "v1",
+            "X-Tenant-Id": tenant_id,
+            "X-Farm-Id": farm_id,
+            "X-Plot-Id": p_hdr,
+        }
+
+    # 1. Unknown uninitialized plot returns 404
+    r404 = client.get(
+        "/v2/plots/plot_uninitialized_xyz/historical-intelligence",
+        headers=_signed_headers("plot_uninitialized_xyz", "t_demo", "f_demo"),
+    )
+    assert r404.status_code == 404
+
+    # 2. Foreign tenant querying afroun must never see tenant 697ddd3bd4195b809226a67b observations
+    r_foreign = client.get(
+        "/v2/plots/6a09d9e91dd0c7ed6fce7d50/historical-intelligence?as_of=2026-09-01",
+        headers=_signed_headers(
+            "6a09d9e91dd0c7ed6fce7d50", "foreign_tenant_isolated", "69ad7b6f7e6843e8234afcf6",
+            query_pairs=[("as_of", "2026-09-01")],
+        ),
+    )
+    if r_foreign.status_code == 200:
+        body = r_foreign.json()
+        assert body["available"] is False
+        assert body["assimilated_observation_count"] == 0
+    else:
+        assert r_foreign.status_code == 404
+
+    # 3. Mismatched X-Plot-Id must return 403
+    r403 = client.get(
+        "/v2/plots/6a09d9e91dd0c7ed6fce7d50/historical-intelligence",
+        headers=_signed_headers(
+            "6a09d9e91dd0c7ed6fce7d50", "697ddd3bd4195b809226a67b", "69ad7b6f7e6843e8234afcf6",
+            header_plot="other_plot_id",
+        ),
+    )
+    assert r403.status_code == 403

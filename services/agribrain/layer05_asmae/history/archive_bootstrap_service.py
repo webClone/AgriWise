@@ -88,6 +88,7 @@ class BootstrapCheckpoint:
     created_at: str = ""
     updated_at: str = ""
     error_message: Optional[str] = None
+    manifest_reconciliation: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -205,6 +206,15 @@ class ArchiveBootstrapService:
         elif checkpoint.status == "COMPLETED":
             # Check if target_end has advanced beyond previous target_end
             if _parse_utc_iso(target_end) <= _parse_utc_iso(checkpoint.target_end_date):
+                reconcile = dict(checkpoint.manifest_reconciliation or {
+                    "raw_discovered_records": checkpoint.total_scenes_discovered,
+                    "deduplicated_scene_count": checkpoint.total_events_committed,
+                    "admitted_unique_count": checkpoint.total_events_committed,
+                    "quarantined_duplicate_count": 0,
+                    "excluded_cloud_or_qa_count": 0,
+                    "no_data_windows_count": len(checkpoint.gap_windows),
+                    "rejected_windows_count": 0,
+                })
                 return {
                     "status": "COMPLETED",
                     "resumed": False,
@@ -215,6 +225,7 @@ class ArchiveBootstrapService:
                     "total_gaps_recorded": checkpoint.total_gaps_recorded,
                     "gap_windows": checkpoint.gap_windows,
                     "last_committed_event_id": checkpoint.last_committed_event_id,
+                    "manifest_reconciliation": reconcile,
                     "checkpoint": checkpoint.to_dict(),
                 }
             # Target expanded: transition back to IN_PROGRESS from previous cursor/end
@@ -223,6 +234,30 @@ class ArchiveBootstrapService:
             checkpoint.current_cursor = prev_cursor
             checkpoint.status = "IN_PROGRESS"
             self.save_checkpoint(checkpoint)
+
+        # Initialize/load durable manifest reconciliation ledger and seen scene keys
+        reconcile = dict(checkpoint.manifest_reconciliation or {})
+        reconcile.setdefault("raw_discovered_records", checkpoint.total_scenes_discovered)
+        reconcile.setdefault("deduplicated_scene_count", checkpoint.total_events_committed)
+        reconcile.setdefault("admitted_unique_count", checkpoint.total_events_committed)
+        reconcile.setdefault("quarantined_duplicate_count", 0)
+        reconcile.setdefault("excluded_cloud_or_qa_count", 0)
+        reconcile.setdefault("no_data_windows_count", 0)
+        reconcile.setdefault("rejected_windows_count", 0)
+        reconcile.setdefault("quarantined_duplicates", [])
+        reconcile.setdefault("excluded_scenes", [])
+        seen_scene_keys = set(reconcile.get("seen_scene_keys") or [])
+        if not seen_scene_keys:
+            try:
+                for ev in self.worldline.load_all_events(plot_id, tenant_id, namespace):
+                    if ev.get("event_type") == "OBSERVATION_QUALIFIED":
+                        oq = (ev.get("payload") or {}).get("observation_qualified") or {}
+                        sid = str(oq.get("scene_id") or "")
+                        acq = str(oq.get("acquisition_time") or "")
+                        if sid:
+                            seen_scene_keys.add(f"{sid}|{acq[:19]}")
+            except Exception:
+                pass
 
         cursor_dt = _parse_utc_iso(checkpoint.current_cursor)
         start_dt = _parse_utc_iso(start_iso)
@@ -265,8 +300,14 @@ class ArchiveBootstrapService:
                 )
 
                 checkpoint.total_scenes_discovered += len(scenes)
+                reconcile["raw_discovered_records"] = int(reconcile.get("raw_discovered_records", 0)) + len(scenes)
                 events_in_win = 0
                 is_gap = len(scenes) == 0
+
+                if window_status == "REJECTED":
+                    reconcile["rejected_windows_count"] = int(reconcile.get("rejected_windows_count", 0)) + 1
+                elif window_status == "NO_DATA":
+                    reconcile["no_data_windows_count"] = int(reconcile.get("no_data_windows_count", 0)) + 1
 
                 if is_gap:
                     checkpoint.total_gaps_recorded += 1
@@ -276,7 +317,7 @@ class ArchiveBootstrapService:
                         idx, window_status, sensor_statuses,
                     )
                 else:
-                    # Reconstruct events chronologically
+                    # Reconstruct events chronologically, quarantining duplicates or unusable QA scenes
                     sorted_scenes = sorted(
                         scenes,
                         key=lambda s: _parse_utc_iso(
@@ -285,6 +326,33 @@ class ArchiveBootstrapService:
                     )
 
                     for scene in sorted_scenes:
+                        sid = str(scene.get("scene_id") or "")
+                        acq = str(scene.get("acquisition_time") or scene.get("observation_time") or "")
+                        s_key = f"{sid}|{acq[:19]}" if sid else ""
+                        if s_key and s_key in seen_scene_keys:
+                            reconcile["quarantined_duplicate_count"] = int(
+                                reconcile.get("quarantined_duplicate_count", 0)
+                            ) + 1
+                            if len(reconcile["quarantined_duplicates"]) < 100:
+                                reconcile["quarantined_duplicates"].append({
+                                    "scene_id": sid,
+                                    "acquisition_time": acq,
+                                    "reason": "duplicate_scene_identity_across_windows",
+                                })
+                            continue
+                        valid_frac = scene.get("valid_pixel_fraction")
+                        if isinstance(valid_frac, (int, float)) and float(valid_frac) <= 0.0:
+                            reconcile["excluded_cloud_or_qa_count"] = int(
+                                reconcile.get("excluded_cloud_or_qa_count", 0)
+                            ) + 1
+                            if len(reconcile["excluded_scenes"]) < 100:
+                                reconcile["excluded_scenes"].append({
+                                    "scene_id": sid,
+                                    "acquisition_time": acq,
+                                    "reason": "zero_valid_parcel_pixels",
+                                })
+                            continue
+
                         event_id = self._commit_scene_to_worldline(
                             plot_id=plot_id,
                             geometry_hash=geometry_hash,
@@ -294,9 +362,18 @@ class ArchiveBootstrapService:
                             parent_event_id=checkpoint.last_committed_event_id,
                         )
                         if event_id:
+                            if s_key:
+                                seen_scene_keys.add(s_key)
                             checkpoint.last_committed_event_id = event_id
                             checkpoint.total_events_committed += 1
                             events_in_win += 1
+                            reconcile["admitted_unique_count"] = int(
+                                reconcile.get("admitted_unique_count", 0)
+                            ) + 1
+                            reconcile["deduplicated_scene_count"] = len(seen_scene_keys) or reconcile["admitted_unique_count"]
+
+                reconcile["seen_scene_keys"] = sorted(seen_scene_keys)[-500:]
+                checkpoint.manifest_reconciliation = reconcile
 
                 # Record completed window with explicit NO_DATA/REJECTED/COMPLETED classification
                 win_record = BootstrapWindowRecord(
@@ -331,6 +408,7 @@ class ArchiveBootstrapService:
             if fail_fast:
                 raise
 
+        pub_reconcile = {k: v for k, v in (checkpoint.manifest_reconciliation or {}).items() if k != "seen_scene_keys"}
         return {
             "status": checkpoint.status,
             "resumed": len(checkpoint.completed_windows) > windows_processed,
@@ -340,6 +418,7 @@ class ArchiveBootstrapService:
             "total_scenes_discovered": checkpoint.total_scenes_discovered,
             "last_committed_event_id": checkpoint.last_committed_event_id,
             "completed_windows_count": len(checkpoint.completed_windows),
+            "manifest_reconciliation": pub_reconcile,
             "checkpoint": checkpoint.to_dict(),
         }
 

@@ -472,6 +472,43 @@ def run_pilot_for_plot(
         import shutil
         shutil.rmtree(cache_dir, ignore_errors=True)
 
+def _inspect_scene_cache_inventory(plot_id: str, scene_store: Any) -> Dict[str, Any]:
+    """Inventory .SAFE directories vs legacy flat .npz artifacts in SceneProductStore."""
+    base_path = Path(scene_store.base_dir)
+    plot_dir = base_path if getattr(scene_store, "plot_id", None) == plot_id else base_path / plot_id
+    if not plot_dir.is_dir():
+        return {
+            "plot_cache_dir": str(plot_dir),
+            "safe_directories_count": 0,
+            "safe_s2_count": 0,
+            "safe_s1_count": 0,
+            "legacy_flat_npz_count": 0,
+            "legacy_flat_npz_files": [],
+        }
+    safe_dirs = [p for p in sorted(plot_dir.iterdir()) if p.is_dir() and (p / "metadata.json").is_file()]
+    safe_s2 = 0
+    safe_s1 = 0
+    for sd in safe_dirs:
+        try:
+            meta = json.loads((sd / "metadata.json").read_text(encoding="utf-8"))
+            sensor = str(meta.get("sensor") or "").upper()
+            if "S2" in sensor or (sd / "B04.npz").is_file():
+                safe_s2 += 1
+            elif "S1" in sensor or (sd / "VV.npz").is_file():
+                safe_s1 += 1
+        except Exception:
+            continue
+    legacy_flat = sorted(p.name for p in plot_dir.iterdir() if p.is_file() and p.suffix == ".npz")
+    return {
+        "plot_cache_dir": str(plot_dir),
+        "safe_directories_count": len(safe_dirs),
+        "safe_s2_count": safe_s2,
+        "safe_s1_count": safe_s1,
+        "legacy_flat_npz_count": len(legacy_flat),
+        "legacy_flat_npz_files": legacy_flat,
+    }
+
+
 def _build_local_cache_fetcher(
     plot_id: str,
     geom_geojson: Dict[str, Any],
@@ -584,7 +621,7 @@ def run_historical_intelligence_for_plot(
     res = service.run_full_intelligence(
         plot_id=plot_id,
         geometry_hash=canonical_geom_hash,
-        tenant_id="69ad7b6f7e6843e8234afcf6" if plot_id == "6a09d9e91dd0c7ed6fce7d50" else "default_tenant",
+        tenant_id="697ddd3bd4195b809226a67b" if plot_id == "6a09d9e91dd0c7ed6fce7d50" else "default_tenant",
         namespace="default",
         start_date=MISSION_START_DATE,
         target_end_date=end_dt.isoformat(),
@@ -593,15 +630,38 @@ def run_historical_intelligence_for_plot(
         daily_weather=daily_weather,
         crop_context={"crop_type": "citrus", "crop_coefficient": 0.75},
         skip_bootstrap=skip_bootstrap,
+        use_cross_layer_priors=True,
+        compare_ablation=True,
     )
+    cache_inventory = _inspect_scene_cache_inventory(plot_id, scene_store)
+    manifest_reconcile = dict(res.get("manifest_reconciliation") or {})
+    manifest_reconcile["cache_inventory_reconciliation"] = cache_inventory
+    manifest_reconcile["reconciliation_note"] = (
+        f"Verified {cache_inventory.get('safe_directories_count', 0)} .SAFE scene directories "
+        f"(S2={cache_inventory.get('safe_s2_count', 0)}, S1={cache_inventory.get('safe_s1_count', 0)}) "
+        f"plus {cache_inventory.get('legacy_flat_npz_count', 0)} legacy flat .npz sidecars; "
+        f"raw_discovered={manifest_reconcile.get('raw_discovered_records', 0)}, "
+        f"admitted_unique={manifest_reconcile.get('admitted_unique_count', 0)}, "
+        f"quarantined_duplicates={manifest_reconcile.get('quarantined_duplicate_count', 0)}, "
+        f"excluded_cloud_or_qa={manifest_reconcile.get('excluded_cloud_or_qa_count', 0)}."
+    )
+
     out_dir = artifacts_dir / "archive_pilot_reports" / plot_id
     out_dir.mkdir(parents=True, exist_ok=True)
+    if daily_weather:
+        weather_cache_path = out_dir / "historical_weather_cache.json"
+        weather_cache_path.write_text(
+            json.dumps({"weather_meta": weather_meta, "daily_weather": daily_weather}, default=str),
+            encoding="utf-8",
+        )
     summary_path = out_dir / "historical_state_intelligence_summary.json"
     summary_payload = {
+        **res,
         "plot_id": plot_id,
+        "tenant_id": "697ddd3bd4195b809226a67b" if plot_id == "6a09d9e91dd0c7ed6fce7d50" else "default_tenant",
         "geometry_hash": canonical_geom_hash,
         "weather_meta": weather_meta,
-        **res,
+        "manifest_reconciliation": manifest_reconcile,
     }
     summary_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
     return summary_payload
@@ -627,13 +687,37 @@ def main():
             local_scene_cache=bool(args.local_scene_cache),
         )
         recon = res.get("reconstruction") or {}
-        retro = (recon.get("retrovalidation") or {}).get("summary") or {}
+        retro_full = recon.get("retrovalidation") or {}
+        retro = retro_full.get("summary") or {}
+        raw_retro = retro_full.get("raw_uncalibrated_summary") or {}
+        qual = retro_full.get("qualification") or {}
         mem = (recon.get("event_memory") or {}).get("summary") or {}
+        abl = res.get("cross_layer_ablation") or {}
+        voi = ((res.get("cross_layer_intelligence") or {}).get("next_best_observation") or {})
+        reconcile = res.get("manifest_reconciliation") or {}
         print(
-            f"[INTELLIGENCE] plot={target_plot} obs={recon.get('observation_count')} "
-            f"checkpoints={len(recon.get('checkpoints') or [])} events={mem.get('total_events')} "
-            f"rmse={retro.get('rmse')} skill_pers={retro.get('skill_vs_persistence')}"
+            f"[INTELLIGENCE] plot={target_plot} tenant={res.get('tenant_id')} "
+            f"obs={recon.get('observation_count')} checkpoints={len(recon.get('checkpoints') or [])} "
+            f"spatial_surfaces={recon.get('spatial_surfaces_count')} "
+            f"authority={recon.get('worldline_posterior_event_type')} qual_passed={qual.get('passed')} "
+            f"blocks={qual.get('block_reasons')}"
         )
+        print(
+            f"[RETROVALIDATION] events={mem.get('total_events')} "
+            f"tiers={{'met': {mem.get('meteorological_forcing_reanalysis_count')}, "
+            f"'conf': {mem.get('agronomic_event_confirmed_count')}, "
+            f"'hypo': {mem.get('model_hypothesis_count')}}} "
+            f"raw_rmse={raw_retro.get('rmse')} cal_rmse={retro.get('rmse')} "
+            f"bias={retro.get('bias')} cov1={retro.get('coverage_1sigma')} cov2={retro.get('coverage_2sigma')} "
+            f"skill_pers={retro.get('skill_vs_persistence')} skill_clim={retro.get('skill_vs_climatology')}"
+        )
+        print(
+            f"[CROSS_LAYER_ABLATION] cross_layer_rmse={abl.get('cross_layer_rmse')} "
+            f"s1_s2_only_rmse={abl.get('s1_s2_only_rmse')} delta_rmse={abl.get('delta_rmse_cross_minus_s1s2')} "
+            f"skill_gain={abl.get('skill_gain_vs_s1_s2_only')} "
+            f"voi_top={voi.get('observation_type')}"
+        )
+        print(f"[RECONCILE] {reconcile.get('reconciliation_note')}")
         sys.exit(0)
 
     plots = [args.plot_id] if args.plot_id else list(ARCHIVE_PILOT_REGISTRY.keys())
