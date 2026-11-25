@@ -1929,6 +1929,25 @@ def generate_asmae_surfaces(
                 )
                 continue
             provenance.update(alignment_proof)
+            for aux_key, aux_grid in (
+                ("uncertainty_grid", own_unc_grid),
+                ("confidence_grid", own_conf_grid),
+            ):
+                if aux_grid is not None:
+                    try:
+                        aligned_aux, _, _, _ = _align_asmae_grid_to_target(
+                            aux_grid,
+                            source_grid_spec=surface_source_grid_spec,
+                            target_grid_spec=target_grid_spec,
+                            target_height=H,
+                            target_width=W,
+                            method="bilinear",
+                        )
+                        provenance[aux_key] = aligned_aux
+                        if aux_key == "uncertainty_grid":
+                            provenance["uncertainty"] = aligned_aux
+                    except ValueError:
+                        pass
 
         # The advisory mask is an inter-stage control artifact, not just a
         # renderable raster.  Bind it to the exact ASMAE snapshot, authority

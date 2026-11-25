@@ -878,6 +878,7 @@ export interface Layer10ContextType {
   experimentalCoveragePct: number;
   canopySource: SourcePolicy;
   setCanopySource: (src: SourcePolicy) => void;
+  userLensSelectionSeq: number;
   experimentalDisplayState: "active" | "partial" | "base_fallback_experimental_missing" | "disabled";
   tierACoverage: number | null;
   tierBCoverage: number | null;
@@ -1179,11 +1180,13 @@ export function Layer10Provider({
   const [canopySource, setCanopySourceRaw] = useState<SourcePolicy>(
     DEFAULT_OVERLAY_TOGGLES.experimentalDetail ? "experimental" : "satellite"
   );
+  const [userLensSelectionSeq, setUserLensSelectionSeq] = useState(0);
   const canopySourceRef = useRef<SourcePolicy>(canopySource);
   const setCanopySource = useCallback((value: SourcePolicy) => {
     const src = normalizeSourcePolicy(value);
     canopySourceRef.current = src;
     setCanopySourceRaw(src);
+    setUserLensSelectionSeq(seq => seq + 1);
     if (src === "satellite" || src === "asmae_diagnostic") {
       setOverlayTogglesRaw(prev => ({ ...prev, experimentalDetail: false }));
       setShowCandidateMask(false);
@@ -1209,11 +1212,13 @@ export function Layer10Provider({
   // setBaseSurfaceMode: update the source of truth
   const setBaseSurfaceMode = useCallback((mode: BaseSurfaceMode) => {
     setBaseSurfaceModeRaw(mode);
+    setUserLensSelectionSeq(seq => seq + 1);
   }, []);
 
   // setActiveMode: backward-compat wrapper that updates baseSurfaceMode or overlay toggles
   const setActiveMode = useCallback((mode: MapMode) => {
     const BASE_MODES: BaseSurfaceMode[] = ["canopy", "water_stress", "nutrient_risk", "salinity", "composite_risk", "veg_attention"];
+    setUserLensSelectionSeq(seq => seq + 1);
     if (BASE_MODES.includes(mode as BaseSurfaceMode)) {
       setBaseSurfaceModeRaw(mode as BaseSurfaceMode);
     } else if (mode === "vegetation") {
@@ -2654,6 +2659,7 @@ export function Layer10Provider({
         experimentalCoveragePct,
         canopySource,
         setCanopySource,
+        userLensSelectionSeq,
         experimentalDisplayState,
         tierACoverage,
         tierBCoverage,

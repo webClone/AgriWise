@@ -188,6 +188,12 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
   });
 
   const [activeAsmaeKey, setActiveAsmaeKey] = useState<AsmaeStateKey>("vigor");
+  const [asmaeSeenLensSeq, setAsmaeSeenLensSeq] = useState<number>(0);
+  const handleSelectAsmaeState = useCallback((key: AsmaeStateKey) => {
+    setActiveAsmaeKey(key);
+    setAsmaeSeenLensSeq(scientific.l10.userLensSelectionSeq);
+  }, [scientific.l10.userLensSelectionSeq]);
+  const isModeLensActive = scientific.l10.userLensSelectionSeq > asmaeSeenLensSeq;
   const [sirePixelHover, setSirePixelHover] = useState<{
     value: number | null;
     row: number;
@@ -407,7 +413,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
             onCanvasMapClick={handleCanvasMapClick}
             workspaceMode
             onAnalysisStateChange={setAnalysisState}
-            activeAsmaeAvailability={activeAsmaeAvailability}
+            activeAsmaeAvailability={isModeLensActive ? undefined : activeAsmaeAvailability}
             onZoneClick={(zoneId) => {
               if (drawingKind) return;
               scientific.l10.setSelectedZone(zoneId);
@@ -426,7 +432,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
           selectedId={state.selectedEntity.id}
           onStartDrawing={handleStartDrawing}
           activeAsmaeKey={activeAsmaeKey}
-          onSelectAsmaeState={setActiveAsmaeKey}
+          onSelectAsmaeState={handleSelectAsmaeState}
           asmaeStatesSummary={asmaeStatesSummary}
           mapVisualLens={scientific.mapVisualLens}
           onPaletteChange={scientific.setMapVisualLens}
@@ -528,7 +534,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
           onRevoke={handleRevoke}
           onHistory={handleHistory}
           activeAsmaeKey={activeAsmaeKey}
-          onSelectAsmaeState={setActiveAsmaeKey}
+          onSelectAsmaeState={handleSelectAsmaeState}
           activeAsmaeAvailability={activeAsmaeAvailability}
           sirePixelHover={sirePixelHover}
           onCollapse={() => {

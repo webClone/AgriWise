@@ -13,7 +13,13 @@ import ZoneChip from "./layers/zones/ZoneChip";
 import { formatZoneGeoJson, computeZoneCentroid, DeckZoneFeature } from "./layers/zones/zoneUtils";
 import NdviDebugOverlay from "./layers/NdviDebugOverlay";
 import PlotScientificLegend from "./PlotScientificLegend";
-import { hasRenderedExperimentalOverlay, isAsmaeSurfaceType, isCompositeAdvisorySurface, isExperimentalSurfaceType } from "@/lib/agribrain/source-policy-display-resolver";
+import {
+  getRenderAuthorization,
+  hasRenderedExperimentalOverlay,
+  isAsmaeSurfaceType,
+  isCompositeAdvisorySurface,
+  isExperimentalSurfaceType,
+} from "@/lib/agribrain/source-policy-display-resolver";
 import {
   resolveCropStageLabels,
   resolvePixelInspectorTitle,
@@ -74,6 +80,16 @@ interface PlotMapShellProps {
   draftGeometry?: WorkspaceDraftGeometryProps | null;
   onCanvasMapClick?: (coordinate: [number, number]) => void;
   workspaceMode?: boolean;
+  asmaeSurfaceOverride?: {
+    key: string;
+    surfaceType: string;
+    policy: "asmae_diagnostic";
+    mode: string;
+    colorRamp: [string, string, string];
+    isWithheld: boolean;
+    label: string;
+    reason?: string;
+  } | null;
   onAnalysisStateChange?: (state: {
     canTransect: boolean;
     transectActive: boolean;
@@ -85,10 +101,10 @@ interface PlotMapShellProps {
 export default function PlotMapShell(props: PlotMapShellProps) {
   const {
     plots,
-    activeMode,
+    activeMode: rawActiveMode,
     cropName,
     surfaceData,
-    surfaceColors,
+    surfaceColors: rawSurfaceColors,
     confidenceSurface,
     reliabilitySurface,
     deviationSurface,
@@ -109,6 +125,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     sceneVisibility,
     sceneOpacity,
     sceneGeneration,
+    asmaeSurfaceOverride = null,
   } = props;
 
   const primaryPlot = plots?.[0];
@@ -129,17 +146,84 @@ export default function PlotMapShell(props: PlotMapShellProps) {
 
   const l10 = useLayer10();
   const { commitBrowserRenderReceipt, clearBrowserRenderReceipt } = l10;
-  const resolvedSurfaceType = String(l10.activeSurfaceType || surfaceData?.semantic_type || surfaceData?.type || "").toUpperCase();
+  const lastCommittedReceiptSigRef = useRef<string>("");
+  const hasValidAsmaeOverride = Boolean(
+    asmaeSurfaceOverride && !asmaeSurfaceOverride.isWithheld && surfaceData
+  );
+  const activeMode = hasValidAsmaeOverride ? asmaeSurfaceOverride!.mode : rawActiveMode;
+  const effectivePolicy = hasValidAsmaeOverride
+    ? asmaeSurfaceOverride!.policy
+    : l10.canopySource;
+  const surfaceColors = hasValidAsmaeOverride
+    ? asmaeSurfaceOverride!.colorRamp
+    : rawSurfaceColors;
+  const effectiveSurfaceType = hasValidAsmaeOverride
+    ? asmaeSurfaceOverride!.surfaceType
+    : (l10.activeSurfaceType || surfaceData?.semantic_type || surfaceData?.type || "");
+  const overrideBaseAuth = useMemo(() => {
+    if (!hasValidAsmaeOverride || !effectiveSurfaceType) return null;
+    return getRenderAuthorization(
+      effectiveSurfaceType,
+      effectivePolicy || "asmae_diagnostic",
+      activeMode || "canopy",
+      "base",
+      l10.data?.render_authorizations,
+    );
+  }, [hasValidAsmaeOverride, effectiveSurfaceType, effectivePolicy, activeMode, l10.data?.render_authorizations]);
+  const overrideInspectorAuth = useMemo(() => {
+    if (!hasValidAsmaeOverride || !effectiveSurfaceType) return null;
+    return getRenderAuthorization(
+      effectiveSurfaceType,
+      effectivePolicy || "asmae_diagnostic",
+      activeMode || "canopy",
+      "inspector",
+      l10.data?.render_authorizations,
+    );
+  }, [hasValidAsmaeOverride, effectiveSurfaceType, effectivePolicy, activeMode, l10.data?.render_authorizations]);
+  const effectiveActiveDisplay = useMemo(() => {
+    if (!hasValidAsmaeOverride || !surfaceData) return l10.activeDisplay;
+    const renderKind = (overrideBaseAuth?.renderKind && overrideBaseAuth.renderKind !== "none")
+      ? overrideBaseAuth.renderKind
+      : "full_raster";
+    return {
+      ...l10.activeDisplay,
+      surface: surfaceData,
+      surfaceType: effectiveSurfaceType,
+      sourceLabel: "ASMAE DIAGNOSTIC",
+      authorityLabel: "ASMAE state posterior",
+      groundingDetail: "",
+      renderKind,
+      displayLevel: "asmae_diagnostic" as const,
+      canSamplePixel: true,
+      canInterpretForScouting: true,
+      canInterpretDiagnostically: Boolean(overrideInspectorAuth?.authorized),
+      shouldShowNoData: false,
+      shouldShowPlotLevel: false,
+      reason: overrideBaseAuth?.reason || "Authorized ASMAE state surface.",
+      isAsmaeLabOverride: true,
+    };
+  }, [hasValidAsmaeOverride, surfaceData, l10.activeDisplay, effectiveSurfaceType, overrideBaseAuth, overrideInspectorAuth]);
+  const resolvedSurfaceType = String(effectiveSurfaceType || surfaceData?.semantic_type || surfaceData?.type || "").toUpperCase();
   const resolvedIsAsmae = isAsmaeSurfaceType(resolvedSurfaceType);
   const resolvedIsComposite = isCompositeAdvisorySurface(resolvedSurfaceType);
   const resolvedIsExperimental = isExperimentalSurfaceType(resolvedSurfaceType);
   const isLowConfidence = l10.data?.quality?.degradation_mode === "DEGRADED" || 
                           (l10.data?.quality?.reliability_score !== undefined && l10.data.quality.reliability_score < 0.40);
-  const canShowPixelDiagnosis = l10.canShowPixelDiagnosis ?? false;
-  const canShowPixelHint = l10.canShowPixelHint ?? false;
-  const canSamplePixel = l10.canSamplePixel ?? canShowPixelHint;
-  const canInterpretForScouting = l10.canInterpretForScouting ?? canSamplePixel;
-  const canInterpretDiagnostically = l10.canInterpretDiagnostically ?? canShowPixelDiagnosis;
+  const canShowPixelDiagnosis = hasValidAsmaeOverride
+    ? Boolean(overrideInspectorAuth?.authorized)
+    : (l10.canShowPixelDiagnosis ?? false);
+  const canShowPixelHint = hasValidAsmaeOverride
+    ? Boolean(overrideBaseAuth?.authorized || overrideInspectorAuth?.authorized)
+    : (l10.canShowPixelHint ?? false);
+  const canSamplePixel = hasValidAsmaeOverride
+    ? Boolean(overrideBaseAuth?.authorized || overrideInspectorAuth?.authorized)
+    : (l10.canSamplePixel ?? canShowPixelHint);
+  const canInterpretForScouting = hasValidAsmaeOverride
+    ? Boolean(overrideBaseAuth?.authorized || overrideInspectorAuth?.authorized)
+    : (l10.canInterpretForScouting ?? canSamplePixel);
+  const canInterpretDiagnostically = hasValidAsmaeOverride
+    ? Boolean(overrideInspectorAuth?.authorized)
+    : (l10.canInterpretDiagnostically ?? canShowPixelDiagnosis);
   // Sampling or drawing an ASMAE raster cannot elevate an explicit denial of diagnosis.
   const inspectorDiagnosisAllowed = isTransectDiagnosisAuthorized(canInterpretDiagnostically);
 
@@ -182,7 +266,11 @@ export default function PlotMapShell(props: PlotMapShellProps) {
   }, [inspectorDiagnosisAllowed]);
 
   const { onAnalysisStateChange } = props;
+  const lastAnalysisStateSigRef = useRef<string>("");
   useEffect(() => {
+    const nextSig = `${inspectorDiagnosisAllowed}:${transectMode}:${transectPoints.length}`;
+    if (nextSig === lastAnalysisStateSigRef.current) return;
+    lastAnalysisStateSigRef.current = nextSig;
     onAnalysisStateChange?.({
       canTransect: inspectorDiagnosisAllowed,
       transectActive: transectMode,
@@ -269,7 +357,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
   const [debugNdvi, setDebugNdvi] = useState(false);
 
   // 3. Drive Camera using externalized Plot Fit logic
-  const { viewState, setViewState, plotGeoJson, setDimensions } = usePlotFit({ primaryPlot, activeMode });
+  const { viewState, setViewState, plotGeoJson, setDimensions } = usePlotFit({ primaryPlot, activeMode: rawActiveMode });
 
   // V61D: Compile dynamic basemap style when visualSource is available
   const mapStyle = useMemo(() => {
@@ -408,7 +496,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
         const gapFillMask = l10.surfaceByType?.["GAP_FILL_MASK_NDVI"] || l10.surfaceByType?.["GAP_FILL_MASK"];
         const valid = sampleMask(validMask);
         if (valid !== null && valid <= 0) return null;
-        if (valid === null && !Number.isFinite(Number(val))) return null;
+        if (val === null || val === undefined || typeof val !== "number" || !Number.isFinite(val)) return null;
         const observed = sampleMask(observedMask);
         const gapFilled = sampleMask(gapFillMask);
         const confidence = confidenceSurface?.values?.[row]?.[col] ?? null;
@@ -555,9 +643,26 @@ export default function PlotMapShell(props: PlotMapShellProps) {
 
   // V92.4-BC.1: Compute active mode's availability for uniform tint rendering
   const activeModeAvailability = useMemo(() => {
-    const modeKey = (l10.baseSurfaceMode ?? activeMode) as string;
-    return l10.modeAvailability?.[modeKey] ?? undefined;
-  }, [l10.baseSurfaceMode, activeMode, l10.modeAvailability]);
+    const modeKey = ((hasValidAsmaeOverride ? activeMode : l10.baseSurfaceMode) ?? activeMode) as string;
+    const baseAvail = l10.modeAvailability?.[modeKey];
+    if (hasValidAsmaeOverride && effectiveActiveDisplay) {
+      return {
+        ...(baseAvail || {}),
+        surfaceType: effectiveSurfaceType,
+        surfaceExists: true,
+        groundingClass: surfaceData?.grounding_class || "RASTER_GROUNDED",
+        hasSpatialRaster: true,
+        hasZones: baseAvail?.hasZones ?? false,
+        modeState: "available_raster",
+        suffix: "ASMAE diagnostic",
+        displayLevel: "asmae_diagnostic",
+        authorityLevel: "ASMAE state posterior",
+        renderKind: effectiveActiveDisplay.renderKind,
+        label: asmaeSurfaceOverride?.label || effectiveSurfaceType,
+      } as any;
+    }
+    return baseAvail ?? undefined;
+  }, [hasValidAsmaeOverride, activeMode, l10.baseSurfaceMode, l10.modeAvailability, effectiveActiveDisplay, effectiveSurfaceType, surfaceData, asmaeSurfaceOverride]);
 
   // P06.05 Mode Isolation: Suppress zone selection callbacks when geometry authoring is active
   const safeOnZoneClick = props.draftGeometry ? undefined : onZoneClick;
@@ -593,13 +698,13 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     overlayAvailability: l10.overlayAvailability || undefined,
     modeAvailability: activeModeAvailability,
     zoom: viewState.zoom,
-    canopySource: l10.canopySource,
-    activeDisplay: l10.activeDisplay,
-    shouldShowPlotLevel: l10.shouldShowPlotLevel,
-    activeSurfaceType: l10.activeSurfaceType,
+    canopySource: effectivePolicy,
+    activeDisplay: effectiveActiveDisplay,
+    shouldShowPlotLevel: hasValidAsmaeOverride ? false : l10.shouldShowPlotLevel,
+    activeSurfaceType: effectiveSurfaceType,
     renderAuthorizations: l10.data?.render_authorizations,
     renderAuthorizationVersion: l10.data?.render_authorization_version,
-    baseMaterialization: l10.renderPlan.baseMaterialization,
+    baseMaterialization: hasValidAsmaeOverride ? undefined : l10.renderPlan.baseMaterialization,
     experimentalMaterialization: l10.renderPlan.overlayMaterialization,
   }), [
     plotId,
@@ -629,10 +734,11 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     l10.overlayAvailability,
     activeModeAvailability,
     viewState.zoom,
-    l10.canopySource,
-    l10.activeDisplay,
+    effectivePolicy,
+    effectiveActiveDisplay,
+    hasValidAsmaeOverride,
     l10.shouldShowPlotLevel,
-    l10.activeSurfaceType,
+    effectiveSurfaceType,
     l10.data?.render_authorizations,
     l10.data?.render_authorization_version,
     l10.renderPlan,
@@ -677,7 +783,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     overlayAvailability: l10.overlayAvailability || undefined,
     modeAvailability: activeModeAvailability,
     zoom: viewState.zoom,
-    canopySource: l10.canopySource,
+    canopySource: effectivePolicy,
     renderAuthorizations: l10.data?.render_authorizations,
     renderAuthorizationVersion: l10.data?.render_authorization_version,
     baseMaterialization: renderMaterialization,
@@ -706,7 +812,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     l10.overlayAvailability,
     activeModeAvailability,
     viewState.zoom,
-    l10.canopySource,
+    effectivePolicy,
     l10.data?.render_authorizations,
     l10.data?.render_authorization_version,
     renderMaterialization,
@@ -855,6 +961,9 @@ export default function PlotMapShell(props: PlotMapShellProps) {
 
   // Human readable title of active mode
   const modeTitle = useMemo(() => {
+    if (hasValidAsmaeOverride && asmaeSurfaceOverride?.label) {
+      return `ASMAE ${asmaeSurfaceOverride.label}`;
+    }
     const exactSurfaceTitle = resolvePixelInspectorTitle(resolvedSurfaceType, activeMode);
     if (exactSurfaceTitle) return exactSurfaceTitle;
     const isCanopy = activeMode === "vegetation" || activeMode === "canopy";
@@ -1038,6 +1147,20 @@ export default function PlotMapShell(props: PlotMapShellProps) {
                 )
               : materialization,
           );
+          const sig = JSON.stringify([
+            l10.renderPlan.viewIdentity,
+            receiptDetails.snapshotId,
+            receiptDetails.publicationId,
+            receiptDetails.surfaceInventoryHash,
+            committedBase?.status,
+            committedBase?.layerId,
+            committedBase?.reason,
+            committedOverlay?.status,
+            committedOverlay?.layerId,
+            Array.from(committedLayerIds).sort(),
+          ]);
+          if (sig === lastCommittedReceiptSigRef.current) return;
+          lastCommittedReceiptSigRef.current = sig;
           commitBrowserRenderReceipt({
             viewIdentity: l10.renderPlan.viewIdentity,
             baseMaterialization: committedBase,
@@ -1085,7 +1208,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
       </DeckGL>
 
       {showRaster && <PlotScientificLegend
-        layerName={activeMode || "Satellite context"}
+        layerName={hasValidAsmaeOverride ? asmaeSurfaceOverride!.label : (activeMode || "Satellite context")}
         surface={surfaceData}
         scene={visualSource}
         degraded={isLowConfidence}
@@ -1739,7 +1862,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
            plot_level → soft informational banner
            visual_only → minimal informational
            unavailable → prominent "no data" */}
-      {l10.data && (() => {
+      {l10.data && !asmaeSurfaceOverride && (() => {
         const modeKey = (l10.baseSurfaceMode || activeMode) as MapMode;
         const avail = l10.modeAvailability?.[modeKey === "vegetation" ? "canopy" : modeKey];
         const dl = avail?.displayLevel;

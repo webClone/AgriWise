@@ -30,6 +30,10 @@ from layer05_asmae.resilient_posterior import (
     build_historical_state_support_ledger,
 )
 from layer05_asmae.retrovalidation.yearly_backtest import YearlyBacktest
+from geometry_contract import compute_geometry_hash
+from eo.weather import fetch_historical_weather
+from layer0.environment.weather.source_roles import role_for_data_kind
+from layer05_asmae.history.weather_archive_adapter import normalize_weather_archive
 
 # Cohort Plot Geometries
 COHORT_GEOMETRIES = {
@@ -39,8 +43,82 @@ COHORT_GEOMETRIES = {
     "boufarik_plot": "POLYGON ((2.91 36.57, 2.92 36.57, 2.92 36.58, 2.91 36.58, 2.91 36.57))",
     "oued_souf_plot": "POLYGON ((6.85 33.36, 6.86 33.36, 6.86 33.37, 6.85 33.37, 6.85 33.36))",
     "sparse_plot": "POLYGON ((2.0 48.0, 2.1 48.0, 2.1 48.1, 2.0 48.1, 2.0 48.0))",
-    "6a09d9e91dd0c7ed6fce7d50": "POLYGON ((2.65551 36.509522, 2.655457 36.507444, 2.663261 36.507194, 2.663331 36.510609, 2.65551 36.509522))",
+    "6a09d9e91dd0c7ed6fce7d50": (
+        "POLYGON ((2.65551 36.509522, 2.655457 36.507444, 2.662473 36.507194, "
+        "2.663331 36.510195, 2.663331 36.510609, 2.65551 36.509522))"
+    ),
 }
+
+
+def _wkt_to_geojson_and_centroid(geom_wkt: str) -> tuple[Dict[str, Any], float, float]:
+    """Parse WKT POLYGON into GeoJSON Polygon + unique-vertex centroid (lat, lng)."""
+    inner = geom_wkt.strip()
+    if inner.upper().startswith("POLYGON"):
+        inner = inner[len("POLYGON"):].strip()
+    inner = inner.strip("() ")
+    coords: List[List[float]] = []
+    for pair in inner.split(","):
+        parts = pair.strip().split()
+        if len(parts) >= 2:
+            coords.append([float(parts[0]), float(parts[1])])
+    pts = coords[:-1] if len(coords) > 3 and coords[0] == coords[-1] else coords
+    lng = sum(p[0] for p in pts) / len(pts)
+    lat = sum(p[1] for p in pts) / len(pts)
+    return {
+        "type": "Feature",
+        "properties": {},
+        "geometry": {"type": "Polygon", "coordinates": [coords]},
+    }, float(lat), float(lng)
+
+
+def _fetch_real_daily_weather(
+    lat: float,
+    lng: float,
+    start_dt: datetime,
+    end_dt: datetime,
+    *,
+    offline: Optional[bool],
+) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
+    """Fetch authentic ERA5 daily weather archive; never synthesize placeholder climatology."""
+    if offline is True or os.environ.get("AGRIWISE_ARCHIVE_OFFLINE", "false").lower() == "true":
+        return {}, {"status": "unavailable", "reason": "offline_mode", "provider": "era5-open-meteo"}
+    role_val = role_for_data_kind("historical_reanalysis").value
+    raw = fetch_historical_weather(lat, lng, start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
+    records = raw.get("records") if isinstance(raw, dict) else (raw if isinstance(raw, list) else None)
+    source_name = str((raw or {}).get("source") or "era5-open-meteo") if isinstance(raw, dict) else "era5-open-meteo"
+    if not records:
+        return {}, {"status": "unavailable", "reason": "weather_provider_empty_or_failed", "provider": "unavailable"}
+    tagged = []
+    for rec in records:
+        tagged.append({
+            **rec,
+            "provider": source_name,
+            "data_kind": "historical_reanalysis",
+            "source_role": role_val,
+            "source_qualified": False,
+            "precipitation_sum": rec.get("precipitation"),
+            "wind_speed_max": rec.get("wind_max"),
+            "et0_mm": rec.get("et0"),
+        })
+    norm = normalize_weather_archive({"records": tagged})
+    daily_series = norm.get("weather_daily_series") or {}
+    daily_weather: Dict[str, Dict[str, Any]] = {}
+    for d_key, entry in daily_series.items():
+        if d_key and isinstance(entry, dict):
+            daily_weather[str(d_key)[:10]] = {
+                "temp_max": entry.get("temp_max_c"),
+                "temp_min": entry.get("temp_min_c"),
+                "precipitation": entry.get("precipitation_mm"),
+                "et0": entry.get("et0_mm"),
+                "source_role": role_val,
+            }
+    return daily_weather, {
+        "status": norm.get("weather_archive_status", "available" if daily_weather else "unavailable"),
+        "days": len(daily_weather),
+        "provider": source_name,
+        "source_reality": norm.get("weather_source_reality", "reanalysis_archive"),
+        "weather_archive_hash": norm.get("weather_archive_hash"),
+    }
 
 def get_lookback_years(depth_mode: str) -> float:
     if depth_mode == "manifest_only":
@@ -87,15 +165,19 @@ def run_pilot_for_plot(
     if not geom_wkt:
         raise ValueError(f"No geometry defined for pilot plot {plot_id}")
 
-    geom_hash = hashlib.sha256(geom_wkt.encode("utf-8")).hexdigest()
+    geom_geojson, centroid_lat, centroid_lng = _wkt_to_geojson_and_centroid(geom_wkt)
+    canonical_geom_hash = compute_geometry_hash(geom_geojson)
+    # Filesystem-safe canonical hex digest (avoids Windows ':' path errors in ArchiveMetricsStore)
+    geom_hash = canonical_geom_hash.split(":", 1)[-1]
+    wkt_geom_hash = hashlib.sha256(geom_wkt.encode("utf-8")).hexdigest()
     archive_run_id = f"run_v908_{plot_id}_{int(time.time())}"
 
     # Set up HistoryNoEffectGuard
     guard = HistoryNoEffectGuard(workspace_root)
     pre_checksums = guard.record_pre_run_checksums()
 
-    # Determine timeline based on depth_mode
-    end_dt = datetime(2026, 6, 16, 12, 0, 0, tzinfo=timezone.utc)
+    # Determine dynamic timeline ending at current UTC time
+    end_dt = datetime.now(timezone.utc)
     lookback_yrs = get_lookback_years(depth_mode)
     start_dt = end_dt - timedelta(days=int(lookback_yrs * 365))
     if depth_mode == "historical_full":
@@ -136,14 +218,15 @@ def run_pilot_for_plot(
         cache_files_count = 0
         total_bytes = 0
 
-        # Count cache files and sizes
-        plot_cache_path = os.path.join(cache_dir, plot_id, geom_hash)
-        if os.path.exists(plot_cache_path):
-            for root, _, files in os.walk(plot_cache_path):
-                for f in files:
-                    if f.endswith(".npz"):
-                        cache_files_count += 1
-                        total_bytes += os.path.getsize(os.path.join(root, f))
+        # Count cache files and sizes across both canonical and fetcher WKT cache dirs
+        for candidate_hash in {geom_hash, wkt_geom_hash}:
+            plot_cache_path = os.path.join(cache_dir, plot_id, candidate_hash)
+            if os.path.exists(plot_cache_path):
+                for root, _, files in os.walk(plot_cache_path):
+                    for f in files:
+                        if f.endswith(".npz"):
+                            cache_files_count += 1
+                            total_bytes += os.path.getsize(os.path.join(root, f))
 
         if manifest_only_flag:
             # Manifest-only mode contract: assert no rasters were written
@@ -154,16 +237,10 @@ def run_pilot_for_plot(
             stack_builder = HistoricalStackBuilder()
             stack = stack_builder.build_stack(plot_id, geom_hash, records)
 
-            # Daily weather dictionary
-            daily_weather = {}
-            curr = start_dt
-            while curr.date() <= end_dt.date():
-                day_str = curr.strftime("%Y-%m-%d")
-                daily_weather[day_str] = {
-                    "temp_max": 25.0, "temp_min": 15.0,
-                    "precipitation": 0.0, "et0": 4.0
-                }
-                curr += timedelta(days=1)
+            # Fetch real daily ERA5 weather archive (explicit unavailability when missing/offline)
+            daily_weather, weather_meta = _fetch_real_daily_weather(
+                centroid_lat, centroid_lng, start_dt, end_dt, offline=offline
+            )
 
             # Run Assimilation
             runner = HistoricalAssimilationRunner(workspace_root)
@@ -172,32 +249,50 @@ def run_pilot_for_plot(
             # Run Backtest
             backtester = YearlyBacktest(runner)
             backtest_results = backtester.run_backtest(plot_id, geom_hash, stack.scenes, daily_weather)
-            rmse = backtest_results.get("rmse", 0.05)
-            mae = backtest_results.get("mae", 0.04)
-            r2 = backtest_results.get("r2", 0.8)
+            rmse = backtest_results.get("rmse")
+            mae = backtest_results.get("mae")
+            r2 = backtest_results.get("r2")
+
+            # Compute empirical DOY baseline from stack scenes rather than hardcoded sample values
+            baseline_doy_buckets: Dict[str, List[float]] = {}
+            for sc in getattr(stack, "scenes", []) or []:
+                sc_dt = sc.get("timestamp") if isinstance(sc, dict) else getattr(sc, "timestamp", None)
+                sc_ndvi = sc.get("ndvi_mean") if isinstance(sc, dict) else getattr(sc, "ndvi_mean", None)
+                if sc_dt is not None and sc_ndvi is not None:
+                    doy_key = str(sc_dt.timetuple().tm_yday) if hasattr(sc_dt, "timetuple") else None
+                    if doy_key:
+                        baseline_doy_buckets.setdefault(doy_key, []).append(float(sc_ndvi))
+            empirical_doy_mean = {
+                k: round(sum(vals) / len(vals), 6) for k, vals in baseline_doy_buckets.items() if vals
+            }
+            diag = output.get("diagnostics", {}) if isinstance(output, dict) else {}
+            real_bma_disagreement = diag.get("bma_disagreement")
 
             # Save Metrics using ArchiveMetricsStore
             metrics_store = ArchiveMetricsStore(workspace_root=workspace_root)
             historical_payload = {
                 "archive_policy_version": "v90_7_1_archive_policy",
+                "canonical_geometry_hash": canonical_geom_hash,
+                "weather_status": weather_meta.get("status"),
+                "weather_source": weather_meta.get("provider"),
                 "retrovalidation_score": r2,
-                "bma_disagreement": 0.15,
-                "baseline_doy_mean": {"180": 0.45, "181": 0.46}
+                "bma_disagreement": real_bma_disagreement,
+                "baseline_doy_mean": empirical_doy_mean,
             }
             retro_payload = {
                 "retrovalidation_policy_version": "v90_7_1_retrovalidation_policy",
                 "rmse": rmse,
                 "mae": mae,
-                "r2": r2
+                "r2": r2,
             }
             bma_payload = {
                 "archive_bma_policy_version": "v90_7_1_bma_policy",
-                "bma_disagreement": 0.15,
-                "weights": {"model_1": 0.6, "model_2": 0.4}
+                "bma_disagreement": real_bma_disagreement,
+                "weights": diag.get("bma_weights", {}),
             }
             baseline_payload = {
                 "baseline_policy_version": "v90_7_1_baseline_policy",
-                "baseline_doy_mean": {"180": 0.45, "181": 0.46}
+                "baseline_doy_mean": empirical_doy_mean,
             }
             support_ledger = build_historical_state_support_ledger(
                 stack, daily_weather
@@ -211,7 +306,9 @@ def run_pilot_for_plot(
                 output,
                 crop_context={"crop_type": "unknown"},
                 scene_ids=scene_ids,
-                historical_validation_status=("validated" if r2 >= 0.5 else "failed"),
+                historical_validation_status=(
+                    "validated" if (r2 is not None and r2 >= 0.5) else "failed"
+                ),
                 state_support_ledger=support_ledger,
             )
             metrics_store.save_all_metrics(
@@ -277,10 +374,10 @@ def run_pilot_for_plot(
                 "miss_count": int(cache_files_count)
             },
             "retrovalidation": {
-                "rmse": float(rmse),
-                "mae": float(mae),
-                "r2": float(r2),
-                "status": "success" if not manifest_only_flag else "skipped"
+                "rmse": float(rmse) if rmse is not None else 0.0,
+                "mae": float(mae) if mae is not None else 0.0,
+                "r2": float(r2) if r2 is not None else 0.0,
+                "status": "skipped" if manifest_only_flag else ("unavailable" if r2 is None else "success"),
             },
             "quality": {
                 "total_scenes": int(total_scenes),

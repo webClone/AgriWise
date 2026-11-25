@@ -1760,8 +1760,10 @@ def publish_canonical_layer10_snapshot(
 
     existing_head = _read(_head_path(ns))
     old_asmae_head = (
-        existing_head.get("snapshot_kind") == "asmae"
+        existing_head.get("snapshot_kind") in ("asmae", "layer10_terminal")
         or str(existing_head.get("snapshot_id", "")).startswith("ASMAE-SNAPSHOT-")
+        or str(existing_head.get("snapshot_id", "")).startswith("L10-SNAP-")
+        or existing_head.get("publication_authority") in ("DIAGNOSTIC_ONLY", "CERTIFIED_NUMERICAL")
     )
     if old_asmae_head:
         same_geometry = existing_head.get("geometry_hash") == str(geometry_hash or "")
@@ -1784,6 +1786,42 @@ def publish_canonical_layer10_snapshot(
                     "[SNAPSHOT_STORE] Existing ASMAE head %s failed canonical validation/numerical binding (quarantined). Allowing terminal Layer 10 fallback publication to proceed.",
                     existing_head.get("snapshot_id"),
                 )
+        # Cross-geometry/cross-cycle admission guard: never replace an admitted
+        # head that carries a real evidence_cutoff_at with a degraded terminal
+        # publication that lacks one.  The degraded result may legitimately
+        # exist as a node in history, but it must not become the canonical head
+        # when a scientifically superior publication is already admitted.
+        if not same_geometry or not same_cycle:
+            incoming_cutoff = (
+                payload.get("evidence_cutoff_at")
+                or payload.get("evidenceCutoffAt")
+            )
+            existing_cutoff = existing_head.get("evidence_cutoff_at")
+            if existing_cutoff and not incoming_cutoff:
+                # The existing head has real evidence; the incoming one does not.
+                # Verify that the existing head actually passes admission before
+                # unconditionally preserving it (a quarantined head should still
+                # be replaceable).
+                _existing_geo = existing_head.get("geometry_hash") or None
+                verified_existing = load_latest_plot_snapshot(ns, _existing_geo, force_verify=True)
+                if verified_existing:
+                    existing_admission = evaluate_snapshot_admission(verified_existing, ns)
+                    if existing_admission.get("is_valid"):
+                        logger.info(
+                            "[SNAPSHOT_STORE] Preserving admitted head %s (evidence_cutoff_at=%s) "
+                            "over degraded L10 terminal %s without evidence cutoff.",
+                            existing_head.get("snapshot_id"),
+                            existing_cutoff,
+                            snapshot_id,
+                        )
+                        return {
+                            "snapshot_id": existing_head.get("snapshot_id"),
+                            "node_hash": existing_head.get("node_hash"),
+                            "frontend_publication_hash": existing_head.get("frontend_publication_hash"),
+                            "publication_receipt_hash": existing_head.get("publication_receipt_hash"),
+                            "surface_inventory_hash": existing_head.get("surface_inventory_hash"),
+                        }
+
         if existing_head.get("crop_cycle_id") and not requested_crop_cycle_id:
             verified_head = load_latest_plot_snapshot(ns, geometry_hash or None)
             validation = (verified_head.get("validation") or {}) if isinstance(verified_head, dict) else {}

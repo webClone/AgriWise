@@ -1459,8 +1459,8 @@ export function buildLayerStack(options: BuildLayerStackOptions) {
   }
 
   return {
-    surfaceLayers,
-    zoneLayers,
+    surfaceLayers: (surfaceLayers as any[]).flat(Infinity).filter((l: any) => Boolean(l?.props && typeof l.clone === "function")),
+    zoneLayers: (zoneLayers as any[]).flat(Infinity).filter((l: any) => Boolean(l?.props && typeof l.clone === "function")),
     materialization: baseMaterialization,
     experimentalMaterialization,
     hybridOverlayMaterializations,

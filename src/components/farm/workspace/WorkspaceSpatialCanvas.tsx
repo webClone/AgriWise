@@ -45,6 +45,17 @@ interface WorkspaceSpatialCanvasProps {
   activeAsmaeAvailability?: AsmaeStateAvailabilityResult;
 }
 
+function asmaeModeForStateKey(key: string): string {
+  if (key === "chlorophyll") return "nutrient_risk";
+  if (key === "canopy_water" || key === "root_zone_water" || key === "surface_wetness_event") {
+    return "water_stress";
+  }
+  if (key === "bare_soil_fraction" || key === "salinity_stress") return "salinity";
+  if (key === "biotic_confounder_risk") return "veg_attention";
+  if (key === "stress_memory") return "composite_risk";
+  return "canopy";
+}
+
 /**
  * P04 Native Spatial Canvas:
  * Owns the field viewport, DeckGL/MapLibre layers, raster surfaces,
@@ -76,11 +87,27 @@ export default function WorkspaceSpatialCanvas({
       : null;
 
   const isSpatialWithheld =
-    activeAsmaeAvailability && !activeAsmaeAvailability.canRenderPixels;
+    Boolean(activeAsmaeAvailability && !activeAsmaeAvailability.canRenderPixels);
 
   const effectiveSurface = isSpatialWithheld
     ? null
     : (activeAsmaeAvailability?.rasterSurface as any) || l10.activeSurface;
+
+  const asmaeSurfaceOverride = activeAsmaeAvailability
+    ? {
+        key: activeAsmaeAvailability.state.key,
+        surfaceType:
+          (effectiveSurface?.type ||
+            effectiveSurface?.semantic_type ||
+            activeAsmaeAvailability.state.surfaceType) as string,
+        policy: "asmae_diagnostic" as const,
+        mode: asmaeModeForStateKey(activeAsmaeAvailability.state.key),
+        colorRamp: [...activeAsmaeAvailability.state.colorRamp] as [string, string, string],
+        isWithheld: isSpatialWithheld,
+        label: activeAsmaeAvailability.state.name,
+        reason: activeAsmaeAvailability.explanation,
+      }
+    : null;
 
   return (
     <div className="pw-spatial-canvas" data-testid="pw-spatial-canvas" style={{ position: "absolute", inset: 0 }}>
@@ -91,7 +118,8 @@ export default function WorkspaceSpatialCanvas({
           activeMode={l10.activeMode}
           cropName={cropName}
           surfaceData={effectiveSurface}
-          surfaceColors={l10.activeColors}
+          surfaceColors={asmaeSurfaceOverride?.colorRamp || l10.activeColors}
+          asmaeSurfaceOverride={asmaeSurfaceOverride}
           confidenceSurface={l10.activeConfidenceSurface}
           reliabilitySurface={l10.activeReliabilitySurface}
           deviationSurface={deviationSurface}

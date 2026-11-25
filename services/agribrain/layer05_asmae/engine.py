@@ -195,6 +195,15 @@ class ASMAEEngine:
                     selected_training_resolution_m=DEFAULT_RESOLUTION_M,
                     reason_codes={DEFAULT_RESOLUTION_M: ["degraded_mean_only_lock"]},
                 )
+            elif self.config.get("native_10m_only"):
+                resolution_decision = ResolutionDecision(
+                    candidate_resolutions_tested_m=[DEFAULT_RESOLUTION_M],
+                    selected_effective_resolution_m=DEFAULT_RESOLUTION_M,
+                    selected_visual_resolution_m=DEFAULT_RESOLUTION_M,
+                    selected_state_update_resolution_m=DEFAULT_RESOLUTION_M,
+                    selected_training_resolution_m=DEFAULT_RESOLUTION_M,
+                    reason_codes={DEFAULT_RESOLUTION_M: ["diagnostic_native_10m_lock"]},
+                )
             else:
                 resolution_decision = self._evaluate_resolution_ladder(
                     scenes, operators, inp

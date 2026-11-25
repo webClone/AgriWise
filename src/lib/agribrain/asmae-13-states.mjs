@@ -104,7 +104,7 @@ export const ASMAE_13_STATE_CATALOG = Object.freeze({
     key: "surface_wetness_event",
     order: 6,
     surfaceType: "ASMAE_SURFACE_WETNESS_EVENT",
-    aliases: ["surface_wetness"],
+    aliases: ["surface_wetness", "relative_wetness"],
     name: "Event-Based Surface Water",
     shortName: "Surface Wetness",
     unit: "fraction",
@@ -291,10 +291,14 @@ export function resolveAsmaeStateAvailability(
 
   const hasValidRasterArray =
     matchingRaster &&
+    matchingRaster.provenance?.has_spatial_grid !== false &&
     Array.isArray(matchingRaster.values) &&
     matchingRaster.values.length > 0 &&
     Array.isArray(matchingRaster.values[0]) &&
-    matchingRaster.values[0].length > 0;
+    matchingRaster.values[0].length > 0 &&
+    matchingRaster.values.some(
+      (row) => Array.isArray(row) && row.some((val) => typeof val === "number" && Number.isFinite(val))
+    );
 
   // Numerical posterior values
   const scalarState = posteriorRecord?.states?.[key] ?? null;

@@ -2841,7 +2841,9 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                 fusion_list = [[None if np.isnan(v) else round(float(v), 6) for v in row] for row in fusion_arr.tolist()]
 
                 import datetime as dt
-                fusion_grid_spec = {"width": exp_W, "height": exp_H, "res": display_resolution_m}
+                fusion_grid_spec = build_grid_spec_for_shape(
+                    display_grid_spec, exp_W, exp_H, float(display_resolution_m)
+                )
                 
                 run_ref = getattr(l10_input, "run_id", "fallback_run")
                 fusion_surf = SurfaceArtifact(
@@ -2850,13 +2852,18 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                     grid_ref="fusion_grid",
                     values=fusion_list,
                     units="index",
-                    native_resolution_m=display_resolution_m,
+                    native_resolution_m=float(l10_input.resolution_m),
                     grid_spec=fusion_grid_spec,
                     provenance={
                         "stage": "L10_fusion",
                         "mode": "asmae_canopy_fusion",
                         "creator": "L10_ASMAE_VISUAL_FUSION",
                         "asmae_feature": "visual_fusion_canopy",
+                        "has_spatial_grid": True,
+                        "scene_stack_mode": evidence_state.get("scene_stack_mode", "real_raster"),
+                        "support_class": "derived_diagnostic",
+                        "enkf_mode": evidence_state.get("enkf_mode"),
+                        "radiometric_mode": evidence_state.get("radiometric_mode"),
                         "real_asmae_evidence": evidence_state.get("real_asmae_evidence", False),
                         "source_reality": evidence_state.get("source_reality", "unknown"),
                         "used_enkf": evidence_state.get("used_enkf", False),
@@ -2866,6 +2873,8 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                         "used_radiometric": evidence_state.get("used_radiometric", False),
                         "used_archive": evidence_state.get("used_archive", False),
                         "base_resolution_m": l10_input.resolution_m,
+                        "native_resolution_m": float(l10_input.resolution_m),
+                        "display_resolution_m": round(display_resolution_m, 2),
                         "fusion_weights": {
                             "cert_w": 0.30,
                             "bma_w": 0.20,
@@ -5376,6 +5385,17 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             if t_upper == "ASMAE_POSTERIOR_CONCENTRATION":
                 # Confidence is a diagnostic support raster, not a latent
                 # 13-state posterior, 1m approval or prescription authority.
+                current = bool(
+                    current_spatial_asmae
+                    and output.asmae_evidence_state.get("spatial_raster_available") is True
+                    and output.asmae_evidence_state.get("visualization_allowed") is True
+                )
+                return (current, "" if current else "missing_spatial_posterior")
+            if t_upper in (
+                "ASMAE_VISUAL_FUSION_CANOPY",
+                "VEG_ATTENTION_ASMAE_DIAGNOSTIC",
+                "VEG_ATTENTION_ASMAE_DISAGREEMENT",
+            ):
                 current = bool(
                     current_spatial_asmae
                     and output.asmae_evidence_state.get("spatial_raster_available") is True
