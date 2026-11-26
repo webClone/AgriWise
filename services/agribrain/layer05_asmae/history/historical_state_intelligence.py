@@ -81,6 +81,10 @@ class HistoricalStateIntelligenceService:
         emit_worldline_posterior: bool = True,
         use_cross_layer_priors: bool = True,
         compare_ablation: bool = True,
+        crop_fusion: Optional[Dict[str, Any]] = None,
+        domain_chronology: Optional[Any] = None,
+        enforce_weather_publication_lag: bool = True,
+        n_calibrated_field_device_days: int = 0,
     ) -> Dict[str, Any]:
         """Bootstrap/extend OBSERVATION_QUALIFIED acquisitions and reconstruct 13-state intelligence."""
         end_iso = target_end_date or datetime.now(timezone.utc).isoformat()
@@ -97,12 +101,19 @@ class HistoricalStateIntelligenceService:
                 polygon_geojson=polygon_geojson,
             )
 
+        eff_T = valid_time_T or end_iso
+        eff_K = knowledge_cutoff_K or eff_T
+        dom_id_dict = (
+            domain_chronology.identity.to_dict()
+            if domain_chronology is not None and hasattr(domain_chronology, "identity")
+            else {}
+        )
         recon_res = self.reconstructor.reconstruct(
             plot_id=plot_id,
             geometry_hash=geometry_hash,
             tenant_id=tenant_id,
             namespace=namespace,
-            valid_time_T=valid_time_T or end_iso,
+            valid_time_T=eff_T,
             knowledge_cutoff_K=knowledge_cutoff_K,
             daily_weather=daily_weather,
             crop_context=crop_context,
@@ -111,9 +122,30 @@ class HistoricalStateIntelligenceService:
             polygon_geojson=polygon_geojson,
             emit_worldline_posterior=emit_worldline_posterior,
             use_cross_layer_priors=use_cross_layer_priors,
-            event_memory_fn=lambda traj, ctx: self.event_memory.reconstruct_memory(traj, ctx),
-            retrovalidation_fn=lambda traj, ctx: self.retrovalidator.evaluate(traj, ctx),
+            crop_fusion=crop_fusion,
+            domain_chronology=domain_chronology,
+            enforce_weather_publication_lag=enforce_weather_publication_lag,
+            event_memory_fn=lambda traj, ctx: self.event_memory.reconstruct_memory(
+                traj,
+                {**ctx, "valid_time_T": eff_T, "knowledge_cutoff_K": eff_K},
+            ),
+            retrovalidation_fn=lambda traj, ctx: self.retrovalidator.evaluate(
+                traj,
+                {
+                    **ctx,
+                    "domain_identity": dom_id_dict,
+                    "crop_fusion": crop_fusion or {},
+                    "n_calibrated_field_device_days": n_calibrated_field_device_days,
+                },
+            ),
         )
+        if crop_fusion and recon_res.get("trajectory"):
+            from .historical_crop_fusion import apply_post_asmae_crop_refinement
+            crop_fusion = apply_post_asmae_crop_refinement(
+                dict(crop_fusion),
+                recon_res.get("trajectory") or [],
+                run_id=f"hist_intel_{plot_id}",
+            )
 
         ablation_res: Dict[str, Any] = {}
         if compare_ablation and use_cross_layer_priors:
@@ -148,7 +180,19 @@ class HistoricalStateIntelligenceService:
             )
 
         manifest_reconcile = dict(bootstrap_res.get("manifest_reconciliation") or {})
+        lean_crop_fusion = None
+        if isinstance(crop_fusion, dict):
+            lean_crop_fusion = {
+                k: (
+                    [{sk: sv for sk, sv in s.items() if sk != "raw_posterior"} for s in v]
+                    if k == "seasonal_timeline" and isinstance(v, list)
+                    else ({sk: sv for sk, sv in v.items() if sk != "raw_posterior"} if k == "latest_crop_posterior" and isinstance(v, dict) else v)
+                )
+                for k, v in crop_fusion.items()
+                if k != "full_segmentation_receipt"
+            }
         return {
+            "world_model_contract_version": "asmae_world_model_v1",
             "status": recon_res.get("status"),
             "plot_id": plot_id,
             "geometry_hash": geometry_hash,
@@ -163,4 +207,7 @@ class HistoricalStateIntelligenceService:
             "cross_layer_intelligence": recon_res.get("cross_layer_intelligence") or {},
             "cross_layer_ablation": ablation_res,
             "reconstruction": recon_res,
+            "domain_identity": dom_id_dict or None,
+            "domain_chronology": domain_chronology.to_summary() if domain_chronology is not None else None,
+            "crop_fusion": lean_crop_fusion,
         }

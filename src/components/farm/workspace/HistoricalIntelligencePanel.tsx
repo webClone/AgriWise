@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import { summarizeWorldModelV1View } from "@/lib/agribrain/historical-world-model-view.mjs";
 
 export interface HistoricalIntelligencePayload {
   available: boolean;
@@ -178,6 +179,44 @@ export interface HistoricalIntelligencePayload {
     quarantined_duplicate_count?: number;
     reconciliation_note?: string;
   };
+  world_model_contract_version?: string;
+  domain_identity?: {
+    resolved_crop_code?: string;
+    crop_identity_verified?: boolean;
+    tenant_identity_verified?: boolean;
+    is_isolated_dev_fixture?: boolean;
+    synthetic_label_rejected?: boolean;
+    crop_resolution_source?: string;
+    soil_texture?: string;
+    identity_block_reasons?: string[];
+  } | null;
+  crop_context_as_of?: {
+    crop?: string | null;
+    crop_identity_verified?: boolean;
+    physical_regime?: string | null;
+    unknown_probability?: number | null;
+    crop_group_posterior?: Record<string, number> | null;
+    crop_lineage_id?: string | null;
+  } | null;
+  crop_identity_timeline?: Array<{
+    season_id?: string;
+    start_time?: string;
+    end_time?: string;
+    physical_regime?: string;
+    top_group?: string;
+    top_group_probability?: number;
+    unknown_probability?: number;
+    crop_identity_verified_as_of_tk?: boolean;
+    verified_crop_code_as_of_tk?: string | null;
+    species_probability_published?: boolean;
+  }>;
+  exploratory_by_horizon?: Record<string, Record<string, any>>;
+  scientific_failure_diagnosis?: {
+    primary_cause?: string | null;
+    causes?: string[];
+    recommended_evidence_to_unblock?: string[];
+  } | null;
+  causal_integrity_gates?: Record<string, boolean>;
 }
 
 const PRESET_DATES = [
@@ -227,6 +266,9 @@ export default function HistoricalIntelligencePanel({
   const retroSum = data?.retrovalidation_summary?.summary || {};
   const rawRetroSum = data?.retrovalidation_summary?.raw_uncalibrated_summary || {};
   const multiHorizon = data?.retrovalidation_summary?.multi_horizon?.by_horizon || {};
+  const wmView = summarizeWorldModelV1View(data);
+  const domId = data?.domain_identity;
+  const cropAsOf = data?.crop_context_as_of;
   const ablation = data?.cross_layer_ablation || {};
   const mem = data?.event_memory;
   const recentEvents = [...(mem?.events || [])].reverse().slice(0, 6);
@@ -631,6 +673,83 @@ export default function HistoricalIntelligencePanel({
                 <div>
                   Combined L2–8 vs S1/S2-only: <strong>{ablation.cross_layer_rmse}</strong> vs {ablation.s1_s2_only_rmse} (Δ{" "}
                   {ablation.delta_rmse_cross_minus_s1s2})
+                </div>
+              )}
+              {wmView.exploratory36_90d && (
+                <div style={{ color: "#94a3b8", fontSize: "9.5px", marginTop: "2px" }}>
+                  Exploratory 36–90d (not qualification gate): skill{" "}
+                  <strong style={{ color: "#cbd5e1" }}>
+                    {wmView.exploratory36_90d.skillVsPersistence ?? "N/A"}
+                  </strong>{" "}
+                  (RMSE {wmView.exploratory36_90d.rmse ?? "N/A"})
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* World Model V1: Domain Verification, Historical P(C_t | O<=t, K), and Scientific Failure Diagnosis */}
+          {(domId || cropAsOf || wmView.latestEoGroup || wmView.primaryFailureCause) && (
+            <div
+              data-testid="hist-world-model-diagnostics"
+              style={{
+                padding: "8px",
+                borderRadius: "8px",
+                background: "rgba(2, 6, 23, 0.48)",
+                border: "1px solid rgba(56, 189, 248, 0.22)",
+                fontSize: "10px",
+                color: "#cbd5e1",
+                display: "flex",
+                flexDirection: "column",
+                gap: "4px",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "4px" }}>
+                <span style={{ fontWeight: 700, color: "#7dd3fc" }}>Crop Identity & Domain Authority (V1)</span>
+                {wmView.cropBadgeLabel && (
+                  <span
+                    data-testid="hist-domain-identity-badge"
+                    style={{
+                      fontSize: "9px",
+                      fontWeight: 700,
+                      padding: "1px 6px",
+                      borderRadius: "999px",
+                      background: wmView.cropVerified
+                        ? "rgba(16, 185, 129, 0.16)"
+                        : "rgba(245, 158, 11, 0.18)",
+                      color: wmView.cropVerified ? "#34d399" : "#fbbf24",
+                    }}
+                  >
+                    {wmView.cropBadgeLabel}
+                  </span>
+                )}
+              </div>
+              {domId && (
+                <div style={{ fontSize: "9.5px", color: "#94a3b8" }}>
+                  Tenant: {wmView.tenantLabel}
+                  {wmView.syntheticRejected ? " · Synthetic training seed rejected" : ""}
+                  {domId.soil_texture ? ` · Soil: ${domId.soil_texture}` : ""}
+                </div>
+              )}
+              {cropAsOf && (
+                <div style={{ fontSize: "9.5px" }}>
+                  As-of P(C_t | O≤t, K):{" "}
+                  <strong>{wmView.asOfCropLabel}</strong> · Regime:{" "}
+                  <span style={{ color: "#e2e8f0" }}>{wmView.physicalRegime || "UNVERIFIED"}</span>
+                  {wmView.unknownMassPct !== null ? ` · Unknown mass: ${wmView.unknownMassPct}%` : ""}
+                </div>
+              )}
+              {wmView.latestEoGroup && (
+                <div style={{ fontSize: "9px", color: "#94a3b8" }}>
+                  Latest Season EO Group:{" "}
+                  <span style={{ color: "#cbd5e1" }}>
+                    {wmView.latestEoGroup} (uncalibrated group ranking)
+                  </span>
+                </div>
+              )}
+              {wmView.primaryFailureCause && (
+                <div style={{ fontSize: "9.5px", color: "#fda4af" }}>
+                  Scientific Blocker: <strong>{wmView.primaryFailureCause}</strong>
+                  {wmView.primaryFailureAction ? ` — ${wmView.primaryFailureAction}` : ""}
                 </div>
               )}
             </div>

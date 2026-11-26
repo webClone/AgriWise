@@ -1463,6 +1463,12 @@ _ALIASES: Dict[str, str] = {
     "peanut": "groundnut",
     "rapeseed": "canola",
     "date": "date_palm",
+    "deglet_nour": "date_palm",
+    "chemlal": "olive",
+    "marmande": "tomato",
+    "spunta": "potato",
+    "thomson": "orange",
+    "thomson_navel": "orange",
     "millet": "pearl_millet",
     "lupine": "lupin",
 }

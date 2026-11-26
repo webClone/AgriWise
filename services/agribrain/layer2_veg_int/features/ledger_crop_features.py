@@ -126,6 +126,29 @@ def ledger_rows_for_observations(
     return sorted(rows, key=lambda row: (row["_parsed_date"], row["observation_hash"]))
 
 
+def _resolve_calibration_validity(
+    calibration_receipt: Optional[Mapping[str, Any]],
+) -> Tuple[str, Optional[str]]:
+    """Accept 'valid' only when a genuine disjoint external calibration receipt is supplied."""
+    if not isinstance(calibration_receipt, Mapping):
+        return "unavailable", None
+    art_hash = str(calibration_receipt.get("calibration_artifact_hash") or "").strip()
+    policy = str(calibration_receipt.get("calibration_partition_policy") or "").strip()
+    verified = calibration_receipt.get("calibration_verified") is True
+    heldout_ok = calibration_receipt.get("heldout_validation_complete") is True
+    ece = calibration_receipt.get("ece")
+    ece_ok = isinstance(ece, (int, float)) and float(ece) <= 0.12
+    if (
+        art_hash
+        and policy == "external_farm_cycle_year_region_disjoint_required"
+        and verified
+        and heldout_ok
+        and ece_ok
+    ):
+        return "valid", art_hash
+    return "unavailable", art_hash or None
+
+
 def build_ledger_crop_feature_input(
     *,
     ledger: CropEvidenceLedgerV2 | Mapping[str, Any],
@@ -138,6 +161,8 @@ def build_ledger_crop_feature_input(
     soil_texture_class: Optional[str] = None,
     irrigation_type: Optional[str] = None,
     plot_area_ha: Optional[float] = None,
+    calibration_receipt: Optional[Mapping[str, Any]] = None,
+    normalization_artifact_hash: Optional[str] = None,
 ) -> Tuple[
     CropFeatureVector,
     CropModelInputReceiptV1,
@@ -195,6 +220,8 @@ def build_ledger_crop_feature_input(
         else "compatible" if domain_values == {"compatible"}
         else "unverified"
     )
+    cal_validity, _ = _resolve_calibration_validity(calibration_receipt)
+    norm_hash = str(normalization_artifact_hash or "").strip() or NO_NORMALIZATION_ARTIFACT_HASH
     receipt = build_crop_model_input_receipt(
         ledger=ledger,
         crop_cycle_hypothesis_id=(
@@ -203,11 +230,10 @@ def build_ledger_crop_feature_input(
         feature_schema=schema,
         feature_values=feature_vector.to_flat_dict(),
         feature_transform_hash=transform_hash,
-        normalization_artifact_hash=NO_NORMALIZATION_ARTIFACT_HASH,
+        normalization_artifact_hash=norm_hash,
         domain_compatibility=domain_compatibility,
-        # A feature tensor is not a calibration artifact.  This remains
-        # unavailable until a separate disjoint calibration receipt exists.
-        calibration_validity="unavailable",
+        # Remains unavailable until a separate disjoint external calibration receipt exists.
+        calibration_validity=cal_validity,
         selected_observation_ids=segmentation.current_observation_ids,
     )
     feature_vector.extraction_warnings.extend([

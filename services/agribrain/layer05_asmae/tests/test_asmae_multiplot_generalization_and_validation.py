@@ -200,6 +200,8 @@ def test_strict_independent_field_validation_causal_depth_spatial_cal_dedup():
             "timestamp": f"2026-05-08T12:{k // 4:02d}:{(k % 4) * 15:02d}+00:00",
             "deviceId": "SENTEK-01",
             "vendor": "Sentek Drill & Drop",
+            "isCalibrated": True,
+            "calibrationCertificateId": "SENTEK-CERT-2026",
             "soilMoisture": 0.25,
             "depth_cm": 20.0,
             "lat": 36.505,

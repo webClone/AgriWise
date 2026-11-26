@@ -258,10 +258,32 @@ def _extract_day_weather(w_day: Optional[Dict[str, Any]]) -> Dict[str, Optional[
 
 
 def _safe_crop_profile(crop_type: str) -> Any:
+    from dataclasses import replace as dc_replace
+    from crop_database import get_crop_with_provenance
+    raw = str(crop_type or "").strip().lower()
+    if raw and raw not in {"unknown", "unverified", "fallow"}:
+        try:
+            spec, _, used_default = get_crop_with_provenance(raw)
+            if not used_default:
+                return spec
+        except Exception:
+            pass
+    # Neutral generic prior when crop identity is unknown/fallow instead of inheriting wheat/citrus
+    base = get_crop("wheat")
     try:
-        return get_crop(str(crop_type or "citrus").lower())
+        return dc_replace(
+            base,
+            code=raw or "unknown",
+            name="Unverified / Mixed Generic",
+            architecture="mixed",
+            gdd_base_temp=6.5,
+            kc_init=0.35 if raw == "fallow" else 0.45,
+            kc_mid=0.30 if raw == "fallow" else 0.82,
+            kc_end=0.25 if raw == "fallow" else 0.50,
+            max_root_depth_cm=35.0 if raw == "fallow" else 75.0,
+        )
     except Exception:
-        return get_crop("citrus")
+        return base
 
 
 def _stage_for_progress(progress: float, architecture: str) -> Tuple[str, float]:
@@ -1225,7 +1247,17 @@ class CrossLayerSpecialistBridge:
 
         # Normalized 6-mechanism multi-layer competing explanations (explicitly separated from field verification)
         pheno_stage = str(l2_pre.get("phenology_stage") or "vegetative")
-        pheno_score = 0.45 if pheno_stage in ("senescence", "harvest", "maturation") else 0.12
+        phys_regime = str((crop_context or {}).get("physical_regime") or "")
+        is_regime_transition = phys_regime in {
+            "PRE_PLANTING_FALLOW_OR_PREP",
+            "EARLY_ESTABLISHMENT",
+            "POST_HARVEST_RESIDUE_OR_FALLOW",
+        }
+        pheno_score = (
+            0.55
+            if is_regime_transition or pheno_stage in ("senescence", "harvest", "maturation")
+            else 0.12
+        )
         water_score = max(0.08, 0.65 * refined_water_prob + 0.35 * sm_post)
         vpd_val = float(l3_pre.get("vpd_kpa") or 1.0)
         therm_prior = float(l2_pre.get("thermal_stress_prior") or 0.0)
@@ -1333,6 +1365,20 @@ class CrossLayerSpecialistBridge:
                 "voi_score": round(min(1.0, (0.25 if thermal_withheld else 0.05) + 0.015 * min(30.0, gap_days) + 1.5 * v_sig), 4),
                 "reduces_uncertainty_for": ["thermal_stress", "vigor", "canopy_water"],
                 "rationale": "Supplies sub-canopy thermal state and bridges satellite cloud gaps.",
+            },
+            {
+                "observation_type": "crop_identity_and_cycle_confirmation",
+                "voi_score": round(
+                    min(
+                        1.0,
+                        0.15
+                        + 0.70 * float((crop_context or {}).get("unknown_probability", 0.0) or 0.0)
+                        + (0.20 if not (crop_context or {}).get("crop_identity_verified", False) else 0.0),
+                    ),
+                    4,
+                ),
+                "reduces_uncertainty_for": ["crop_identity", "phenology_progress", "layer2_vegetation"],
+                "rationale": "Confirms active crop species, planting date, or rotation break to collapse crop-parameter mixture uncertainty.",
             },
         ]
         voi_candidates.sort(key=lambda item: item["voi_score"], reverse=True)

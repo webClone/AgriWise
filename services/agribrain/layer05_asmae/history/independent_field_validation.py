@@ -11,7 +11,12 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from .world_model_contracts import (
+    ALLOWED_CALIBRATION_AUTHORITIES,
+    CALIBRATION_STATUS_VENDOR_UNVERIFIED,
+)
 
 import numpy as np
 
@@ -255,11 +260,33 @@ def _sample_spatial_surface_at_coord(
     lng: float,
     spatial_surfaces: Optional[Sequence[Dict[str, Any]]],
     surface_type: str = "ASMAE_ROOT_ZONE_WATER",
+    *,
+    reading_ts: Optional[datetime] = None,
+    rejected_non_causal_out: Optional[List[str]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Sample local pixel prediction, uncertainty, and local resolution at probe (lat, lng)."""
+    """Sample local pixel prediction, uncertainty, and local resolution at probe (lat, lng) strictly causally."""
     for surf in spatial_surfaces or []:
         if not isinstance(surf, dict) or surf.get("surface_type") != surface_type:
             continue
+        if reading_ts is not None:
+            raw_surf_t = surf.get("valid_time_T") or surf.get("as_of_valid_time") or surf.get("acquisition_time")
+            raw_surf_k = surf.get("knowledge_cutoff_K")
+            if raw_surf_t:
+                try:
+                    if _parse_dt(raw_surf_t) > reading_ts:
+                        if rejected_non_causal_out is not None:
+                            rejected_non_causal_out.append("future_valid_time_surface")
+                        continue
+                except Exception:
+                    pass
+            if raw_surf_k:
+                try:
+                    if _parse_dt(raw_surf_k) > reading_ts:
+                        if rejected_non_causal_out is not None:
+                            rejected_non_causal_out.append("future_knowledge_cutoff_surface")
+                        continue
+                except Exception:
+                    pass
         bounds = surf.get("bounds")
         vals = surf.get("values")
         if not (isinstance(bounds, (list, tuple)) and len(bounds) == 4 and isinstance(vals, list) and vals):
@@ -288,6 +315,7 @@ def _sample_spatial_surface_at_coord(
             "value": float(px_v),
             "sigma": float(px_u) if (px_u is not None and math.isfinite(float(px_u))) else None,
             "local_resolution_m": float(px_res) if px_res is not None else None,
+            "surface_valid_time": str(surf.get("valid_time_T") or surf.get("as_of_valid_time") or surf.get("acquisition_time") or "") or None,
         }
     return None
 
@@ -297,8 +325,10 @@ def _classify_probe_calibration(
     vendor: str,
     vwc: float,
     theta_sat: float,
+    *,
+    reading_ts: Optional[datetime] = None,
 ) -> Tuple[bool, str]:
-    """Determine if a probe reading represents calibrated, physically plausible instrumentation."""
+    """Require affirmative calibration proof (P1-2); vendor name alone is insufficient."""
     if rec.get("isCalibrated") is False or rec.get("calibrated") is False:
         return False, "explicit_uncalibrated"
     cal_st = str(rec.get("calibrationStatus") or rec.get("calibration_status") or "").strip().lower()
@@ -306,12 +336,33 @@ def _classify_probe_calibration(
         return False, f"status_{cal_st}"
     if float(vwc) > float(theta_sat) + 0.08:
         return False, "implausible_above_saturation"
+    exp_raw = rec.get("calibrationExpiresAt") or rec.get("calibration_expires_at")
+    if exp_raw and reading_ts is not None:
+        try:
+            if _parse_dt(exp_raw) < reading_ts:
+                return False, "calibration_expired"
+        except Exception:
+            pass
+    has_proof = bool(
+        rec.get("isCalibrated") is True
+        or rec.get("calibrated") is True
+        or cal_st in ALLOWED_CALIBRATION_AUTHORITIES
+        or str(
+            rec.get("calibrationCertificateId")
+            or rec.get("calibration_certificate_id")
+            or rec.get("calibrationAuthority")
+            or rec.get("calibration_authority")
+            or rec.get("calibrationCurveId")
+            or rec.get("calibration_curve_id")
+            or ""
+        ).strip()
+    )
     v_low = str(vendor or "").strip().lower()
-    if not v_low or v_low in ("unspecified", "unknown", "none", "unverified"):
-        if rec.get("isCalibrated") is True or rec.get("calibrated") is True or cal_st in ("calibrated", "verified"):
-            return True, "explicit_calibrated"
-        return False, "unspecified_vendor_unverified_calibration"
-    return True, "calibrated"
+    if has_proof:
+        return True, "calibrated" if (cal_st == "calibrated" or v_low) else "explicit_calibrated"
+    if v_low and v_low not in ("unspecified", "unknown", "none", "unverified"):
+        return False, CALIBRATION_STATUS_VENDOR_UNVERIFIED
+    return False, "unspecified_vendor_unverified_calibration"
 
 
 def evaluate_independent_field_evidence(
@@ -326,6 +377,7 @@ def evaluate_independent_field_evidence(
     exclude_mock_vendors: bool = True,
     polygon_geojson: Optional[Dict[str, Any]] = None,
     spatial_surfaces: Optional[List[Dict[str, Any]]] = None,
+    causal_spatial_lookup_fn: Optional[Callable[[datetime], Sequence[Dict[str, Any]]]] = None,
     soil_context: Optional[Dict[str, Any]] = None,
     max_scene_gap_days: float = 21.0,
     enforce_causal_pre_reading: bool = True,
@@ -369,8 +421,11 @@ def evaluate_independent_field_evidence(
     excluded_out_of_plot_count = 0
     unspecified_depth_count = 0
     spatial_pixel_matched_count = 0
+    time_matched_spatial_pixel_count = 0
+    excluded_future_surface_non_causal = 0
     plot_mean_fallback_count = 0
     uncalibrated_or_outlier_count = 0
+    vendor_unverified_cal_count = 0
     depth_breakdown: Dict[str, int] = {}
 
     for rec in sensor_readings or []:
@@ -431,23 +486,48 @@ def evaluate_independent_field_evidence(
         spatial_mode = "plot_mean_no_probe_coords"
         local_res_m: Optional[float] = None
         if coords is not None:
-            px_sample = _sample_spatial_surface_at_coord(coords[0], coords[1], spatial_surfaces, "ASMAE_ROOT_ZONE_WATER")
+            candidate_surfaces = (
+                causal_spatial_lookup_fn(ts_dt)
+                if causal_spatial_lookup_fn is not None
+                else spatial_surfaces
+            )
+            rejected_non_causal: List[str] = []
+            px_sample = _sample_spatial_surface_at_coord(
+                coords[0],
+                coords[1],
+                candidate_surfaces,
+                "ASMAE_ROOT_ZONE_WATER",
+                reading_ts=ts_dt,
+                rejected_non_causal_out=rejected_non_causal,
+            )
+            excluded_future_surface_non_causal += len(rejected_non_causal)
             if px_sample is not None:
                 rzw_mu = float(px_sample["value"])
                 if px_sample["sigma"] is not None:
                     rzw_sig = max(0.01, float(px_sample["sigma"]))
                 local_res_m = px_sample.get("local_resolution_m")
-                spatial_mode = "local_canonical_grid_pixel"
+                if causal_spatial_lookup_fn is not None or px_sample.get("surface_valid_time"):
+                    spatial_mode = "time_matched_causal_surface_pixel"
+                    time_matched_spatial_pixel_count += 1
+                else:
+                    spatial_mode = "local_canonical_grid_pixel"
                 spatial_pixel_matched_count += 1
+            elif rejected_non_causal:
+                spatial_mode = "plot_mean_future_surface_withheld"
+                plot_mean_fallback_count += 1
             else:
                 spatial_mode = "plot_mean_coords_unmapped_to_surface"
                 plot_mean_fallback_count += 1
         else:
             plot_mean_fallback_count += 1
 
-        is_cal, cal_reason = _classify_probe_calibration(rec, vendor, vwc, theta_sat)
+        is_cal, cal_reason = _classify_probe_calibration(
+            rec, vendor, vwc, theta_sat, reading_ts=ts_dt
+        )
         if not is_cal:
             uncalibrated_or_outlier_count += 1
+            if cal_reason == CALIBRATION_STATUS_VENDOR_UNVERIFIED:
+                vendor_unverified_cal_count += 1
 
         err = rzw_mu - vwc
         z_val = abs(err) / rzw_sig
@@ -554,8 +634,16 @@ def evaluate_independent_field_evidence(
             "depth_breakdown": depth_breakdown,
             "excluded_out_of_plot_count": excluded_out_of_plot_count,
             "spatial_pixel_matched_count": spatial_pixel_matched_count,
+            "time_matched_spatial_pixel_count": time_matched_spatial_pixel_count,
+            "excluded_future_surface_non_causal": excluded_future_surface_non_causal,
+            "causal_spatial_lookup_mode": (
+                "causal_query_as_of_probe_ts"
+                if causal_spatial_lookup_fn is not None
+                else "static_surface_timestamp_guarded"
+            ),
             "plot_mean_fallback_count": plot_mean_fallback_count,
             "uncalibrated_or_outlier_count": uncalibrated_or_outlier_count,
+            "vendor_known_unverified_calibration_count": vendor_unverified_cal_count,
             "calibrated_only_validation": _agg_subset(cal_indep),
             "uncalibrated_reported_validation": _agg_subset(uncal_indep),
             "skipped_mock_or_simulator": skipped_mock_count,
@@ -578,6 +666,8 @@ def evaluate_independent_field_evidence(
             "excluded_surface_depth_count": excluded_surface_depth_count,
             "excluded_deep_depth_count": excluded_deep_depth_count,
             "excluded_out_of_plot_count": excluded_out_of_plot_count,
+            "excluded_future_surface_non_causal": excluded_future_surface_non_causal,
+            "vendor_known_unverified_calibration_count": vendor_unverified_cal_count,
             "skipped_mock_or_simulator": skipped_mock_count,
             "post_reading_reference": post_reading_refs,
             "note": (
@@ -625,10 +715,18 @@ def evaluate_independent_field_evidence(
             "is_hydrologically_consistent": bool(cmp_res.is_hydrologically_consistent),
         })
 
-    # 3. Scouting (CropObservation) honesty audit vs ASMAE satellite attribution (causal pre-reading)
+    # 3. Scouting (CropObservation) honesty audit vs ASMAE satellite attribution (P1-3 + causal pre-reading)
+    from .domain_chronology import evaluate_scouting_record
     scouting_audits: List[Dict[str, Any]] = []
-    for obs in crop_observations or []:
-        raw_ts = obs.get("createdAt") or obs.get("timestamp")
+    confirmed_scouting_count = 0
+    unconfirmed_scouting_count = 0
+    for idx, obs in enumerate(crop_observations or []):
+        scout_rec = evaluate_scouting_record(obs, idx)
+        if scout_rec.is_confirmed:
+            confirmed_scouting_count += 1
+        else:
+            unconfirmed_scouting_count += 1
+        raw_ts = scout_rec.observed_at or scout_rec.created_at
         if not raw_ts:
             continue
         ts_dt = _parse_dt(raw_ts)
@@ -641,8 +739,12 @@ def evaluate_independent_field_evidence(
         l5 = (cl_ref.get("layers_refined") or {}).get("layer5_biotic") or {}
         scouting_audits.append({
             "timestamp": ts_dt.isoformat(),
-            "obs_type": str(obs.get("type") or ""),
-            "title": str(obs.get("title") or ""),
+            "observed_at": scout_rec.observed_at,
+            "created_at": scout_rec.created_at,
+            "confirmation_status": scout_rec.confirmation_status,
+            "is_confirmed": scout_rec.is_confirmed,
+            "obs_type": scout_rec.obs_type,
+            "title": scout_rec.title,
             "scene_gap_days": round(gap_d, 2),
             "asmae_vigor": round(float(means.get("vigor", 0.0)), 4),
             "asmae_stress_memory": round(float(means.get("stress_memory", 0.0)), 4),
@@ -691,6 +793,8 @@ def evaluate_independent_field_evidence(
         },
         "soil_analyses": valid_soils,
         "scouting_records_audited": len(scouting_audits),
+        "confirmed_scouting_count": confirmed_scouting_count,
+        "unconfirmed_scouting_count": unconfirmed_scouting_count,
         "scouting_sample": scouting_audits[:5],
         "crop_tasks_summary": {
             "applied_or_completed_count": len(applied_tasks),

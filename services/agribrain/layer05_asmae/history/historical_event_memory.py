@@ -22,26 +22,48 @@ def _parse_dt(raw: Any) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def _extract_mgmt_days(management_events: Optional[List[Any]]) -> Dict[str, List[Dict[str, Any]]]:
-    """Index qualified applied external management records by YYYY-MM-DD."""
+def _extract_mgmt_days(
+    management_events: Optional[List[Any]],
+    *,
+    valid_time_T: Optional[datetime] = None,
+    knowledge_cutoff_K: Optional[datetime] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Index external management/scouting records causally as-of (valid_time_T, knowledge_cutoff_K)."""
     by_day: Dict[str, List[Dict[str, Any]]] = {}
     for ev in management_events or []:
         if isinstance(ev, dict):
             ev_type = str(ev.get("type") or ev.get("event_type") or "").lower()
-            status = str(ev.get("status") or ev.get("execution_status") or "applied").lower()
-            raw_dt = ev.get("effective_start") or ev.get("timestamp") or ev.get("date")
+            status = str(ev.get("confirmationStatus") or ev.get("status") or ev.get("execution_status") or "applied").lower()
+            raw_dt = ev.get("observedAt") or ev.get("observed_at") or ev.get("effective_start") or ev.get("timestamp") or ev.get("date") or ev.get("createdAt")
+            raw_k = ev.get("knowledge_time") or ev.get("known_from") or ev.get("createdAt") or raw_dt
             amt = ev.get("amount_mm") or ev.get("volume_mm") or ev.get("quantity")
+            explicit_confirmed = bool(ev.get("confirmed") is True or ev.get("verified") is True or ev.get("is_confirmed") is True)
+            title = ev.get("title")
         else:
             ev_type = str(getattr(ev, "event_type", None) or getattr(ev, "type", "") or "").lower()
             status = str(getattr(ev, "execution_status", None) or getattr(ev, "status", "applied") or "applied").lower()
-            raw_dt = getattr(ev, "effective_start", None) or getattr(ev, "timestamp", None) or getattr(ev, "date", None)
+            raw_dt = getattr(ev, "observedAt", None) or getattr(ev, "effective_start", None) or getattr(ev, "timestamp", None) or getattr(ev, "date", None)
+            raw_k = getattr(ev, "createdAt", None) or raw_dt
             amt = getattr(ev, "quantity", None) or getattr(ev, "amount_mm", None)
+            explicit_confirmed = bool(getattr(ev, "confirmed", False) or getattr(ev, "verified", False))
+            title = getattr(ev, "title", None)
         if not raw_dt or status in {"planned", "cancelled", "canceled", "draft", "proposed", "pending", "failed"}:
             continue
+        try:
+            ev_dt = _parse_dt(raw_dt)
+            ev_k = _parse_dt(raw_k) if raw_k else ev_dt
+            if valid_time_T is not None and ev_dt > valid_time_T:
+                continue
+            if knowledge_cutoff_K is not None and ev_k > knowledge_cutoff_K:
+                continue
+        except Exception:
+            pass
         day_str = raw_dt.strftime("%Y-%m-%d") if hasattr(raw_dt, "strftime") else str(raw_dt)[:10]
         by_day.setdefault(day_str, []).append({
             "type": ev_type,
             "status": status,
+            "explicit_confirmed": explicit_confirmed,
+            "title": title,
             "amount_mm": float(amt) if isinstance(amt, (int, float)) else None,
         })
     return by_day
@@ -142,7 +164,13 @@ class HistoricalEventMemory:
         """Detect observed events & hypotheses across trajectory and score outcomes."""
         ctx = context_summary or {}
         daily_weather: Dict[str, Dict[str, Any]] = dict(ctx.get("daily_weather") or {})
-        mgmt_by_day = _extract_mgmt_days(ctx.get("management_events"))
+        t_cut = _parse_dt(ctx["valid_time_T"]) if ctx.get("valid_time_T") else None
+        k_cut = _parse_dt(ctx["knowledge_cutoff_K"]) if ctx.get("knowledge_cutoff_K") else t_cut
+        mgmt_by_day = _extract_mgmt_days(
+            ctx.get("management_events"),
+            valid_time_T=t_cut,
+            knowledge_cutoff_K=k_cut,
+        )
 
         if not trajectory:
             return {
@@ -317,21 +345,43 @@ class HistoricalEventMemory:
                     ))
                     seq_counter += 1
                 elif any(k in etype for k in ("scout", "pest", "disease", "compaction", "observation")):
-                    events.append(ReconstructedMemoryEvent(
-                        event_id=f"mem_scout_obs_{seq_counter:04d}",
-                        event_category="field_scouting_confirmed",
-                        epistemic_class="agronomic_event_confirmed",
-                        hypothesis_status="confirmed",
-                        start_time=day_dt.isoformat(),
-                        peak_time=day_dt.isoformat(),
-                        end_time=(day_dt + timedelta(days=1)).isoformat(),
-                        season_year=day_dt.year,
-                        severity=round(max(0.1, min(1.0, float(entry.get("severity_score") or 0.6))), 4),
-                        confidence=0.97,
-                        competing_explanations={"verified_field_scouting": 1.0},
-                        consistency_uncertainty=0.0,
-                        trigger_evidence={"source": "verified_field_scouting_observation", **entry},
-                    ))
+                    st_low = str(entry.get("status") or "").strip().lower()
+                    is_conf = bool(
+                        entry.get("explicit_confirmed") is True
+                        or st_low in {"confirmed", "verified", "approved", "validation_confirmed", "observed_confirmed"}
+                    )
+                    if is_conf:
+                        events.append(ReconstructedMemoryEvent(
+                            event_id=f"mem_scout_obs_{seq_counter:04d}",
+                            event_category="field_scouting_confirmed",
+                            epistemic_class="agronomic_event_confirmed",
+                            hypothesis_status="confirmed",
+                            start_time=day_dt.isoformat(),
+                            peak_time=day_dt.isoformat(),
+                            end_time=(day_dt + timedelta(days=1)).isoformat(),
+                            season_year=day_dt.year,
+                            severity=round(max(0.1, min(1.0, float(entry.get("severity_score") or 0.6))), 4),
+                            confidence=0.97,
+                            competing_explanations={"verified_field_scouting": 1.0},
+                            consistency_uncertainty=0.0,
+                            trigger_evidence={"source": "verified_field_scouting_observation", **entry},
+                        ))
+                    else:
+                        events.append(ReconstructedMemoryEvent(
+                            event_id=f"mem_scout_hyp_{seq_counter:04d}",
+                            event_category="scouting_hypothesis_unconfirmed",
+                            epistemic_class="model_hypothesis",
+                            hypothesis_status="suspected",
+                            start_time=day_dt.isoformat(),
+                            peak_time=day_dt.isoformat(),
+                            end_time=(day_dt + timedelta(days=1)).isoformat(),
+                            season_year=day_dt.year,
+                            severity=round(max(0.1, min(1.0, float(entry.get("severity_score") or 0.5))), 4),
+                            confidence=0.55,
+                            competing_explanations={"unconfirmed_field_scouting_report": 0.65, "transient_field_symptom_or_noise": 0.35},
+                            consistency_uncertainty=0.35,
+                            trigger_evidence={"source": "unconfirmed_field_scouting_record", **entry},
+                        ))
                     seq_counter += 1
 
         # 2. Trajectory state & SAR/Optical hypothesis detection

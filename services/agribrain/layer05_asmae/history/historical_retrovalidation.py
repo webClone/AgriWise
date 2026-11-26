@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -331,6 +331,11 @@ class HistoricalRetrovalidator:
         mh_mean_skill = float(np.mean(mh_skills)) if mh_skills else None
         mh_min_skill = min(mh_skills) if mh_skills else None
 
+        dom_identity = ctx.get("domain_identity") if isinstance(ctx.get("domain_identity"), dict) else {}
+        if dom_identity:
+            for b_reason in dom_identity.get("identity_block_reasons") or []:
+                if b_reason in {"unverified_crop_identity", "unverified_tenant_identity", "synthetic_crop_label_rejected"}:
+                    block_reasons.append(str(b_reason))
         if n_ev < 12:
             block_reasons.append(f"insufficient_evaluation_samples:{n_ev}<12")
         if not (0.56 <= cov1 <= 0.80):
@@ -374,6 +379,15 @@ class HistoricalRetrovalidator:
             },
         }
 
+        failure_diag = self.diagnose_scientific_failures(
+            plot_id=str(ctx.get("plot_id") or "unknown"),
+            summary=summary,
+            multi_horizon=multi_horizon,
+            qualification=qualification,
+            domain_identity=dom_identity,
+            ctx=ctx,
+            sorted_traj=sorted_traj,
+        )
         return {
             "status": "evaluated",
             "summary": summary,
@@ -384,6 +398,7 @@ class HistoricalRetrovalidator:
             "seasonal_scorecard": seasonal_scorecard,
             "multi_horizon": multi_horizon,
             "qualification": qualification,
+            "scientific_failure_diagnosis": failure_diag,
         }
 
     def _evaluate_multi_horizon_forecasts(
@@ -421,11 +436,15 @@ class HistoricalRetrovalidator:
             for ch, pr in (s.get("prior_predictions") or {}).items():
                 all_obs_points.append((dt, str(ch), float(pr["y_obs"])))
 
-        bins = [
+        primary_bins = [
             ("short_1_7d", 0.5, 7.0),
             ("medium_8_16d", 7.0, 16.0),
             ("extended_17_35d", 16.0, 35.0),
         ]
+        exploratory_bins = [
+            ("exploratory_36_90d", 35.0, 90.0),
+        ]
+        bins = primary_bins + exploratory_bins
         bin_rows: Dict[str, List[Dict[str, Any]]] = {b[0]: [] for b in bins}
         year_rows: Dict[int, List[Dict[str, Any]]] = {yr: [] for yr in heldout_years}
 
@@ -454,16 +473,22 @@ class HistoricalRetrovalidator:
             for j in range(idx + 1, len(parsed_steps)):
                 t_tgt, step_j = parsed_steps[j]
                 lead = (t_tgt - t_issue).total_seconds() / 86400.0
-                if lead > 35.0:
+                if lead > 90.0:
                     break
                 if lead > 0.5:
                     targets.append((j, t_tgt, step_j))
             if not targets:
                 continue
 
-            # Strictly prospective unknown-future-weather series at t_issue (ZERO realized future ERA5 weather!)
+            # Strictly prospective unknown-future-weather series at t_issue with P1-4 publication lag
             max_tgt_dt = targets[-1][1]
-            prosp_weather = build_prospective_weather_series(daily_weather, t_issue, max_tgt_dt)
+            prosp_weather = build_prospective_weather_series(
+                daily_weather,
+                t_issue,
+                max_tgt_dt,
+                knowledge_cutoff_dt=t_issue,
+                enforce_publication_lag=True,
+            )
 
             def _run_horizon_rollout(weather_map: Dict[str, Dict[str, Any]], out_bins: Dict[str, List[Dict[str, Any]]], record_years: bool) -> None:
                 vec_mean = [float(post_m.get(n, 0.25)) for n in STATE_NAMES]
@@ -604,14 +629,118 @@ class HistoricalRetrovalidator:
             "uses_target_scene_obs_sigma": False,
             "burnin_calibration_years": burnin_years,
             "heldout_years": heldout_years,
-            "by_horizon": {b_name: _score_mh(rows) for b_name, rows in bin_rows.items()},
+            "by_horizon": {
+                b_name: _score_mh(bin_rows[b_name])
+                for b_name, _, _ in primary_bins
+            },
+            "exploratory_by_horizon": {
+                b_name: {
+                    **_score_mh(bin_rows[b_name]),
+                    "exploratory_only": True,
+                    "used_for_qualification": False,
+                    "horizon_window_days": "36-90d",
+                }
+                for b_name, _, _ in exploratory_bins
+            },
             "by_heldout_year": {str(yr): _score_mh(rows) for yr, rows in sorted(year_rows.items())},
             "hindcast_realized_weather_reference": {
                 "epistemic_scope": "retrospective_hindcast_realized_weather",
                 "used_for_qualification": False,
-                "by_horizon": {b_name: _score_mh(rows) for b_name, rows in hindcast_bin_rows.items()},
+                "by_horizon": {b_name: _score_mh(hindcast_bin_rows[b_name]) for b_name, _, _ in primary_bins},
             },
         }
+
+    @staticmethod
+    def diagnose_scientific_failures(
+        *,
+        plot_id: str,
+        summary: Mapping[str, Any],
+        multi_horizon: Mapping[str, Any],
+        qualification: Mapping[str, Any],
+        domain_identity: Mapping[str, Any],
+        ctx: Mapping[str, Any],
+        sorted_traj: Sequence[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        """Structured W7 root-cause diagnosis explaining why a plot passed or failed scientific qualification."""
+        from .world_model_contracts import ScientificFailureDiagnosis
+
+        causes: List[str] = []
+        details: Dict[str, Any] = {}
+        recs: List[str] = []
+
+        if domain_identity:
+            if not domain_identity.get("crop_identity_verified", True):
+                causes.append("unverified_domain_identity")
+                recs.append("Populate a verified non-synthetic CropCycle record or collect field crop confirmation.")
+            elif not domain_identity.get("tenant_identity_verified", True) and "unverified_tenant_identity" in (domain_identity.get("identity_block_reasons") or []):
+                causes.append("unverified_domain_identity")
+                recs.append("Bind plot/farm to a verified production tenant_id outside dev fallback fixtures.")
+
+        n_eval = int(summary.get("n_evaluated_points") or summary.get("n_points") or len(sorted_traj) or 0)
+        if n_eval < 12:
+            causes.append("insufficient_observations")
+            recs.append("Collect >=12 non-cloudy Sentinel-1/2 acquisitions spanning multiple seasons.")
+
+        bias = summary.get("bias")
+        sk_clim = summary.get("skill_vs_climatology")
+        cov1 = summary.get("coverage_1sigma")
+        cov2 = summary.get("coverage_2sigma")
+        mh_by_h = (multi_horizon.get("by_horizon") or {}) if isinstance(multi_horizon, Mapping) else {}
+        mh_skills = [
+            float(v["skill_vs_persistence"])
+            for v in mh_by_h.values()
+            if isinstance(v, Mapping) and isinstance(v.get("skill_vs_persistence"), (int, float))
+        ]
+
+        crop_fusion = ctx.get("crop_fusion") if isinstance(ctx.get("crop_fusion"), Mapping) else {}
+        regimes = {
+            str(s.get("physical_regime") or "")
+            for s in (crop_fusion.get("seasonal_timeline") or [])
+            if isinstance(s, Mapping)
+        }
+        has_regime_shift = bool(
+            regimes & {"PRE_PLANTING_FALLOW_OR_PREP", "EARLY_ESTABLISHMENT", "POST_HARVEST_RESIDUE_OR_FALLOW"}
+        )
+        if has_regime_shift and ((sk_clim is not None and float(sk_clim) < 0.05) or (mh_skills and min(mh_skills) < -0.05)):
+            causes.append("regime_transition_mismatch")
+            details["observed_regimes"] = sorted(regimes)
+            recs.append("Segment pre-planting fallow/soil-prep vs early transplant establishment before applying evergreen priors.")
+
+        if isinstance(bias, (int, float)) and abs(float(bias)) >= 0.05:
+            causes.append("systematic_bias")
+            details["residual_bias"] = round(float(bias), 5)
+            recs.append("Inspect forward observation operator prior vs local soil/cultivar canopy vigor baseline.")
+
+        if (isinstance(cov1, (int, float)) and not (0.56 <= float(cov1) <= 0.80)) or (isinstance(cov2, (int, float)) and float(cov2) < 0.88):
+            causes.append("poor_uncertainty_calibration")
+            details["coverage"] = {"sigma1": cov1, "sigma2": cov2}
+            recs.append("Recalibrate process noise Q or observation uncertainty inflation on held-out burn-in folds.")
+
+        if (isinstance(sk_clim, (int, float)) and float(sk_clim) < 0.05) or (mh_skills and min(mh_skills) < -0.10):
+            causes.append("model_skill_below_baseline")
+            details["skill_vs_climatology"] = sk_clim
+            details["prospective_horizon_skills"] = {
+                k: v.get("skill_vs_persistence")
+                for k, v in mh_by_h.items()
+                if isinstance(v, Mapping)
+            }
+            if "wrong_physical_prior" not in causes and (domain_identity.get("crop_identity_verified", True)):
+                causes.append("wrong_physical_prior")
+
+        n_cal_field = int(ctx.get("n_calibrated_field_device_days", 0) or 0)
+        if n_cal_field == 0:
+            causes.append("missing_field_validation")
+            recs.append("Verify in-situ probe calibration certificate/flag and collect native MESIA IQ captures.")
+
+        dedup_causes = tuple(dict.fromkeys(causes))
+        primary = dedup_causes[0] if dedup_causes and not qualification.get("passed") else None
+        return ScientificFailureDiagnosis(
+            plot_id=plot_id,
+            primary_cause=primary,
+            causes=dedup_causes,
+            details=details,
+            recommended_evidence_to_unblock=tuple(dict.fromkeys(recs)),
+        ).to_dict()
 
     @staticmethod
     def compare_cross_layer_ablation(

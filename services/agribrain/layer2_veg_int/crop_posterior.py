@@ -132,22 +132,41 @@ def _mixture_conditioning(
     normalized = {
         key: value / known_mass for key, value in broad_weights.items()
     }
+    unknown_mass = max(unknown, max(0.0, 1.0 - known_mass))
+    # Propagate total mixture variance across known groups AND unknown class uncertainty
+    neutral_prior = {
+        "crop_coefficient": 0.82,
+        "t_base": 6.5,
+        "t_opt": 23.5,
+        "t_max": 38.0,
+    }
+    unknown_spread_var = {
+        "crop_coefficient": 0.0625,
+        "t_base": 4.0,
+        "t_opt": 4.0,
+        "t_max": 4.0,
+    }
+    eff_known = min(1.0, max(0.0, known_mass))
     scalar_names = ("crop_coefficient", "t_base", "t_opt", "t_max")
-    parameters = {
+    known_params = {
         name: sum(
             weight * float(_GROUP_PHYSICS[group][name])
             for group, weight in normalized.items()
         )
         for name in scalar_names
     }
-    parameter_variance = {
-        name: sum(
-            weight
-            * (float(_GROUP_PHYSICS[group][name]) - parameters[name]) ** 2
-            for group, weight in normalized.items()
-        )
+    parameters = {
+        name: eff_known * known_params[name] + (1.0 - eff_known) * neutral_prior[name]
         for name in scalar_names
     }
+    parameter_variance = {}
+    for name in scalar_names:
+        var_known = sum(
+            weight * (float(_GROUP_PHYSICS[group][name]) - parameters[name]) ** 2
+            for group, weight in normalized.items()
+        )
+        var_unknown = (neutral_prior[name] - parameters[name]) ** 2 + unknown_spread_var[name]
+        parameter_variance[name] = eff_known * var_known + (1.0 - eff_known) * var_unknown
     supported_groups = [
         group for group, weight in normalized.items() if weight >= 0.05
     ] or list(normalized)
@@ -160,7 +179,8 @@ def _mixture_conditioning(
     }
     return {
         "known_mass": round(known_mass, 8),
-        "unknown_mass": round(max(unknown, 1.0 - known_mass), 8),
+        "unknown_mass": round(unknown_mass, 8),
+        "unknown_uncertainty_inflated": bool(known_mass < 0.85),
         "broad_group_weights": {
             key: round(value, 8) for key, value in sorted(normalized.items())
         },
@@ -748,6 +768,8 @@ def infer_crop_posterior(
                         str(irrigation) if irrigation is not None else None
                     ),
                     plot_area_ha=area,
+                    calibration_receipt=operational.get("crop_calibration_receipt"),
+                    normalization_artifact_hash=operational.get("crop_normalization_artifact_hash"),
                 )
             )
             rows = ledger_rows_for_observations(
@@ -816,6 +838,29 @@ def infer_crop_posterior(
         "cycle_hypothesis_runs": [],
     }
     species_scores: Dict[str, Dict[str, Any]] = {}
+    ml_execution_summary: Dict[str, Any] = {
+        "ml_input_handoff_attached": bool(ledger_feature_vector is not None and crop_model_input_receipt is not None),
+        "ml_invoked": False,
+        "ml_production_eligible": False,
+        "ml_publication_eligible": False,
+    }
+    governed_fv_snapshot: Optional[Dict[str, Any]] = None
+    if ledger_feature_vector is not None and crop_model_input_receipt is not None:
+        governed_fv_snapshot = {
+            **ledger_feature_vector.to_flat_dict(),
+            "flat_features": ledger_feature_vector.to_flat_dict(),
+            "feature_vector_version": ledger_feature_vector.feature_vector_version,
+            "data_completeness": ledger_feature_vector.data_completeness,
+            "feature_availability_by_level": ledger_feature_vector.feature_availability_by_level(),
+            "koppen_zone": _nested(operational, "climate_zone", "koppen_zone"),
+            "aridity_index": _finite(_nested(operational, "aridity_index")),
+            "soil_type": str(soil) if soil is not None else None,
+            "irrigation_type": str(irrigation) if irrigation is not None else None,
+            "latitude": lat,
+            "longitude": lng,
+            "crop_model_input_receipt": crop_model_input_receipt.to_dict(),
+        }
+
     if evidence_ledger is not None and crop_cycle_segmentation_receipt is not None:
         from .crop_identification import identify_crop
         from .features.ledger_crop_features import ledger_rows_for_observations
@@ -854,12 +899,26 @@ def infer_crop_posterior(
                 ndwi_mean=_mean(hypothesis_rows, ("ndwi", "ndwi_mean")),
                 plot_id=plot_id,
                 run_id=run_id,
+                feature_vector_snapshot=governed_fv_snapshot,
+                soil_type=str(soil) if soil is not None else None,
+                irrigation_type=str(irrigation) if irrigation is not None else None,
+                lat=lat,
+                lng=lng,
+                area_ha=area,
+                koppen_zone=_nested(operational, "climate_zone", "koppen_zone"),
+                aridity_index=_finite(_nested(operational, "aridity_index")),
             )
+            ev_meta = dict(result.evidence or {})
+            if ev_meta.get("ml_classifier_output") is not None:
+                ml_execution_summary["ml_invoked"] = True
+                ml_execution_summary["ml_production_eligible"] = bool(ev_meta.get("ml_production_eligible"))
+                ml_execution_summary["ml_publication_eligible"] = bool(ev_meta.get("ml_publication_gate_passed"))
             run_audit.update({
                 "executed": True,
-                "engine_version": (result.evidence or {}).get(
-                    "engine_version"
-                ),
+                "engine_version": ev_meta.get("engine_version"),
+                "ml_input_handoff_attached": governed_fv_snapshot is not None,
+                "ml_classifier_executed": ev_meta.get("ml_classifier_output") is not None,
+                "ml_publication_gate_passed": bool(ev_meta.get("ml_publication_gate_passed")),
             })
             engine_evidence["cycle_hypothesis_runs"].append(run_audit)
             if not engine_evidence.get("engine_version"):
@@ -1059,8 +1118,23 @@ def infer_crop_posterior(
         "top_group_probability": best_probability,
         "calibration_status": "uncalibrated_group_mixture",
         "species_ranking": species_ranking,
-        "species_probability_published": False,
-        "species_evidence_status": "ranking_only_not_independently_confirmed",
+        "species_probability_published": bool(
+            ml_execution_summary.get("ml_production_eligible")
+            and ml_execution_summary.get("ml_publication_eligible")
+            and crop_model_input_receipt is not None
+            and crop_model_input_receipt.publication_eligible
+        ),
+        "species_evidence_status": (
+            "qualified_ml_species_posterior"
+            if (
+                ml_execution_summary.get("ml_production_eligible")
+                and ml_execution_summary.get("ml_publication_eligible")
+                and crop_model_input_receipt is not None
+                and crop_model_input_receipt.publication_eligible
+            )
+            else "ranking_only_not_independently_confirmed"
+        ),
+        "ml_handoff_status": ml_execution_summary,
         "species_science_provenance": (
             "mixed_curated_and_architecture_default_signatures"
         ),
@@ -1124,7 +1198,11 @@ def infer_crop_posterior(
             crop_model_input_receipt is not None
             and crop_model_input_receipt.model_execution_eligible
         ),
-        "engineered_expert_publication_eligible": False,
+        "engineered_expert_publication_eligible": bool(
+            crop_model_input_receipt is not None
+            and crop_model_input_receipt.publication_eligible
+            and bool(ml_execution_summary.get("ml_production_eligible"))
+        ),
     }
     scientific["lineage_id"] = "CROP-LINEAGE-" + _stable({
         "plot_id": plot_id,

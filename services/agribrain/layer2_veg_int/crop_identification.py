@@ -688,6 +688,8 @@ class CropIdentificationEngine:
                         }
                         
                         # Determine prediction depth and flags for ML path
+                        input_pub_gate = dict(ml_result.get("crop_model_input_gate") or {})
+                        input_publication_eligible = bool(ml_result.get("publication_eligible") is True)
                         pred_depth = "L0"
                         det_group = False
                         det_crop = False
@@ -696,8 +698,12 @@ class CropIdentificationEngine:
                         l1_pred = ml_output.get("L1", {}).get("prediction")
                         l2_pred = ml_output.get("L2", {}).get("prediction")
                         l3_pred = ml_output.get("L3", {}).get("prediction")
+                        l3_exploratory = ml_output.get("L3", {}).get("exploratory_prediction") or l3_pred
+                        evidence["ml_publication_gate_passed"] = input_publication_eligible
+                        evidence["ml_publication_blockers"] = list(input_pub_gate.get("blockers") or [])
+                        evidence["ml_l3_exploratory_candidate"] = l3_exploratory
                         
-                        if l3_pred:
+                        if l3_pred and production_ml_artifact and input_publication_eligible:
                             pred_depth = "L3"
                             det_group = True
                             det_crop = True
@@ -705,6 +711,14 @@ class CropIdentificationEngine:
                             pred_depth = "L2"
                             det_group = True
                             det_crop = False
+                            if l3_exploratory and not input_publication_eligible:
+                                top_crop = None
+                                top_prob = 0.0
+                                confidence_label = "LOW"
+                                rec = (
+                                    f"Exploratory ML candidate bounded to crop group {l2_pred.replace('_', ' ').title()}; "
+                                    "species publication blocked by input qualification gate."
+                                )
                         elif l1_pred:
                             pred_depth = "L1"
                             det_group = False

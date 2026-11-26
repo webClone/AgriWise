@@ -1185,11 +1185,18 @@ class HierarchicalCropClassifier:
             elif norm_entropy > 0.7 or margin < 0.05:
                 ambiguity_reason = "high_entropy_l3"
 
-            # Populate Level 3 prediction details
+            # Populate Level 3 prediction details (require publication_eligible to publish species)
+            l3_pub_ok = bool(evidence_gate["publication_eligible"])
+            l3_exploratory = top_cand["code"] if (top_cand and ambiguity_reason is None) else None
+            l3_reason = ambiguity_reason or ("trained" if l3_pub_ok else "publication_gate_blocked")
             output["L3"] = {
-                "prediction": top_cand["code"] if (top_cand and ambiguity_reason is None) else None,
-                "probability": top_cand["probability"] if (top_cand and ambiguity_reason is None) else 0.0,
-                "reason": ambiguity_reason or "trained",
+                "prediction": l3_exploratory if l3_pub_ok else None,
+                "exploratory_prediction": l3_exploratory,
+                "probability": top_cand["probability"] if (top_cand and ambiguity_reason is None and l3_pub_ok) else 0.0,
+                "exploratory_probability": top_cand["probability"] if (top_cand and ambiguity_reason is None) else 0.0,
+                "reason": l3_reason,
+                "publication_eligible": l3_pub_ok,
+                "publication_blockers": list(evidence_gate.get("blockers") or []),
                 "top_candidates": filtered_candidates[:5],
                 "agronomic_filter": {
                     "applied": False,
