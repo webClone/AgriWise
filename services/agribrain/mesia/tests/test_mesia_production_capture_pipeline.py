@@ -713,4 +713,34 @@ def test_wifi_capture_missing_datetime_fails_closed_as_unknown_freshness(monkeyp
     assert soo_wifi["is_fresh"] is False
 
 
+def test_sigmf_stored_capture_receipt_explicit_unqualified_status(tmp_path):
+    """P2: Stored SigMF capture receipt must explicitly distinguish storage integrity from scientific qualification."""
+    ns = PlotNamespace(tenant_id="tenant-qual", farm_id="farm-qual", plot_id="plot-qual")
+    meta = {
+        "global": {"core:datatype": "cf32_le", "core:sample_rate": 20e6, "core:hw": "esp32-s3-csi"},
+        "captures": [{"core:datetime": "2026-11-22T12:00:00+00:00", "core:frequency": 2.437e9}],
+        "annotations": [{"core:sample_count": 64}],
+    }
+    raw = b"".join([b"\x01\x00\x00\x00\x02\x00\x00\x00"] * 64)
+    res = MesiaProductionService.ingest_sigmf_csi(
+        plot_namespace=ns,
+        data_bytes=raw,
+        meta_json=meta,
+        storage_root=tmp_path,
+    )
+    rcpt = res["canonical_receipt"]
+    assert res["storage_status"] == "STORED_UNQUALIFIED"
+    assert res["scientific_qualification_status"] == "NOT_QUALIFIED"
+    assert res["scientifically_qualified"] is False
+    assert res["decision_eligible"] is False
+    assert rcpt["storage_status"] == "STORED_UNQUALIFIED"
+    assert rcpt["receipt_scope"] == "storage_integrity_only"
+    assert rcpt["scientific_qualification_status"] == "NOT_QUALIFIED"
+    assert rcpt["scientifically_qualified"] is False
+    assert rcpt["calibrated"] is False
+    assert rcpt["decision_eligible"] is False
+    assert rcpt["authority_state"] == "RESEARCH_ONLY"
+
+
+
 

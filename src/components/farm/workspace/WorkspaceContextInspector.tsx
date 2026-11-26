@@ -1029,6 +1029,11 @@ export default function WorkspaceContextInspector({
               </div>
               <p style={{ fontSize: "10.5px", color: "#94a3b8", margin: "2px 0 6px" }}>
                 {activeDef.shortName} · Surface: {activeDef.surfaceType}
+                {historicalData?.effective_resolution_by_state?.[activeDef.surfaceType] != null
+                  ? ` · Eff. Resolution: ${historicalData.effective_resolution_by_state[activeDef.surfaceType]}m`
+                  : historicalData?.suppressed_spatial_states?.[activeDef.key]
+                    ? ` · Spatial: Withheld (${historicalData.suppressed_spatial_states[activeDef.key].spatial_support || "scalar_only"})`
+                    : ""}
               </p>
             </div>
 
@@ -1135,6 +1140,9 @@ export default function WorkspaceContextInspector({
                 </div>
                 <div style={{ fontSize: "9.5px", color: "#94a3b8" }}>
                   Row {sirePixelHover.row}, Col {sirePixelHover.col} · [{sirePixelHover.coordinate[1].toFixed(5)}°N, {sirePixelHover.coordinate[0].toFixed(5)}°E]
+                  {historicalData?.effective_resolution_by_state?.[activeDef.surfaceType] != null
+                    ? ` · ${historicalData.effective_resolution_by_state[activeDef.surfaceType]}m adaptive grid`
+                    : ""}
                 </div>
               </div>
             )}

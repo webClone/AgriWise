@@ -2015,8 +2015,6 @@ def load_latest_plot_snapshot(
     head = _read(head_file)
     if head.get("contract_version") != PLOT_SNAPSHOT_CONTRACT_VERSION:
         return None
-    if geometry_hash and head.get("geometry_hash") != geometry_hash:
-        return None
 
     has_post_ledger_head = bool(
         head.get("commit_seq") is not None
@@ -2051,6 +2049,10 @@ def load_latest_plot_snapshot(
         head = _read(head_file)
         if geometry_hash and head.get("geometry_hash") != geometry_hash:
             return None
+
+    # Final post-reconciliation geometry check covers pre-ledger stores with no commits.jsonl
+    if geometry_hash and head.get("geometry_hash") != geometry_hash:
+        return None
 
     if force_verify and commits_file.exists():
         is_ledger_valid, records, _ = validate_publication_commit_ledger(directory)

@@ -43,8 +43,13 @@ export interface HistoricalIntelligencePayload {
   } | null;
   has_spatial_observations: boolean;
   spatial_estimation_mode?: string;
+  effective_resolution_by_state?: Record<string, number | null>;
+  suppressed_spatial_states?: Record<string, { spatial_support?: string; reason?: string | null }>;
   temporal_query_scope?: {
     mode?: string;
+    valid_time_T?: string;
+    knowledge_cutoff_K?: string;
+    has_explicit_knowledge_cutoff?: boolean;
     is_full_tail_epoch?: boolean;
     contains_post_cutoff_data?: boolean;
     ablation_scope?: string;
@@ -369,7 +374,7 @@ export default function HistoricalIntelligencePanel({
             <div>
               <div style={{ color: "#94a3b8" }}>Canonical Grid</div>
               <div style={{ color: "#cbd5e1", fontFamily: "monospace" }}>
-                {data.canonical_grid ? `${data.canonical_grid.height}×${data.canonical_grid.width} (${data.canonical_grid.resolution_m ?? 10}m)` : "Scalar"}
+                {data.canonical_grid ? `${data.canonical_grid.height}×${data.canonical_grid.width} (${data.canonical_grid.resolution_m ?? 10}m base)` : "Scalar"}
               </div>
             </div>
             <div>
@@ -378,6 +383,21 @@ export default function HistoricalIntelligencePanel({
                 {data.days_since_last_observation ?? 0}d since last obs
               </div>
             </div>
+            {data.effective_resolution_by_state && Object.keys(data.effective_resolution_by_state).length > 0 && (
+              <div style={{ gridColumn: "1 / -1", borderTop: "1px solid rgba(148,163,184,0.12)", paddingTop: "5px" }}>
+                <div style={{ color: "#94a3b8" }}>Adaptive Spatial Support (1m Held)</div>
+                <div style={{ color: "#7dd3fc", fontFamily: "monospace", fontSize: "9.5px" }}>
+                  {[...new Set(Object.values(data.effective_resolution_by_state).filter((v): v is number => typeof v === "number"))]
+                    .sort((a, b) => a - b)
+                    .map((r) => `${r}m`)
+                    .join(" / ")}{" "}
+                  across {Object.keys(data.effective_resolution_by_state).length} states
+                  {data.suppressed_spatial_states && Object.keys(data.suppressed_spatial_states).length > 0
+                    ? ` · ${Object.keys(data.suppressed_spatial_states).length} scalar/withheld`
+                    : ""}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Cross-Layer Specialist Intelligence (L2–L8, non-assimilable) */}

@@ -24,6 +24,8 @@ from ..config import (
     ENSEMBLE_SIZE_OFFLINE,
     ENSEMBLE_SIZE_SHADOW,
     ENSEMBLE_SIZE_STANDARD,
+    IDX_ROOT_ZONE_WATER,
+    IDX_VIGOR,
     LARGE_PLOT_MICROZONE_THRESHOLD,
     N_STATES,
     STATE_BOUNDS,
@@ -974,14 +976,20 @@ def forecast_step(
             # Clip to physical soil bounds [theta_wp * 0.5, theta_sat]
             updated = np.clip(updated, max(0.01, theta_wp_val * 0.5), theta_sat_val)
         elif name == "canopy_water":
-            ks_factor = np.clip((current - theta_wp_val) / paw_range, 0.0, 1.0)
+            rzw_cur = values[:, :, IDX_ROOT_ZONE_WATER]
+            vigor_cur = values[:, :, IDX_VIGOR]
+            ks_factor = np.clip((rzw_cur - theta_wp_val) / paw_range, 0.0, 1.0)
             actual_et_mm = atmospheric_demand * ks_factor * delta_days
             delta_theta_et = actual_et_mm / root_depth_mm
             water_impulse = delta_theta_rain + delta_theta_irrig - delta_theta_et
+            # Biophysical equilibrium tracks canopy greenness and soil water availability
+            cw_eq = np.clip(0.12 + 0.50 * vigor_cur * (0.40 + 0.60 * ks_factor), 0.05, 0.90)
+            relax = 0.92 ** delta_days
             updated = (
-                current * (0.97 ** delta_days)
-                + 0.6 * water_impulse
-                + _centered_normal(generator, 0.02 * missing_driver_scale * sqrt_delta_days, member_shape)
+                current * relax
+                + (1.0 - relax) * cw_eq
+                + 0.45 * water_impulse
+                + _centered_normal(generator, 0.015 * missing_driver_scale * sqrt_delta_days, member_shape)
             )
         elif name == "thermal_stress":
             heat = max(0.0, min(1.0, (float(temp_max) - optimal_temperature) / (maximum_temperature - optimal_temperature))) if isinstance(temp_max, (int, float)) else current

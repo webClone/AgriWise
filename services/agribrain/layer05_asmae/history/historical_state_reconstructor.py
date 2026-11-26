@@ -79,24 +79,99 @@ from services.agribrain.world_model.canonical_worldline import (
 logger = logging.getLogger(__name__)
 
 RECONSTRUCTOR_MODEL_VERSION = "asmae_hist_cross_layer_v2"
-CALIBRATION_VERSION = "asmae_causal_spatial_cal_v4"
+CALIBRATION_VERSION = "asmae_causal_spatial_cal_v5"
 POSTERIOR_CHECKPOINT_SCHEMA = "asmae_posterior_checkpoint_v2"
+
+_CAL_DECAY_BY_CHANNEL: Dict[str, float] = {
+    "sar_vv": 0.96,
+    "sar_vh": 0.96,
+    "sar_ratio": 0.96,
+    "ndvi": 0.92,
+    "ndmi": 0.92,
+    "ndre": 0.92,
+}
+_CAL_TAU_DAYS_BY_CHANNEL: Dict[str, float] = {
+    "sar_vv": 12.0,
+    "sar_vh": 12.0,
+    "sar_ratio": 12.0,
+    "ndmi": 10.0,
+    "ndvi": 8.0,
+    "ndre": 8.0,
+}
+
+
+def filter_causal_daily_weather_at_cutoff(
+    daily_weather: Optional[Dict[str, Dict[str, Any]]],
+    cutoff_dt: datetime,
+) -> Dict[str, Dict[str, Any]]:
+    """Restrict daily weather aggregates strictly to what was observable by `cutoff_dt`.
+
+    Daily ERA5 aggregates on `cutoff_dt.date()` are excluded before day-end (`< 23:59`)
+    unless explicitly stamped with `observed_before` / `issued_at` / `as_of <= cutoff_dt`.
+    """
+    c_day = cutoff_dt.date()
+    c_iso = c_day.isoformat()
+    is_day_end = cutoff_dt.hour >= 23 and cutoff_dt.minute >= 59
+    prev_complete_iso = c_iso if is_day_end else (c_day - timedelta(days=1)).isoformat()
+    out: Dict[str, Dict[str, Any]] = {}
+    for d_str, w in (daily_weather or {}).items():
+        if not isinstance(w, dict):
+            continue
+        d_clean = str(d_str)[:10]
+        allow_same_day = False
+        if d_clean == c_iso and d_clean > prev_complete_iso:
+            ts_tag = w.get("observed_before") or w.get("issued_at") or w.get("as_of")
+            if ts_tag:
+                try:
+                    allow_same_day = _parse_utc_iso(ts_tag) <= cutoff_dt
+                except Exception:
+                    allow_same_day = False
+        if d_clean <= prev_complete_iso or allow_same_day:
+            out[d_clean] = dict(w)
+    return out
 
 
 def build_prospective_weather_series(
     daily_weather: Optional[Dict[str, Dict[str, Any]]],
     issue_dt: datetime,
     horizon_end_dt: datetime,
+    *,
+    strict_previous_complete_day: bool = True,
 ) -> Dict[str, Dict[str, Any]]:
-    """Build strictly causal weather dict: realized <= issue_dt, causal DOY/trailing climatology > issue_dt."""
+    """Build strictly causal weather dict without intraday afternoon leakage.
+
+    By default (`strict_previous_complete_day=True`), complete daily summaries on
+    `issue_dt.date()` are withheld (since afternoon Tmax/rain were unknown at morning
+    satellite overpass, e.g. 10:30 UTC) unless `issue_dt` is at day end (>=23:59) or
+    the weather record carries an explicit timestamp (`issued_at`/`observed_before`)
+    `<= issue_dt`. Dates from the cutoff onward use causal DOY/trailing climatology.
+    """
     issue_day = issue_dt.date()
     end_day = horizon_end_dt.date()
     issue_iso = issue_day.isoformat()
+    is_day_end = issue_dt.hour >= 23 and issue_dt.minute >= 59
+    if strict_previous_complete_day and not is_day_end:
+        realized_cutoff_iso = (issue_day - timedelta(days=1)).isoformat()
+        forecast_start_day = issue_day
+    else:
+        realized_cutoff_iso = issue_iso
+        forecast_start_day = issue_day + timedelta(days=1)
+
     out: Dict[str, Dict[str, Any]] = {}
     past_rows: List[Tuple[datetime, Dict[str, Any]]] = []
     for d_str, w in (daily_weather or {}).items():
         d_clean = str(d_str)[:10]
-        if d_clean <= issue_iso and isinstance(w, dict):
+        if not isinstance(w, dict):
+            continue
+        allow_same_day = False
+        if d_clean == issue_iso and d_clean > realized_cutoff_iso:
+            ts_tag = w.get("observed_before") or w.get("issued_at") or w.get("as_of")
+            if ts_tag:
+                try:
+                    allow_same_day = _parse_utc_iso(ts_tag) <= issue_dt
+                except Exception:
+                    allow_same_day = False
+        if d_clean <= realized_cutoff_iso or allow_same_day:
             out[d_clean] = dict(w)
             try:
                 past_rows.append((datetime.fromisoformat(d_clean), w))
@@ -114,9 +189,12 @@ def build_prospective_weather_series(
         vals = [float(r[key]) for r in rows if isinstance(r.get(key), (int, float)) and math.isfinite(float(r[key]))]
         return round(float(np.mean(vals)), 3) if vals else default_val
 
-    cur = issue_day + timedelta(days=1)
+    cur = forecast_start_day
     while cur <= end_day:
         c_iso = cur.isoformat()
+        if c_iso in out:
+            cur += timedelta(days=1)
+            continue
         c_doy = cur.timetuple().tm_yday
         doy_rows = [
             w for p_dt, w in past_rows
@@ -131,7 +209,7 @@ def build_prospective_weather_series(
                 float(r["precipitation"]) for r in ref_rows
                 if isinstance(r.get("precipitation"), (int, float)) and math.isfinite(float(r["precipitation"]))
             ]
-            # Expected daily climatological precipitation (no future storm knowledge!)
+            # Expected daily climatological precipitation (no future storm knowledge)
             precip_exp = round(float(np.mean(precip_vals)), 3) if precip_vals else 0.0
             out[c_iso] = {
                 "temp_max": t_max,
@@ -152,8 +230,9 @@ def apply_causal_channel_calibration(
     raw_pred_var: float,
     obs_sigma: float,
     elapsed_days: float = 0.0,
+    now_dt: Optional[datetime] = None,
 ) -> Dict[str, float]:
-    """Apply strictly causal Bayesian linear-shrinkage operator & variance calibration from t < now."""
+    """Apply strictly causal Bayesian slope/offset operator + damped AR(1) residual anchor."""
     st = cal_entry or {}
     eff_n = float(st.get("eff_n", 0.0) or 0.0)
     sum_x = float(st.get("sum_x", 0.0) or 0.0)
@@ -171,26 +250,40 @@ def apply_causal_channel_calibration(
             if eff_n >= 4.0:
                 s_xx = max(0.0, sum_xx - (sum_x * sum_x) / eff_n)
                 s_xy = sum_xy - (sum_x * sum_y) / eff_n
-                kappa = 0.03
-                slope_prior = float(np.clip((s_xy + kappa * 1.0) / (s_xx + kappa), 0.20, 2.25))
-            bias_prior = float(np.clip((eff_n / (eff_n + 2.0)) * (my - slope_prior * mx), -0.65, 0.65))
+                kappa = 0.25
+                slope_prior = float(np.clip((s_xy + kappa * 1.0) / (s_xx + kappa), 0.55, 1.55))
+            # Avoid shrinking permanent sensor offsets away by 14% once eff_n >= 2
+            bias_prior = float(np.clip((eff_n / (eff_n + 0.20)) * (my - slope_prior * mx), -0.65, 0.65))
         else:
-            bias_prior = float(np.clip(sum_err / (eff_n + 2.0), -0.65, 0.65))
+            bias_prior = float(np.clip(sum_err / (eff_n + 0.20), -0.65, 0.65))
 
     lo_b, hi_b = _CHANNEL_BOUNDS.get(obs_name, (-1.0, 1.0))
-    cal_pred_mean = float(np.clip(slope_prior * raw_pred_mean + bias_prior, lo_b, hi_b))
+    base_cal = float(np.clip(slope_prior * raw_pred_mean + bias_prior, lo_b, hi_b))
 
-    bias_epistemic_var = (0.10 ** 2) / (eff_n + 2.0)
-    gap_infl_var = 0.00018 * min(45.0, max(0.0, float(elapsed_days)))
+    age_days = max(0.0, float(elapsed_days))
+    last_ts = st.get("last_obs_ts")
+    if last_ts and now_dt is not None:
+        try:
+            age_days = max(0.0, (now_dt - _parse_utc_iso(last_ts)).total_seconds() / 86400.0)
+        except Exception:
+            pass
+    tau = _CAL_TAU_DAYS_BY_CHANNEL.get(obs_name, 10.0)
+    resid_last = float(st.get("last_post_resid", 0.0) or 0.0)
+    anch = float(np.clip(resid_last, -0.30, 0.30)) * math.exp(-age_days / tau) if eff_n >= 2.0 else 0.0
+    cal_pred_mean = float(np.clip(base_cal + anch, lo_b, hi_b))
+
+    bias_epistemic_var = (0.08 ** 2) / (eff_n + 2.0)
+    gap_infl_var = 0.00018 * min(45.0, age_days)
     base_var = max(
         1e-8,
         (slope_prior * slope_prior) * raw_pred_var + (obs_sigma * obs_sigma) + bias_epistemic_var + gap_infl_var,
     )
     z2_prev = float(st.get("z2_ema", 1.0) if st.get("z2_ema") is not None else 1.0)
-    var_scale_prior = float(min(4.5, max(0.30, z2_prev)))
+    var_scale_prior = float(min(4.5, max(0.20, z2_prev)))
     cal_var = max(1e-8, base_var * var_scale_prior)
     return {
         "cal_pred_mean": cal_pred_mean,
+        "base_cal_mean": base_cal,
         "bias_prior": bias_prior,
         "slope_prior": slope_prior,
         "cal_sigma": math.sqrt(cal_var),
@@ -206,16 +299,38 @@ def update_channel_cal_entry(
     raw_pred: float,
     cal_pred: float,
     unscaled_sig: float,
+    obs_name: str = "ndvi",
+    obs_dt: Optional[datetime] = None,
+    post_raw_pred: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Update causal sufficient statistics AFTER scoring current observation."""
+    """Update causal sufficient statistics and post-update AR(1) anchor AFTER scoring obs_val."""
     st = cal_entry or {}
-    decay = 0.92
+    decay = _CAL_DECAY_BY_CHANNEL.get(obs_name, 0.92)
     eff_n = decay * float(st.get("eff_n", 0.0) or 0.0) + 1.0
     sum_x = decay * float(st.get("sum_x", 0.0) or 0.0) + float(raw_pred)
     sum_y = decay * float(st.get("sum_y", 0.0) or 0.0) + float(obs_val)
     sum_xx = decay * float(st.get("sum_xx", 0.0) or 0.0) + float(raw_pred) * float(raw_pred)
     sum_xy = decay * float(st.get("sum_xy", 0.0) or 0.0) + float(raw_pred) * float(obs_val)
     sum_err = decay * float(st.get("sum_err", 0.0) or 0.0) + (float(obs_val) - float(raw_pred))
+
+    slope = 1.0
+    mx = sum_x / eff_n
+    my = sum_y / eff_n
+    if eff_n >= 4.0:
+        s_xx = max(0.0, sum_xx - (sum_x * sum_x) / eff_n)
+        s_xy = sum_xy - (sum_x * sum_y) / eff_n
+        slope = float(np.clip((s_xy + 0.25 * 1.0) / (s_xx + 0.25), 0.55, 1.55))
+    bias = float(np.clip((eff_n / (eff_n + 0.20)) * (my - slope * mx), -0.65, 0.65))
+    post_ref_raw = float(post_raw_pred if post_raw_pred is not None else raw_pred)
+    post_cal = slope * post_ref_raw + bias
+    raw_resid = float(obs_val - post_cal)
+    prev_r = float(st.get("last_post_resid", raw_resid) if st.get("last_post_resid") is not None else raw_resid)
+    # Lightly smooth single-orbit SAR speckle in the innovation carryover
+    if obs_name.startswith("sar_"):
+        last_post_resid = 0.65 * raw_resid + 0.35 * prev_r
+    else:
+        last_post_resid = raw_resid
+
     z2_sample = ((float(obs_val) - float(cal_pred)) ** 2) / max(1e-6, float(unscaled_sig) * float(unscaled_sig))
     z2_prev = float(st.get("z2_ema", 1.0) if st.get("z2_ema") is not None else 1.0)
     return {
@@ -226,6 +341,8 @@ def update_channel_cal_entry(
         "sum_xy": round(sum_xy, 8),
         "eff_n": round(eff_n, 6),
         "z2_ema": round(0.86 * z2_prev + 0.14 * min(6.0, z2_sample), 6),
+        "last_post_resid": round(last_post_resid, 6),
+        "last_obs_ts": obs_dt.isoformat() if obs_dt is not None else st.get("last_obs_ts"),
         "obs_count": int(st.get("obs_count", 0) or 0) + 1,
     }
 
@@ -349,6 +466,41 @@ def build_canonical_parcel_grid(
     # Affine GDAL 6-tuple order: [x0, dx, 0.0, y_max, 0.0, -dy]
     transform = [minx, dx, 0.0, maxy, 0.0, -dy]
     inside_mask = _polygon_mask(polygon_geojson, transform, height, width)
+    inside_count = int(np.sum(inside_mask))
+    lat_mid = 0.5 * (miny + maxy)
+    dx_m = dx * 111320.0 * max(0.2, math.cos(math.radians(lat_mid)))
+    dy_m = dy * 111320.0
+    pixel_area_m2 = float(inside_count) * dx_m * dy_m
+    geom_obj = _extract_polygon_geom(polygon_geojson)
+    poly_area_m2 = pixel_area_m2
+    if geom_obj is not None:
+        def _ring_area(ring_coords: Any) -> float:
+            if not isinstance(ring_coords, (list, tuple)) or len(ring_coords) < 3:
+                return 0.0
+            pts_xy = [
+                (float(pt[0]) * 111320.0 * max(0.2, math.cos(math.radians(lat_mid))), float(pt[1]) * 111320.0)
+                for pt in ring_coords
+                if isinstance(pt, (list, tuple)) and len(pt) >= 2
+            ]
+            if len(pts_xy) < 3:
+                return 0.0
+            s = 0.0
+            for idx_p in range(len(pts_xy)):
+                x1, y1 = pts_xy[idx_p]
+                x2, y2 = pts_xy[(idx_p + 1) % len(pts_xy)]
+                s += x1 * y2 - x2 * y1
+            return abs(s) * 0.5
+        coords_raw = geom_obj.get("coordinates") or []
+        if geom_obj.get("type") == "Polygon" and coords_raw:
+            outer = _ring_area(coords_raw[0])
+            holes = sum(_ring_area(h) for h in coords_raw[1:])
+            if outer > 0.0:
+                poly_area_m2 = max(1.0, outer - holes)
+        elif geom_obj.get("type") == "MultiPolygon" and coords_raw:
+            total_mp = sum(max(0.0, _ring_area(poly_r[0]) - sum(_ring_area(h) for h in poly_r[1:])) for poly_r in coords_raw if poly_r)
+            if total_mp > 0.0:
+                poly_area_m2 = total_mp
+    area_m2 = round(min(pixel_area_m2, poly_area_m2), 2)
     return {
         "crs": "EPSG:4326",
         "height": height,
@@ -356,7 +508,10 @@ def build_canonical_parcel_grid(
         "transform": transform,
         "bounds": [minx, miny, maxx, maxy],
         "inside_mask": inside_mask,
-        "inside_count": int(np.sum(inside_mask)),
+        "inside_count": inside_count,
+        "cell_width_m": round(dx_m, 3),
+        "cell_height_m": round(dy_m, 3),
+        "area_m2": area_m2,
         "resolution_m": 10.0,
     }
 
@@ -466,13 +621,110 @@ _UNSUPPORTED_UNOBSERVED_STATES = frozenset({
     "biotic_confounder_risk",
 })
 
+_STATE_ADAPTIVE_RES_BASE: Dict[str, Tuple[float, str, str]] = {
+    "vigor": (10.0, "S2_10M", "Sentinel-2 10m NIR/Red vegetation bands"),
+    "bare_soil_fraction": (10.0, "S2_10M", "Sentinel-2 10m optical fraction"),
+    "lai": (20.0, "S2_20M", "Sentinel-2 20m red-edge & SWIR structural proxy"),
+    "chlorophyll": (20.0, "S2_20M", "Sentinel-2 20m red-edge chlorophyll bands"),
+    "canopy_water": (20.0, "S2_20M", "Sentinel-2 20m SWIR B11 NDMI moisture band"),
+    "phenology_progress": (20.0, "S2_20M", "Multi-date 20m optical-thermal stage coupling"),
+    "structure": (30.0, "S1_SAR", "Sentinel-1 GRD SAR multi-look speckle smoothing"),
+    "surface_wetness_event": (30.0, "S1_SAR", "Sentinel-1 VV roughness & multi-look kernel"),
+    "root_zone_water": (40.0, "COUPLED_WATER", "Coupled SAR backscatter + L3 water balance"),
+    "stress_memory": (40.0, "COUPLED_STRESS", "Multi-sensor seasonal stress memory"),
+}
+
+
+def compute_adaptive_state_spatial_resolution(
+    state_name: str,
+    *,
+    accepted_count: int,
+    has_spatial_rasters: bool,
+    canonical_grid: Optional[Dict[str, Any]] = None,
+    accepted_counts: Optional[Dict[str, int]] = None,
+) -> Dict[str, Any]:
+    """Compute honest state-dependent effective resolution and whether 2D spatial detail is supported."""
+    if state_name in _UNSUPPORTED_UNOBSERVED_STATES or accepted_count <= 0 or not has_spatial_rasters or canonical_grid is None:
+        return {
+            "effective_resolution_m": None,
+            "spatial_support": "unavailable",
+            "block_factor": 1,
+            "suppress_surface": True,
+            "limiting_factor": "no_direct_spatial_support",
+        }
+
+    base_res, driver, note = _STATE_ADAPTIVE_RES_BASE.get(state_name, (30.0, "COUPLED", "Derived field"))
+    grid_res_m = max(10.0, float(canonical_grid.get("resolution_m", 10.0) or 10.0))
+    inside_count = int(canonical_grid.get("inside_count") or 0)
+    if inside_count <= 0 and isinstance(canonical_grid.get("inside_mask"), np.ndarray):
+        inside_count = int(np.sum(canonical_grid["inside_mask"]))
+    cw_m = float(canonical_grid.get("cell_width_m") or 0.0)
+    ch_m = float(canonical_grid.get("cell_height_m") or 0.0)
+    if canonical_grid.get("area_m2") is not None and float(canonical_grid["area_m2"]) > 0.0:
+        area_m2 = float(canonical_grid["area_m2"])
+    elif cw_m > 0.0 and ch_m > 0.0:
+        area_m2 = inside_count * cw_m * ch_m
+    else:
+        area_m2 = inside_count * grid_res_m * grid_res_m
+    cell_scale_m = math.sqrt(cw_m * ch_m) if (cw_m > 0.0 and ch_m > 0.0) else grid_res_m
+
+    counts_map = accepted_counts or {}
+    s2_n = int(counts_map.get("vigor", 0) or 0)
+    s1_n = int(counts_map.get("structure", 0) or counts_map.get("surface_wetness_event", 0) or 0)
+
+    eff_res = max(grid_res_m, base_res)
+    limiting = note
+    if driver in ("S1_SAR", "COUPLED_WATER"):
+        if s1_n < 3:
+            if driver == "S1_SAR":
+                return {
+                    "effective_resolution_m": None,
+                    "spatial_support": "parcel_scalar_only",
+                    "block_factor": 1,
+                    "suppress_surface": True,
+                    "limiting_factor": f"insufficient_s1_scenes:{s1_n}<3",
+                }
+            eff_res += 10.0
+            limiting = f"low_sar_support:{s1_n}_scenes"
+        elif s1_n < 8:
+            eff_res += 10.0
+            limiting = f"moderate_sar_support:{s1_n}_scenes"
+    elif driver in ("S2_10M", "S2_20M"):
+        if s2_n < 3:
+            eff_res += 10.0
+            limiting = f"low_s2_stack:{s2_n}_scenes"
+        elif s2_n < 8:
+            eff_res += 10.0
+            limiting = f"sparse_s2_stack:{s2_n}_scenes"
+
+    # Never claim sub-parcel grid detail when fewer than 3 independent cells of eff_res fit inside parcel
+    if area_m2 > 0.0 and (area_m2 / (eff_res * eff_res)) < 3.0:
+        return {
+            "effective_resolution_m": None,
+            "spatial_support": "parcel_scalar_only",
+            "block_factor": 1,
+            "suppress_surface": True,
+            "limiting_factor": f"parcel_area_below_3_independent_{int(eff_res)}m_cells",
+        }
+
+    eff_res = max(10.0, float(round(eff_res)))  # Preserve strict 1m hold
+    block_factor = max(1, int(round(eff_res / max(3.5, cell_scale_m))))
+    return {
+        "effective_resolution_m": eff_res,
+        "spatial_support": f"adaptive_{int(eff_res)}m_{driver.lower()}",
+        "block_factor": block_factor,
+        "suppress_surface": False,
+        "limiting_factor": limiting,
+    }
+
 
 def _build_historical_support_ledger(
     accepted_counts: Dict[str, int],
     *,
     has_spatial_rasters: bool = False,
+    canonical_grid: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Build honest per-state support ledger reflecting real S1/S2 assimilation scope."""
+    """Build honest per-state support ledger reflecting real S1/S2 assimilation & adaptive spatial support."""
     ledger: Dict[str, Dict[str, Any]] = {}
     for idx, name in enumerate(STATE_NAMES):
         desc = STATE_DESCRIPTORS[idx]
@@ -481,10 +733,23 @@ def _build_historical_support_ledger(
             desc.assimilation_policy == AssimilationPolicy.NOT_ASSIMILATED
             or name in _UNSUPPORTED_UNOBSERVED_STATES
         )
+        eff_res_m: Optional[float] = None
         if count > 0 and not not_assimilated:
             support_status = "temporally_conditioned"
-            if has_spatial_rasters and name in _SPATIALLY_SUPPORTED_STATES:
-                spatial_support = "reprojected_10m_canonical_grid"
+            if has_spatial_rasters and name in _SPATIALLY_SUPPORTED_STATES and canonical_grid is not None:
+                res_info = compute_adaptive_state_spatial_resolution(
+                    name,
+                    accepted_count=count,
+                    has_spatial_rasters=True,
+                    canonical_grid=canonical_grid,
+                    accepted_counts=accepted_counts,
+                )
+                spatial_support = str(res_info["spatial_support"])
+                eff_res_m = res_info["effective_resolution_m"]
+            elif has_spatial_rasters and name in _SPATIALLY_SUPPORTED_STATES:
+                base_r, drv, _ = _STATE_ADAPTIVE_RES_BASE.get(name, (30.0, "COUPLED", ""))
+                eff_res_m = float(base_r)
+                spatial_support = f"adaptive_{int(base_r)}m_{drv.lower()}"
             else:
                 spatial_support = "parcel_assimilated"
             obs_rel = "direct" if name in ("vigor", "canopy_water", "surface_wetness_event", "structure") else "indirect"
@@ -505,6 +770,8 @@ def _build_historical_support_ledger(
             "accepted_update_count": count,
             "support_status": support_status,
             "spatial_support": spatial_support,
+            "effective_resolution_m": eff_res_m,
+            "certified_1m": False,
             "observation_relationship": obs_rel,
             "field_approval_eligible": False,  # Historical reconstruction remains diagnostic-only
             "block_reasons": blocks,
@@ -991,6 +1258,7 @@ class HistoricalStateReconstructor:
         scene_meta: Dict[str, Any],
         channel_cal: Optional[Dict[str, Dict[str, Any]]] = None,
         elapsed_days: float = 0.0,
+        obs_dt: Optional[datetime] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """Evaluate forward models + strictly causal operator calibration BEFORE assimilating scene_i."""
         preds: Dict[str, Dict[str, Any]] = {}
@@ -1025,7 +1293,7 @@ class HistoricalStateReconstructor:
             raw_var = max(1e-8, pred_var + sigma_obs * sigma_obs)
             raw_sigma = math.sqrt(raw_var)
 
-            # Strictly causal prior linear-shrinkage & predictive spread calibration from observations < t
+            # Strictly causal prior linear-shrinkage, innovation anchor & spread calibration from t < now
             cal = apply_causal_channel_calibration(
                 cal_map.get(obs_name),
                 obs_name=obs_name,
@@ -1033,6 +1301,7 @@ class HistoricalStateReconstructor:
                 raw_pred_var=pred_var,
                 obs_sigma=sigma_obs,
                 elapsed_days=elapsed_days,
+                now_dt=obs_dt,
             )
             cal_pred_mean = cal["cal_pred_mean"]
             bias_prior = cal["bias_prior"]
@@ -1168,7 +1437,7 @@ class HistoricalStateReconstructor:
         spatial_var: Optional[np.ndarray],
         has_spatial_observations: bool,
     ) -> List[Dict[str, Any]]:
-        """Assemble Layer-10 compatible 2D state surfaces without ever fabricating unsupported pixels."""
+        """Assemble Layer-10 compatible 2D state surfaces at state-dependent adaptive resolutions."""
         if not has_spatial_observations or canonical_grid is None or spatial_delta is None:
             return []
         H = int(canonical_grid["height"])
@@ -1177,7 +1446,7 @@ class HistoricalStateReconstructor:
         if inside.shape != (H, W):
             return []
         bounds = canonical_grid.get("bounds")
-        res_m = float(canonical_grid.get("resolution_m", 10.0))
+        grid_res_m = float(canonical_grid.get("resolution_m", 10.0) or 10.0)
 
         # Map ASMAE state key -> Layer 10 frontend surfaceType expected by asmae-13-states.ts
         surface_type_map = {
@@ -1196,13 +1465,25 @@ class HistoricalStateReconstructor:
         for s_idx, s_name in enumerate(_SPATIALLY_SUPPORTED_STATES):
             if s_name in _UNSUPPORTED_UNOBSERVED_STATES:
                 continue
-            if int(accepted_counts.get(s_name, 0) or 0) <= 0:
+            acc_cnt = int(accepted_counts.get(s_name, 0) or 0)
+            if acc_cnt <= 0:
                 continue
+            res_info = compute_adaptive_state_spatial_resolution(
+                s_name,
+                accepted_count=acc_cnt,
+                has_spatial_rasters=True,
+                canonical_grid=canonical_grid,
+                accepted_counts=accepted_counts,
+            )
+            if res_info.get("suppress_surface") or res_info.get("effective_resolution_m") is None:
+                continue
+            eff_res_m = float(res_info["effective_resolution_m"])
+            block_k = max(1, int(res_info.get("block_factor", 1) or 1))
+
             mean_val = float(state_means.get(s_name, 0.0))
             lo, hi = STATE_BOUNDS[s_name]
             arr = np.full((H, W), np.nan, dtype=np.float32)
             vals_in = np.clip(mean_val + spatial_delta[s_idx, inside], lo, hi)
-            # Recenter mean strictly onto EnKF posterior mean inside parcel when safe
             if len(vals_in) > 0:
                 shift = mean_val - float(np.mean(vals_in))
                 vals_in = np.clip(vals_in + shift, lo, hi)
@@ -1213,6 +1494,26 @@ class HistoricalStateReconstructor:
                 unc_arr[inside] = np.sqrt(np.maximum(1e-8, spatial_var[s_idx, inside])).astype(np.float32)
             else:
                 unc_arr[inside] = float(state_stds.get(s_name, 0.05))
+
+            # Coarsen field physically to match declared state-dependent effective_resolution_m
+            if block_k > 1:
+                arr_coarse = np.full((H, W), np.nan, dtype=np.float32)
+                unc_coarse = np.full((H, W), np.nan, dtype=np.float32)
+                for r0 in range(0, H, block_k):
+                    r1 = min(H, r0 + block_k)
+                    for c0 in range(0, W, block_k):
+                        c1 = min(W, c0 + block_k)
+                        m_blk = inside[r0:r1, c0:c1] & np.isfinite(arr[r0:r1, c0:c1])
+                        if not np.any(m_blk):
+                            continue
+                        blk_vals = arr[r0:r1, c0:c1][m_blk]
+                        blk_mean = float(np.mean(blk_vals))
+                        blk_rep_var = float(np.var(blk_vals)) if blk_vals.size > 1 else 0.0
+                        blk_base_var = float(np.mean(np.square(unc_arr[r0:r1, c0:c1][m_blk])))
+                        arr_coarse[r0:r1, c0:c1][m_blk] = blk_mean
+                        unc_coarse[r0:r1, c0:c1][m_blk] = math.sqrt(max(1e-8, blk_base_var + 0.5 * blk_rep_var))
+                arr = arr_coarse
+                unc_arr = unc_coarse
 
             values_list = [
                 [round(float(arr[r, c]), 5) if bool(inside[r, c]) and math.isfinite(float(arr[r, c])) else None for c in range(W)]
@@ -1234,8 +1535,12 @@ class HistoricalStateReconstructor:
                 "state_update_allowed": False,
                 "spatial_estimation_mode": "inferred_state_anomaly_field",
                 "direct_pixel_measurement": False,
-                "resolution_m": res_m,
-                "effective_resolution_m": res_m,
+                "resolution_m": grid_res_m,
+                "effective_resolution_m": eff_res_m,
+                "spatial_support_tier": res_info["spatial_support"],
+                "aggregation_factor": block_k,
+                "limiting_factor": res_info["limiting_factor"],
+                "certified_1m": False,
                 "bounds": bounds,
                 "values": values_list,
                 "uncertainty": unc_list,
@@ -1245,10 +1550,14 @@ class HistoricalStateReconstructor:
                     "reprojected_to_canonical_grid": True,
                     "spatial_estimation_mode": "inferred_state_anomaly_field",
                     "direct_pixel_measurement": False,
+                    "effective_resolution_m": eff_res_m,
+                    "spatial_support_tier": res_info["spatial_support"],
+                    "limiting_factor": res_info["limiting_factor"],
+                    "certified_1m": False,
                     "grounding_note": (
-                        "Inferred 2D field combining Sentinel-1 SAR backscatter spatial anomalies with L3 water balance & EnKF posterior mean; not a direct soil-moisture pixel sensor."
+                        f"Inferred {int(eff_res_m)}m field combining Sentinel-1 SAR anomalies with L3 water balance & EnKF posterior mean ({res_info['limiting_factor']})."
                         if is_sar_driven
-                        else "Inferred 2D field combining Sentinel-2 optical spectral anomalies (NDVI/NDMI) with EnKF posterior mean & evolving spatial uncertainty."
+                        else f"Inferred {int(eff_res_m)}m field combining Sentinel-2 spectral anomalies with EnKF posterior mean ({res_info['limiting_factor']})."
                     ),
                     "crs": canonical_grid.get("crs", "EPSG:4326"),
                     "transform": canonical_grid.get("transform"),
@@ -1495,6 +1804,7 @@ class HistoricalStateReconstructor:
                     })
 
             # Advance specialist L2-L7 models strictly causally up to obs_time BEFORE ASMAE forecast/update
+            step_weather = filter_causal_daily_weather_at_cutoff(weather_series, obs_time)
             step_pre_bundle: Optional[Dict[str, Any]] = None
             step_priors: Dict[str, Any] = {}
             if use_cross_layer_priors:
@@ -1502,7 +1812,7 @@ class HistoricalStateReconstructor:
                     chrono_state,
                     start_time=prev_scene_time or (obs_time - timedelta(days=5)),
                     end_time=obs_time,
-                    weather_daily_series=weather_series,
+                    weather_daily_series=step_weather,
                     crop_context=crop_ctx,
                     soil_context=soil_ctx,
                     management_events=mgmt_events,
@@ -1526,7 +1836,7 @@ class HistoricalStateReconstructor:
                     crop_context=crop_ctx,
                     rng=rng,
                     scenes=[],
-                    weather_daily_series=weather_series,
+                    weather_daily_series=step_weather,
                     soil_context=soil_ctx,
                     management_events=mgmt_events,
                 )
@@ -1548,6 +1858,7 @@ class HistoricalStateReconstructor:
                 payload,
                 channel_cal=channel_cal,
                 elapsed_days=elapsed_days,
+                obs_dt=obs_time,
             )
 
             # Update assimilated channels in model-operator frame (obs - causal_prior_bias)
@@ -1555,6 +1866,7 @@ class HistoricalStateReconstructor:
             cloud_frac = float(payload.get("cloud_score", 0.0) or 0.0)
             valid_frac = float(payload.get("valid_pixel_fraction", 1.0) or 1.0)
             updated_channels: List[str] = []
+            pending_cal_updates: List[Tuple[str, float, Dict[str, Any], float]] = []
             for obs_name, obs_val in sorted(obs_channels.items()):
                 mapping = INDEX_STATE_REGISTRY.get(obs_name)
                 if mapping is None:
@@ -1586,27 +1898,38 @@ class HistoricalStateReconstructor:
                     s_name = STATE_NAMES[s_idx]
                     accepted_counts[s_name] = accepted_counts.get(s_name, 0) + 1
                 updated_channels.append(obs_name)
-
-                # Causally update channel linear-shrinkage & variance calibration AFTER scoring obs_val
                 if pred_rec:
-                    raw_pred = float(pred_rec.get("y_pred_raw", obs_val))
-                    cal_pred = float(pred_rec.get("y_pred_calibrated", obs_val))
-                    unscaled_sig = max(1e-4, float(pred_rec.get("unscaled_pred_sigma", pred_rec.get("raw_pred_sigma", sigma_obs))))
-                    channel_cal[obs_name] = update_channel_cal_entry(
-                        channel_cal.get(obs_name),
-                        obs_val=float(obs_val),
-                        raw_pred=raw_pred,
-                        cal_pred=cal_pred,
-                        unscaled_sig=unscaled_sig,
-                    )
+                    pending_cal_updates.append((obs_name, float(obs_val), pred_rec, float(sigma_obs)))
 
             ensemble = clamp_ensemble(ensemble)
             assimilated_ids.append(ev_id)
 
             post_means, post_stds, post_cov, _, _ = _summarize_13_state_ensemble(ensemble, self.node_ids)
+            post_vec = [float(post_means.get(n, 0.25)) for n in STATE_NAMES]
+            for obs_name, obs_val_f, pred_rec, sigma_obs_f in pending_cal_updates:
+                mp_c = INDEX_STATE_REGISTRY.get(obs_name)
+                post_raw = (
+                    predict_sar_observation(obs_name, post_vec)
+                    if (mp_c is not None and mp_c.sensor == "S1")
+                    else predict_observation(obs_name, post_vec)
+                )
+                raw_pred = float(pred_rec.get("y_pred_raw", obs_val_f))
+                cal_pred = float(pred_rec.get("y_pred_calibrated", obs_val_f))
+                unscaled_sig = max(1e-4, float(pred_rec.get("unscaled_pred_sigma", pred_rec.get("raw_pred_sigma", sigma_obs_f))))
+                channel_cal[obs_name] = update_channel_cal_entry(
+                    channel_cal.get(obs_name),
+                    obs_val=obs_val_f,
+                    raw_pred=raw_pred,
+                    cal_pred=cal_pred,
+                    unscaled_sig=unscaled_sig,
+                    obs_name=obs_name,
+                    obs_dt=obs_time,
+                    post_raw_pred=float(post_raw) if (post_raw is not None and math.isfinite(float(post_raw))) else raw_pred,
+                )
             support_step_ledger = _build_historical_support_ledger(
                 accepted_counts,
                 has_spatial_rasters=has_spatial_obs,
+                canonical_grid=canonical_grid,
             )
 
             # Update causal NDVI & NDMI buffers for next step AFTER scoring current step
@@ -1735,6 +2058,7 @@ class HistoricalStateReconstructor:
                     state_support_ledger=_build_historical_support_ledger(
                         accepted_counts,
                         has_spatial_rasters=has_spatial_obs,
+                        canonical_grid=canonical_grid,
                     ),
                     parent_checkpoint_id=parent_cp_id,
                     supersedes_checkpoint_id=superseded_cp_ids[-1] if (is_last and superseded_cp_ids) else None,
@@ -1853,7 +2177,12 @@ class HistoricalStateReconstructor:
                 "qualification_passed": qual_passed,
                 "qualification_status": qual_status,
                 "validation_block_reasons": block_reasons,
-                "effective_resolution": "10m native satellite",
+                "effective_resolution": "adaptive_state_dependent_min_10m",
+                "effective_resolution_by_state": {
+                    k: v.get("effective_resolution_m")
+                    for k, v in support_ledger.items()
+                    if v.get("effective_resolution_m") is not None
+                },
                 "calibration_status": "causally_calibrated_diagnostic" if channel_cal else "uncalibrated_diagnostic",
                 "has_spatial_observations": bool(tail_checkpoint.has_spatial_observations),
                 "canonical_grid": tail_checkpoint.canonical_grid,
@@ -1974,6 +2303,10 @@ class HistoricalStateReconstructor:
             "canonical_grid": tail_checkpoint.canonical_grid,
             "has_spatial_observations": bool(tail_checkpoint.has_spatial_observations),
             "spatial_surfaces_count": len(tail_surfaces),
+            "effective_resolution_by_state": {
+                s["surface_type"]: s.get("effective_resolution_m")
+                for s in tail_surfaces
+            },
             "cross_layer_intelligence": tail_cross_layer,
             "gap_summary": gap_summary,
             "trajectory": full_trajectory,
@@ -2012,10 +2345,11 @@ class HistoricalStateReconstructor:
             tenant_id=tenant_id,
             namespace=namespace,
         )
+        # Strictly respect knowledge_cutoff_K so scenes committed after K never leak into available_dates!
         all_obs_all_time = self.load_qualified_observations(
             plot_id=plot_id,
             valid_time_T="2100-01-01T00:00:00+00:00",
-            knowledge_cutoff_K=datetime.now(timezone.utc).isoformat(),
+            knowledge_cutoff_K=k_dt.isoformat(),
             tenant_id=tenant_id,
             namespace=namespace,
         )
@@ -2032,8 +2366,10 @@ class HistoricalStateReconstructor:
                 "plot_id": plot_id,
                 "valid_time_T": t_dt.isoformat(),
                 "knowledge_cutoff_K": k_dt.isoformat(),
+                "eligible_event_ids": [],
                 "available_dates": sorted(set(available_dates)),
                 "spatial_surfaces": [],
+                "effective_resolution_by_state": {},
                 "state_means": {},
                 "state_stds": {},
                 "state_support_ledger": _build_historical_support_ledger({}),
@@ -2060,16 +2396,15 @@ class HistoricalStateReconstructor:
                 anchor_cp = cp
 
         canonical_grid = build_canonical_parcel_grid(polygon_geojson) if polygon_geojson else None
-        t_day_str = t_dt.date().isoformat()
-        weather_series = {
-            str(d): v for d, v in (daily_weather or {}).items() if str(d)[:10] <= t_day_str
-        }
+        effective_cutoff_dt = min(t_dt, k_dt)
+        effective_day_limit = effective_cutoff_dt.date().isoformat()
+        weather_series = filter_causal_daily_weather_at_cutoff(daily_weather, effective_cutoff_dt)
         crop_ctx = dict(crop_context or {"crop_type": "citrus", "crop_coefficient": 0.75})
         soil_ctx = dict(soil_context or {})
         mgmt_events = [
             ev for ev in (management_events or [])
             if not isinstance(ev, dict)
-            or str(ev.get("effective_start") or ev.get("timestamp") or ev.get("date") or "")[:10] <= t_day_str
+            or str(ev.get("effective_start") or ev.get("timestamp") or ev.get("date") or "")[:10] <= effective_day_limit
         ]
 
         first_q_dt = _parse_utc_iso(eligible_events[0].get("observation_or_valid_time") or eligible_events[0].get("effective_at"))
@@ -2142,11 +2477,12 @@ class HistoricalStateReconstructor:
         for local_i, ev in enumerate(eligible_events[start_idx:]):
             payload = (ev.get("payload") or {}).get("observation_qualified") or {}
             obs_time = _parse_utc_iso(ev.get("observation_or_valid_time") or ev.get("effective_at"))
+            step_weather_q = filter_causal_daily_weather_at_cutoff(weather_series, obs_time)
             self.cross_layer_bridge.advance_chrono_state(
                 q_chrono,
                 start_time=prev_scene_time or (obs_time - timedelta(days=5)),
                 end_time=obs_time,
-                weather_daily_series=weather_series,
+                weather_daily_series=step_weather_q,
                 crop_context=crop_ctx,
                 soil_context=soil_ctx,
                 management_events=mgmt_events,
@@ -2166,7 +2502,7 @@ class HistoricalStateReconstructor:
                     crop_context=crop_ctx,
                     rng=rng,
                     scenes=[],
-                    weather_daily_series=weather_series,
+                    weather_daily_series=step_weather_q,
                     soil_context=soil_ctx,
                     management_events=mgmt_events,
                 )
@@ -2181,10 +2517,11 @@ class HistoricalStateReconstructor:
             )
             prior_preds = self._predict_pre_update_channels(
                 ensemble, self.node_ids, obs_channels, payload,
-                channel_cal=channel_cal, elapsed_days=elapsed_days,
+                channel_cal=channel_cal, elapsed_days=elapsed_days, obs_dt=obs_time,
             )
             cloud_frac = float(payload.get("cloud_score", 0.0) or 0.0)
             valid_frac = float(payload.get("valid_pixel_fraction", 1.0) or 1.0)
+            pending_cal_q: List[Tuple[str, float, Dict[str, Any], float]] = []
             for obs_name, obs_val in sorted(obs_channels.items()):
                 mapping = INDEX_STATE_REGISTRY.get(obs_name)
                 if mapping is None:
@@ -2212,18 +2549,30 @@ class HistoricalStateReconstructor:
                 for s_idx in target_indices:
                     accepted_counts[STATE_NAMES[s_idx]] = accepted_counts.get(STATE_NAMES[s_idx], 0) + 1
                 if pred_rec:
-                    raw_pred = float(pred_rec.get("y_pred_raw", obs_val))
-                    cal_pred = float(pred_rec.get("y_pred_calibrated", obs_val))
-                    unscaled_sig = max(1e-4, float(pred_rec.get("unscaled_pred_sigma", pred_rec.get("raw_pred_sigma", sigma_obs))))
-                    channel_cal[obs_name] = update_channel_cal_entry(
-                        channel_cal.get(obs_name),
-                        obs_val=float(obs_val),
-                        raw_pred=raw_pred,
-                        cal_pred=cal_pred,
-                        unscaled_sig=unscaled_sig,
-                    )
+                    pending_cal_q.append((obs_name, float(obs_val), pred_rec, float(sigma_obs)))
             ensemble = clamp_ensemble(ensemble)
             step_means, step_stds, _, _, _ = _summarize_13_state_ensemble(ensemble, self.node_ids)
+            step_vec_q = [float(step_means.get(n, 0.25)) for n in STATE_NAMES]
+            for obs_name, obs_val_f, pred_rec, sigma_obs_f in pending_cal_q:
+                mp_c = INDEX_STATE_REGISTRY.get(obs_name)
+                post_raw = (
+                    predict_sar_observation(obs_name, step_vec_q)
+                    if (mp_c is not None and mp_c.sensor == "S1")
+                    else predict_observation(obs_name, step_vec_q)
+                )
+                raw_pred = float(pred_rec.get("y_pred_raw", obs_val_f))
+                cal_pred = float(pred_rec.get("y_pred_calibrated", obs_val_f))
+                unscaled_sig = max(1e-4, float(pred_rec.get("unscaled_pred_sigma", pred_rec.get("raw_pred_sigma", sigma_obs_f))))
+                channel_cal[obs_name] = update_channel_cal_entry(
+                    channel_cal.get(obs_name),
+                    obs_val=obs_val_f,
+                    raw_pred=raw_pred,
+                    cal_pred=cal_pred,
+                    unscaled_sig=unscaled_sig,
+                    obs_name=obs_name,
+                    obs_dt=obs_time,
+                    post_raw_pred=float(post_raw) if (post_raw is not None and math.isfinite(float(post_raw))) else raw_pred,
+                )
             if isinstance(obs_channels.get("ndvi"), (int, float)):
                 exp_v = float((q_step_priors.get("layer2") or {}).get("expected_vigor", 0.55) or 0.55)
                 q_chrono.recent_ndvi_window.append((obs_time.isoformat()[:10], float(obs_channels["ndvi"]), exp_v))
@@ -2250,11 +2599,15 @@ class HistoricalStateReconstructor:
                 "scene_id": str(payload.get("scene_id") or ""),
                 "source": str(payload.get("source") or ""),
                 "acquisition_time": obs_time.isoformat(),
+                "committed_at": str(ev.get("committed_at") or ""),
+                "elapsed_days": round(elapsed_days, 3),
                 "obs_channels": obs_channels,
                 "raw_metrics": dict(payload.get("metrics") or {}),
                 "prior_predictions": prior_preds,
+                "prior_state_means": copy.deepcopy(q_step_priors),
                 "posterior_state_means": step_means,
                 "posterior_state_stds": step_stds,
+                "cross_layer_priors": q_step_priors,
             })
 
         # Advance specialist hydrological/phenological model to exact valid_time_T
@@ -2303,7 +2656,11 @@ class HistoricalStateReconstructor:
                 )
 
         means_T, stds_T, cov_T, _, _ = _summarize_13_state_ensemble(ensemble, self.node_ids)
-        ledger_T = _build_historical_support_ledger(accepted_counts, has_spatial_rasters=has_spatial_obs)
+        ledger_T = _build_historical_support_ledger(
+            accepted_counts,
+            has_spatial_rasters=has_spatial_obs,
+            canonical_grid=canonical_grid,
+        )
         surfaces_T = self.build_spatial_surfaces_payload(
             canonical_grid=canonical_grid,
             state_means=means_T,
@@ -2313,6 +2670,32 @@ class HistoricalStateReconstructor:
             spatial_var=spatial_var,
             has_spatial_observations=has_spatial_obs,
         )
+        suppressed_spatial = {
+            name: {
+                "spatial_support": rec.get("spatial_support"),
+                "reason": (
+                    compute_adaptive_state_spatial_resolution(
+                        name,
+                        accepted_count=int(accepted_counts.get(name, 0) or 0),
+                        has_spatial_rasters=has_spatial_obs,
+                        canonical_grid=canonical_grid,
+                        accepted_counts=accepted_counts,
+                    ).get("limiting_factor")
+                ),
+            }
+            for name, rec in ledger_T.items()
+            if name in _SPATIALLY_SUPPORTED_STATES
+            and (
+                not has_spatial_obs
+                or compute_adaptive_state_spatial_resolution(
+                    name,
+                    accepted_count=int(accepted_counts.get(name, 0) or 0),
+                    has_spatial_rasters=has_spatial_obs,
+                    canonical_grid=canonical_grid,
+                    accepted_counts=accepted_counts,
+                ).get("suppress_surface")
+            )
+        }
         q_refined_T = self.cross_layer_bridge.refine_after_asmae(
             pre_bundle=q_pre_T,
             posterior_means=means_T,
@@ -2322,11 +2705,12 @@ class HistoricalStateReconstructor:
             gap_days=state_age_days,
         )
 
-        # Causal multi-horizon forward forecast issued at T using strictly info <= T + causal DOY weather
+        # Causal multi-horizon forward forecast issued at T using strict D-1 issuance weather + causal DOY climatology
         sorted_horizons = sorted({int(h) for h in forecast_horizons_days if int(h) > 0})
         max_h = max(sorted_horizons) if sorted_horizons else 28
         causal_fc_weather = build_prospective_weather_series(
-            daily_weather, t_dt, t_dt + timedelta(days=max_h)
+            weather_series, t_dt, t_dt + timedelta(days=max_h),
+            strict_previous_complete_day=True,
         )
         causal_forecasts: List[Dict[str, Any]] = []
         fc_ens = copy.deepcopy(ensemble)
@@ -2356,6 +2740,7 @@ class HistoricalStateReconstructor:
                 {"cloud_score": 0.1, "valid_pixel_fraction": 0.9},
                 channel_cal=channel_cal,
                 elapsed_days=float(h_days),
+                obs_dt=target_fc_dt,
             )
             causal_forecasts.append({
                 "horizon_days": h_days,
@@ -2381,6 +2766,7 @@ class HistoricalStateReconstructor:
             "valid_time_T": t_dt.isoformat(),
             "knowledge_cutoff_K": k_dt.isoformat(),
             "resumed_from_checkpoint_id": anchor_cp.checkpoint_id if anchor_cp else None,
+            "eligible_event_ids": ordered_ids,
             "assimilated_observation_count": len(eligible_events),
             "last_observation_time": prev_scene_time.isoformat() if prev_scene_time else None,
             "days_since_last_observation": round(state_age_days, 2),
@@ -2392,6 +2778,11 @@ class HistoricalStateReconstructor:
             "canonical_grid": {k: v for k, v in canonical_grid.items() if k != "inside_mask"} if canonical_grid else None,
             "has_spatial_observations": bool(has_spatial_obs),
             "spatial_surfaces": surfaces_T,
+            "effective_resolution_by_state": {
+                s["surface_type"]: s.get("effective_resolution_m")
+                for s in surfaces_T
+            },
+            "suppressed_spatial_states": suppressed_spatial,
             "cross_layer_pre_priors": q_priors_T,
             "cross_layer_intelligence": q_refined_T,
             "causal_forecasts": causal_forecasts,

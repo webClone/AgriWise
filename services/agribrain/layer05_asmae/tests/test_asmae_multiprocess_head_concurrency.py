@@ -1882,3 +1882,36 @@ def test_gate_g_commit_ledger_parser_type_safety_on_non_string_hashes(tmp_path):
     assert records == []
     assert "Invalid publication_receipt_hash at line 1" in err
 
+
+def test_ledger_head_reconciliation_precedes_geometry_hash_filter():
+    """P2: Crash leaving head.json at old geometry after ledger commit at new geometry reconciles before filtering."""
+    plot_id = f"parcel-geom-reconcile-{int(time.time() * 1000)}"
+    tenant_id = "tenant-geom-rec"
+    farm_id = "farm-geom-rec"
+    geom_v1 = "sha256:geom_v1_old"
+    geom_v2 = "sha256:geom_v2_new"
+    ns = PlotNamespace(tenant_id=tenant_id, farm_id=farm_id, plot_id=plot_id)
+    directory = plot_snapshot_store._plot_dir(ns)
+    states = {"root_zone_moisture": 0.38, "canopy_vigor": 0.71}
+    sigmas = {"root_zone_moisture": 0.02, "canopy_vigor": 0.03}
+
+    snap1 = _publish_candidate(tenant_id, farm_id, plot_id, geom_v1, "job-geom-1", states, sigmas)
+    head_v1 = json.loads(plot_snapshot_store._head_path(ns).read_text(encoding="utf-8"))
+    assert head_v1["geometry_hash"] == geom_v1
+
+    snap2 = _publish_candidate(tenant_id, farm_id, plot_id, geom_v2, "job-geom-2", states, sigmas)
+    assert snap2["snapshot_id"] != snap1["snapshot_id"]
+
+    # Simulate crash right after commits.jsonl append for geom_v2 before head.json was updated
+    plot_snapshot_store._head_path(ns).write_bytes(plot_snapshot_store._json_bytes(head_v1))
+    plot_snapshot_store.clear_canonical_snapshot_cache()
+
+    loaded_v2 = plot_snapshot_store.load_latest_plot_snapshot(ns, geometry_hash=geom_v2, force_verify=True)
+    assert loaded_v2 is not None
+    assert loaded_v2["geometry_hash"] == geom_v2
+    assert loaded_v2["snapshot_id"] == snap2["snapshot_id"]
+
+    # Wrong geometry must still fail closed AFTER reconciliation
+    assert plot_snapshot_store.load_latest_plot_snapshot(ns, geometry_hash="sha256:wrong_geom", force_verify=True) is None
+
+

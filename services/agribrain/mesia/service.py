@@ -853,6 +853,37 @@ class MesiaProductionService:
         res["evidence_record"] = evidence_rec
         return res
 
+    @staticmethod
+    def _build_sigmf_storage_receipt(
+        manifest: Any,
+        native_data_uri: str,
+        *,
+        scientifically_qualified: bool = False,
+        calibrated: bool = False,
+    ) -> Dict[str, Any]:
+        """Build a canonical SigMF storage receipt separating storage integrity from scientific qualification."""
+        qual_status = "QUALIFIED" if scientifically_qualified else "NOT_QUALIFIED"
+        return {
+            "receipt_id": f"rcpt-sigmf-{manifest.capture_id[:16]}",
+            "capture_id": manifest.capture_id,
+            "tenant_id": manifest.tenant_id,
+            "farm_id": manifest.farm_id,
+            "plot_id": manifest.plot_id,
+            "data_sha256": manifest.data_sha256,
+            "meta_sha256": manifest.meta_sha256,
+            "capture_timestamp_utc": manifest.capture_timestamp_utc.isoformat(),
+            "native_data_uri": native_data_uri,
+            "storage_prefix": manifest.storage_prefix,
+            "storage_status": "STORED_QUALIFIED" if scientifically_qualified else "STORED_UNQUALIFIED",
+            "receipt_scope": "storage_integrity_only" if not scientifically_qualified else "qualified_scientific_capture",
+            "scientific_qualification_status": qual_status,
+            "scientifically_qualified": bool(scientifically_qualified),
+            "calibrated": bool(calibrated),
+            "calibration_status": "CALIBRATED" if calibrated else "UNCALIBRATED",
+            "decision_eligible": bool(scientifically_qualified and calibrated),
+            "authority_state": "RESEARCH_ONLY",
+        }
+
     @classmethod
     def _process_real_in_situ_wifi_csi(
         cls,
@@ -977,21 +1008,15 @@ class MesiaProductionService:
             ]
 
             native_uri = verified_data_file.as_uri()
-            canonical_rcpt = {
-                "receipt_id": f"rcpt-sigmf-{verified_manifest.capture_id[:16]}",
-                "capture_id": verified_manifest.capture_id,
-                "tenant_id": verified_manifest.tenant_id,
-                "farm_id": verified_manifest.farm_id,
-                "plot_id": verified_manifest.plot_id,
-                "data_sha256": verified_manifest.data_sha256,
-                "meta_sha256": verified_manifest.meta_sha256,
-                "capture_timestamp_utc": verified_manifest.capture_timestamp_utc.isoformat(),
-                "native_data_uri": native_uri,
-                "storage_prefix": verified_prefix,
-            }
+            canonical_rcpt = cls._build_sigmf_storage_receipt(verified_manifest, native_uri)
 
             return {
                 "status": "MEASURED_IN_SITU_RADIO_WAVES",
+                "storage_status": canonical_rcpt["storage_status"],
+                "scientific_qualification_status": canonical_rcpt["scientific_qualification_status"],
+                "scientifically_qualified": canonical_rcpt["scientifically_qualified"],
+                "decision_eligible": canonical_rcpt["decision_eligible"],
+                "authority_state": canonical_rcpt["authority_state"],
                 "physical_waves_measured": True,
                 "source_class": "PHYSICAL_RECEIVER",
                 "processing_level": "FEATURE",
@@ -1112,22 +1137,17 @@ class MesiaProductionService:
         )
 
         # Single canonical receipt referenced across upload, scan, and Layer 0
-        canonical_receipt = {
-            "receipt_id": f"rcpt-sigmf-{manifest.capture_id[:16]}",
-            "capture_id": manifest.capture_id,
-            "tenant_id": manifest.tenant_id,
-            "farm_id": manifest.farm_id,
-            "plot_id": manifest.plot_id,
-            "data_sha256": manifest.data_sha256,
-            "meta_sha256": manifest.meta_sha256,
-            "capture_timestamp_utc": manifest.capture_timestamp_utc.isoformat(),
-            "native_data_uri": Path(manifest.data_path).resolve().as_uri(),
-            "storage_prefix": manifest.storage_prefix,
-        }
+        canonical_receipt = cls._build_sigmf_storage_receipt(
+            manifest, Path(manifest.data_path).resolve().as_uri()
+        )
         res["canonical_receipt"] = canonical_receipt
         res["receipt_id"] = canonical_receipt["receipt_id"]
         res["capture_id"] = manifest.capture_id
         res["native_data_uri"] = canonical_receipt["native_data_uri"]
+        res["storage_status"] = canonical_receipt["storage_status"]
+        res["scientific_qualification_status"] = canonical_receipt["scientific_qualification_status"]
+        res["scientifically_qualified"] = canonical_receipt["scientifically_qualified"]
+        res["decision_eligible"] = canonical_receipt["decision_eligible"]
         return res
 
 

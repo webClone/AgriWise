@@ -527,6 +527,7 @@ class HistoricalRetrovalidator:
                             raw_pred_var=ens_var,
                             obs_sigma=sig_nominal,
                             elapsed_days=float(lead),
+                            now_dt=t_tgt,
                         )
                         y_cal = cal["cal_pred_mean"]
                         sig_fc = cal["cal_sigma"]
@@ -598,6 +599,8 @@ class HistoricalRetrovalidator:
             "status": "evaluated",
             "protocol": "strict_prospective_unknown_future_weather",
             "uses_realized_future_weather": False,
+            "uses_issuance_day_complete_daily_weather": False,
+            "weather_cutoff_rule": "strict_previous_complete_day_before_issue",
             "uses_target_scene_obs_sigma": False,
             "burnin_calibration_years": burnin_years,
             "heldout_years": heldout_years,

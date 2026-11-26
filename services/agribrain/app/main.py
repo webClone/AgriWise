@@ -717,10 +717,16 @@ def api_v2_historical_intelligence(
     else:
         target_T = datetime.now(timezone.utc).isoformat()
     clean_kc = str(knowledge_cutoff).strip() if knowledge_cutoff else ""
+    if clean_kc and len(clean_kc) == 10 and "T" not in clean_kc:
+        clean_kc = f"{clean_kc}T23:59:59+00:00"
 
     from services.agribrain.layer0.asmae_scene_products.scene_product_store import SceneProductStore
+    from services.agribrain.layer05_asmae.history.historical_event_memory import HistoricalEventMemory
     from services.agribrain.layer05_asmae.history.historical_retrovalidation import HistoricalRetrovalidator
-    from services.agribrain.layer05_asmae.history.historical_state_reconstructor import HistoricalStateReconstructor
+    from services.agribrain.layer05_asmae.history.historical_state_reconstructor import (
+        HistoricalStateReconstructor,
+        filter_causal_daily_weather_at_cutoff,
+    )
     from services.agribrain.scripts.run_archive_pilot import COHORT_GEOMETRIES, _wkt_to_geojson_and_centroid
     from services.agribrain.world_model.canonical_worldline import CanonicalWorldlineService, _parse_utc_iso
 
@@ -808,6 +814,9 @@ def api_v2_historical_intelligence(
         except Exception:
             daily_weather = {}
 
+    crop_ctx = dict(summary_data.get("crop_context") or {"crop_type": "citrus", "crop_coefficient": 0.75})
+    soil_ctx = dict(summary_data.get("soil_context") or {})
+
     # Tenant isolation strictly enforces authenticated namespace.tenant_id & namespace.namespace
     q_res = reconstructor.query_as_of(
         plot_id=plot_id,
@@ -817,27 +826,121 @@ def api_v2_historical_intelligence(
         tenant_id=namespace.tenant_id,
         namespace=ns_name,
         daily_weather=daily_weather,
-        crop_context={"crop_type": "citrus", "crop_coefficient": 0.75},
+        crop_context=crop_ctx,
+        soil_context=soil_ctx,
         polygon_geojson=polygon_geojson,
         forecast_horizons_days=(7, 14, 28),
     )
 
-    # Strictly filter historical event memory <= target_T without leaking future outcomes (P1-D)
-    recon_sum = summary_data.get("reconstruction") or {}
-    raw_mem = (recon_sum.get("event_memory") or {}).get("events") or []
     t_dt = _parse_utc_iso(target_T)
+    k_dt = _parse_utc_iso(q_res.get("knowledge_cutoff_K") or clean_kc or datetime.now(timezone.utc).isoformat())
+    effective_cutoff_dt = min(t_dt, k_dt)
+    effective_cutoff_day = effective_cutoff_dt.date().isoformat()
+    avail_dates = q_res.get("available_dates") or []
+    latest_obs_day = avail_dates[-1] if avail_dates else ""
+    recon_sum = summary_data.get("reconstruction") or {}
+    full_retro = recon_sum.get("retrovalidation") or {}
+    recon_obs_ids = [
+        str(st.get("event_id"))
+        for st in (recon_sum.get("trajectory") or [])
+        if isinstance(st, dict) and st.get("event_id")
+    ]
+    q_eligible_ids = [str(eid) for eid in (q_res.get("eligible_event_ids") or [])]
+    lineage_matches_tail = (
+        recon_obs_ids == q_eligible_ids
+        if recon_obs_ids
+        else int(recon_sum.get("observation_count") or 0) == int(q_res.get("assimilated_observation_count") or 0)
+    )
+    # Strictly forbid using future-knowledge tail summary whenever clean_kc is set, lineage differs, or target_T < tail
+    is_full_tail_epoch = bool(
+        not clean_kc
+        and latest_obs_day
+        and target_T[:10] >= latest_obs_day
+        and bool(full_retro)
+        and int(recon_sum.get("observation_count") or 0) == int(q_res.get("assimilated_observation_count") or 0)
+        and lineage_matches_tail
+    )
+
+    if is_full_tail_epoch:
+        raw_mem = (recon_sum.get("event_memory") or {}).get("events") or []
+        causal_retro = full_retro
+        causal_ablation = summary_data.get("cross_layer_ablation") or {}
+        ablation_scope = "full_archive_to_tail"
+        worldline_auth = recon_sum.get("worldline_posterior_event_type") or "ARCHIVE_POSTERIOR_DIAGNOSTIC"
+        causal_manifest = summary_data.get("manifest_reconciliation") or {}
+    else:
+        causal_traj_TK = [
+            step for step in (q_res.get("trajectory") or [])
+            if step.get("acquisition_time")
+            and _parse_utc_iso(step["acquisition_time"]) <= t_dt
+            and (not step.get("committed_at") or _parse_utc_iso(step["committed_at"]) <= k_dt)
+        ]
+        causal_weather_TK = filter_causal_daily_weather_at_cutoff(daily_weather, effective_cutoff_dt)
+        mem_TK = HistoricalEventMemory().reconstruct_memory(
+            causal_traj_TK,
+            context_summary={
+                "daily_weather": causal_weather_TK,
+                "management_events": [],
+            },
+        )
+        raw_mem = mem_TK.get("events") or []
+        if len(causal_traj_TK) >= 2:
+            causal_retro = HistoricalRetrovalidator().evaluate(
+                causal_traj_TK,
+                {
+                    "daily_weather": causal_weather_TK,
+                    "plot_id": plot_id,
+                    "geometry_hash": geometry_hash,
+                    "crop_context": crop_ctx,
+                    "soil_context": soil_ctx,
+                },
+                evaluate_multi_horizon=False,
+            )
+            q_sub = dict(causal_retro.get("qualification") or {})
+            sub_blocks = list(q_sub.get("block_reasons") or [])
+            if "partial_historical_subslice_no_prospective_horizon_eval" not in sub_blocks:
+                sub_blocks.append("partial_historical_subslice_no_prospective_horizon_eval")
+            q_sub["passed"] = False
+            q_sub["qualification_tier"] = "DIAGNOSTIC_HISTORICAL_RECONSTRUCTION"
+            q_sub["block_reasons"] = sub_blocks
+            causal_retro["qualification"] = q_sub
+        else:
+            causal_retro = {
+                "status": "withheld_insufficient_causal_observations",
+                "summary": {"n_evaluated_points": 0, "withheld": True},
+                "raw_uncalibrated_summary": {},
+                "by_channel": {},
+                "baselines": {},
+                "multi_horizon": {"status": "withheld_not_evaluated_for_subslice", "by_horizon": {}},
+                "bma": {},
+                "qualification": {"passed": False, "qualification_tier": "DIAGNOSTIC_HISTORICAL_RECONSTRUCTION", "block_reasons": ["insufficient_observations_before_cutoff"]},
+            }
+        causal_ablation = {}
+        ablation_scope = "withheld_bitemporal_subslice_to_prevent_post_cutoff_leakage"
+        worldline_auth = "ARCHIVE_POSTERIOR_DIAGNOSTIC"
+        causal_manifest = {
+            "scope": f"bitemporal_slice_T_{target_T[:10]}_K_{k_dt.date().isoformat()}",
+            "admitted_unique_count": int(q_res.get("assimilated_observation_count") or 0),
+            "available_dates_known_at_k": len(avail_dates),
+            "reconciliation_note": (
+                f"Scoped strictly to {q_res.get('assimilated_observation_count', 0)} qualified scenes "
+                f"with valid_time <= {target_T[:10]} and committed_at <= {k_dt.isoformat()}."
+            ),
+        }
+
+    # Filter event memory strictly by both valid_time <= T and knowledge_cutoff <= K without future outcomes
     causal_events: List[Dict[str, Any]] = []
     for ev in raw_mem:
         ev_start = ev.get("start_time")
         if not ev_start:
             continue
-        if _parse_utc_iso(ev_start) > t_dt:
+        if _parse_utc_iso(ev_start) > effective_cutoff_dt:
             continue
         ev_copy = dict(ev)
         peak_raw = ev_copy.get("peak_time") or ev_start
         om = dict(ev_copy.get("outcome_measurement") or {})
         horizon_days = int(om.get("followup_horizon_days") or 0)
-        if horizon_days > 0 and (_parse_utc_iso(peak_raw) + timedelta(days=horizon_days)) > t_dt:
+        if horizon_days > 0 and (_parse_utc_iso(peak_raw) + timedelta(days=horizon_days)) > effective_cutoff_dt:
             ev_copy["hypothesis_status"] = (
                 "forcing_recorded" if ev_copy.get("epistemic_class") == "meteorological_forcing_reanalysis"
                 else ("confirmed" if ev_copy.get("epistemic_class") == "agronomic_event_confirmed" else "unresolved_insufficient_followup")
@@ -851,56 +954,6 @@ def api_v2_historical_intelligence(
             }
         causal_events.append(ev_copy)
 
-    # Strictly separate temporal scopes (P1-D): NEVER emit future-history metrics for an earlier as_of date!
-    avail_dates = q_res.get("available_dates") or []
-    latest_obs_day = avail_dates[-1] if avail_dates else ""
-    is_full_tail_epoch = bool(not clean_kc and latest_obs_day and target_T[:10] >= latest_obs_day)
-    full_retro = recon_sum.get("retrovalidation") or {}
-    full_traj = recon_sum.get("trajectory") or []
-
-    if is_full_tail_epoch and full_retro:
-        causal_retro = full_retro
-        causal_ablation = summary_data.get("cross_layer_ablation") or {}
-        ablation_scope = "full_archive_to_tail"
-        worldline_auth = recon_sum.get("worldline_posterior_event_type") or "ARCHIVE_POSTERIOR_DIAGNOSTIC"
-    else:
-        traj_to_T = [
-            step for step in full_traj
-            if step.get("acquisition_time") and _parse_utc_iso(step["acquisition_time"]) <= t_dt
-        ]
-        causal_weather_T = {
-            str(d): v for d, v in daily_weather.items() if str(d)[:10] <= target_T[:10]
-        }
-        if len(traj_to_T) >= 2:
-            causal_retro = HistoricalRetrovalidator().evaluate(
-                traj_to_T,
-                {"daily_weather": causal_weather_T, "plot_id": plot_id, "geometry_hash": geometry_hash},
-                evaluate_multi_horizon=False,
-            )
-            # Without full held-out multi-horizon verification at partial sub-slice, remain diagnostic
-            q_sub = dict(causal_retro.get("qualification") or {})
-            sub_blocks = list(q_sub.get("block_reasons") or [])
-            if "partial_historical_subslice_no_prospective_horizon_eval" not in sub_blocks:
-                sub_blocks.append("partial_historical_subslice_no_prospective_horizon_eval")
-            q_sub["passed"] = False
-            q_sub["qualification_tier"] = "DIAGNOSTIC_HISTORICAL_RECONSTRUCTION"
-            q_sub["block_reasons"] = sub_blocks
-            causal_retro["qualification"] = q_sub
-        else:
-            causal_retro = {
-                "status": "insufficient_observations_before_cutoff",
-                "summary": {"n_evaluated_points": 0},
-                "raw_uncalibrated_summary": {},
-                "by_channel": {},
-                "baselines": {},
-                "multi_horizon": {"status": "not_evaluated_for_subslice", "by_horizon": {}},
-                "bma": {},
-                "qualification": {"passed": False, "qualification_tier": "DIAGNOSTIC_HISTORICAL_RECONSTRUCTION", "block_reasons": ["insufficient_observations_before_cutoff"]},
-            }
-        causal_ablation = {}
-        ablation_scope = "withheld_historical_subslice_to_prevent_post_cutoff_leakage"
-        worldline_auth = "ARCHIVE_POSTERIOR_DIAGNOSTIC"
-
     payload = {
         "available": bool(q_res.get("available")),
         "reason": q_res.get("reason"),
@@ -913,7 +966,10 @@ def api_v2_historical_intelligence(
         "valid_time_T": q_res.get("valid_time_T") or target_T,
         "knowledge_cutoff_K": q_res.get("knowledge_cutoff_K"),
         "temporal_query_scope": {
-            "mode": "strict_as_of_cutoff",
+            "mode": "strict_bitemporal_T_and_K",
+            "valid_time_T": t_dt.isoformat(),
+            "knowledge_cutoff_K": k_dt.isoformat(),
+            "has_explicit_knowledge_cutoff": bool(clean_kc),
             "is_full_tail_epoch": is_full_tail_epoch,
             "contains_post_cutoff_data": False,
             "ablation_scope": ablation_scope,
@@ -932,6 +988,8 @@ def api_v2_historical_intelligence(
         "canonical_grid": q_res.get("canonical_grid"),
         "has_spatial_observations": bool(q_res.get("has_spatial_observations")),
         "spatial_estimation_mode": "inferred_state_anomaly_field",
+        "effective_resolution_by_state": q_res.get("effective_resolution_by_state") or {},
+        "suppressed_spatial_states": q_res.get("suppressed_spatial_states") or {},
         "spatial_surfaces": q_res.get("spatial_surfaces") or [],
         "cross_layer_pre_priors": q_res.get("cross_layer_pre_priors") or {},
         "cross_layer_intelligence": q_res.get("cross_layer_intelligence") or {},
@@ -950,7 +1008,7 @@ def api_v2_historical_intelligence(
             ),
         },
         "retrovalidation_summary": {
-            "scope": f"causal_observations_lte_{target_T[:10]}",
+            "scope": f"causal_observations_lte_{target_T[:10]}_kc_{k_dt.date().isoformat()}",
             "raw_uncalibrated_summary": causal_retro.get("raw_uncalibrated_summary") or {},
             "summary": causal_retro.get("summary") or {},
             "by_channel": causal_retro.get("by_channel") or {},
@@ -960,7 +1018,7 @@ def api_v2_historical_intelligence(
             "qualification": causal_retro.get("qualification") or {},
         },
         "cross_layer_ablation": causal_ablation,
-        "manifest_reconciliation": summary_data.get("manifest_reconciliation") or {},
+        "manifest_reconciliation": causal_manifest,
     }
 
     raw_bytes = json.dumps(payload, default=str).encode("utf-8")
