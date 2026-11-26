@@ -926,6 +926,15 @@ def forecast_step(
     missing_driver_scale = (1.0 if has_water_drivers else 1.8) * shock_unc_mult
     import numpy as np
 
+    def _centered_normal(gen: Any, sigma_val: float, shp: Tuple[int, int]) -> Any:
+        if sigma_val <= 0.0:
+            return np.zeros(shp, dtype=float)
+        draws = gen.normal(0.0, sigma_val, shp)
+        if shp[1] > 1:
+            draws = draws - np.mean(draws, axis=1, keepdims=True)
+            draws = draws * math.sqrt(shp[1] / float(shp[1] - 1))
+        return draws
+
     node_ids = list(ensemble)
     values = np.asarray([ensemble[node] for node in node_ids], dtype=float)
     generator = np.random.default_rng(rng.getrandbits(128))
@@ -936,8 +945,8 @@ def forecast_step(
         if name == "surface_wetness_event":
             wetting = effective_rain * delta_days + irrigation
             rain_pulse = min(1.0, max(0.0, wetting / 20.0)) if wetting > 0.0 else 0.0
-            updated = current * (0.65 ** delta_days) + rain_pulse + generator.normal(
-                0.0, 0.05 * missing_driver_scale * sqrt_delta_days, member_shape,
+            updated = current * (0.65 ** delta_days) + rain_pulse + _centered_normal(
+                generator, 0.05 * missing_driver_scale * sqrt_delta_days, member_shape,
             )
         elif name == "root_zone_water":
             # Actual ET based on FAO-56 moisture stress factor Ks
@@ -960,7 +969,7 @@ def forecast_step(
                 - delta_theta_et
                 - drainage_rate
                 + rzw_nudge
-                + generator.normal(0.0, 0.01 * missing_driver_scale * sqrt_delta_days, member_shape)
+                + _centered_normal(generator, 0.01 * missing_driver_scale * sqrt_delta_days, member_shape)
             )
             # Clip to physical soil bounds [theta_wp * 0.5, theta_sat]
             updated = np.clip(updated, max(0.01, theta_wp_val * 0.5), theta_sat_val)
@@ -972,13 +981,13 @@ def forecast_step(
             updated = (
                 current * (0.97 ** delta_days)
                 + 0.6 * water_impulse
-                + generator.normal(0.0, 0.02 * missing_driver_scale * sqrt_delta_days, member_shape)
+                + _centered_normal(generator, 0.02 * missing_driver_scale * sqrt_delta_days, member_shape)
             )
         elif name == "thermal_stress":
             heat = max(0.0, min(1.0, (float(temp_max) - optimal_temperature) / (maximum_temperature - optimal_temperature))) if isinstance(temp_max, (int, float)) else current
             decay = 0.8 ** delta_days
-            updated = decay * current + (1.0 - decay) * heat + generator.normal(
-                0.0, 0.02 * (1.0 if temp_max is not None else 1.8) * sqrt_delta_days, member_shape,
+            updated = decay * current + (1.0 - decay) * heat + _centered_normal(
+                generator, 0.02 * (1.0 if temp_max is not None else 1.8) * sqrt_delta_days, member_shape,
             )
         elif name == "phenology_progress" and (temp_mean is not None or l2_growth_pos is not None):
             degree_day_progress = (
@@ -989,8 +998,8 @@ def forecast_step(
                 0.08 * min(5.0, delta_days) * (l2_growth_pos - current)
                 if l2_growth_pos is not None else 0.0
             )
-            updated = current + degree_day_progress * delta_days + l2_nudge + generator.normal(
-                0.0, 0.005 * sqrt_delta_days, member_shape,
+            updated = current + degree_day_progress * delta_days + l2_nudge + _centered_normal(
+                generator, 0.005 * sqrt_delta_days, member_shape,
             )
         elif name == "biotic_confounder_risk" and humidity is not None and temp_mean is not None:
             humidity_pressure = max(0.0, min(1.0, (humidity - 60.0) / 35.0))
@@ -1005,8 +1014,8 @@ def forecast_step(
             decay = 0.9 ** delta_days
             updated = decay * current + (1.0 - decay) * max(0.0, baseline - leaching)
         elif name == "chlorophyll" and fertilization > 0.0:
-            updated = current + min(3.0, fertilization / 20.0) + generator.normal(
-                0.0, 0.5 * sqrt_delta_days, member_shape,
+            updated = current + min(3.0, fertilization / 20.0) + _centered_normal(
+                generator, 0.5 * sqrt_delta_days, member_shape,
             )
         elif name == "vigor" and (radiation is not None or l3_water_lim is not None):
             radiation_factor = max(0.0, min(1.0, radiation / 25.0)) if radiation is not None else 0.52
@@ -1019,14 +1028,14 @@ def forecast_step(
             )
             net_rad_delta = delta_days * (0.008 * radiation_factor - 0.008 * max(0.0, -normalized_daily_water_delta)) if radiation is not None else 0.0
             sigma_v = (0.016 if l3_water_lim is not None else 0.03) * missing_driver_scale
-            updated = current + net_rad_delta + l3_growth_delta + generator.normal(
-                0.0, sigma_v * sqrt_delta_days, member_shape,
+            updated = current + net_rad_delta + l3_growth_delta + _centered_normal(
+                generator, sigma_v * sqrt_delta_days, member_shape,
             )
         elif name == "lai" and l3_water_lim is not None:
             water_lim_val = float(l3_water_lim)
             l3_lai_delta = delta_days * (0.006 * max(0.0, 0.5 - water_lim_val) - 0.008 * max(0.0, water_lim_val - 0.7))
-            updated = current + l3_lai_delta + generator.normal(
-                0.0, (hi - lo) * 0.014 * missing_driver_scale * sqrt_delta_days, member_shape,
+            updated = current + l3_lai_delta + _centered_normal(
+                generator, (hi - lo) * 0.014 * missing_driver_scale * sqrt_delta_days, member_shape,
             )
         elif name == "stress_memory":
             heat_signal = max(0.0, min(1.0, (float(temp_max) - optimal_temperature) / (maximum_temperature - optimal_temperature))) if temp_max is not None else 0.0
@@ -1034,9 +1043,9 @@ def forecast_step(
             decay = 0.97 ** delta_days
             updated = decay * current + (1.0 - decay) * max(heat_signal, water_signal)
         else:
-            sigma_q = (hi - lo) * 0.02 * missing_driver_scale
-            updated = current + generator.normal(
-                0.0, sigma_q * sqrt_delta_days, member_shape,
+            sigma_q = (hi - lo) * 0.016 * missing_driver_scale
+            updated = current + _centered_normal(
+                generator, sigma_q * sqrt_delta_days, member_shape,
             )
         values[:, :, i] = np.clip(updated, lo, hi)
 

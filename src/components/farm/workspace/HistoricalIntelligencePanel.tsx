@@ -42,6 +42,14 @@ export interface HistoricalIntelligencePayload {
     resolution_m?: number;
   } | null;
   has_spatial_observations: boolean;
+  spatial_estimation_mode?: string;
+  temporal_query_scope?: {
+    mode?: string;
+    is_full_tail_epoch?: boolean;
+    contains_post_cutoff_data?: boolean;
+    ablation_scope?: string;
+  };
+  archive_state_version?: string;
   spatial_surfaces: any[];
   cross_layer_pre_priors?: Record<string, any>;
   cross_layer_intelligence?: {
@@ -530,15 +538,18 @@ export default function HistoricalIntelligencePanel({
               }}
             >
               <div style={{ fontWeight: 750, color: "#cbd5e1", textTransform: "uppercase", marginBottom: "4px" }}>
-                Empirical Skill & L2–8 Ablation
+                Empirical Skill (≤ {data.as_of_date}, n={retroSum.n_evaluated_points ?? 0})
               </div>
               <div>
                 RMSE: {rawRetroSum.rmse} (raw) → <strong style={{ color: "#34d399" }}>{retroSum.rmse}</strong> (cal) · Cov{" "}
                 {Math.round((retroSum.coverage_1sigma || 0) * 100)}% / {Math.round((retroSum.coverage_2sigma || 0) * 100)}%
               </div>
               <div>
-                Skill vs Clim: <strong style={{ color: "#34d399" }}>{retroSum.skill_vs_climatology}</strong> · 17–35d Skill vs Pers:{" "}
-                <strong style={{ color: "#38bdf8" }}>{multiHorizon.extended_17_35d?.skill_vs_persistence ?? "—"}</strong>
+                Skill vs Clim: <strong style={{ color: "#34d399" }}>{retroSum.skill_vs_climatology}</strong> · Prospective 17–35d:{" "}
+                <strong style={{ color: "#38bdf8" }}>{multiHorizon.extended_17_35d?.skill_vs_persistence ?? "Sub-slice N/A"}</strong>
+              </div>
+              <div style={{ color: "#94a3b8", fontSize: "9px" }}>
+                Spatial maps: inferred state anomaly fields ({data.spatial_estimation_mode || "model + S1/S2 anomalies"}, not direct physical pixel sensors).
               </div>
               {ablation.s1_s2_only_rmse != null && (
                 <div>

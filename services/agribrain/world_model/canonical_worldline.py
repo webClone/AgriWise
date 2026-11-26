@@ -939,6 +939,15 @@ class CanonicalWorldlineService:
         t_dt = _parse_utc_iso(valid_time_T)
         k_dt = _parse_utc_iso(knowledge_cutoff_K)
 
+        # Index already-loaded journal events in memory so O(N^2) ancestor DAG checks avoid
+        # repeating N^2 Path.resolve() and JSON disk reads on large historical worldlines.
+        events_by_id: Dict[str, Dict[str, Any]] = {}
+        for ev in all_events:
+            eid = str(ev.get("event_id") or "").strip()
+            if eid:
+                events_by_id[eid] = ev
+        ancestor_meta_cache: Dict[str, tuple[bool, Optional[tuple[str, ...]]]] = {}
+
         eligible: List[tuple[datetime, int, datetime, Dict[str, Any]]] = []
         for rec in all_events:
             if rec.get("event_type") != event_type:
@@ -997,21 +1006,45 @@ class CanonicalWorldlineService:
                     dependency_violation = True
                     break
 
-                p_path = self._event_path(plot_id, ancestor_id, tenant_id, namespace)
-                if not p_path.exists():
-                    logger.warning(
-                        "Derived event %s references missing ancestor %s; fail closed",
-                        rec.get("event_id"), ancestor_id
+                if ".." in ancestor_id or "/" in ancestor_id or "\\" in ancestor_id:
+                    raise SecurityViolation(
+                        f"Invalid event_id {ancestor_id}: path traversal characters not permitted"
                     )
-                    if fail_on_corrupt:
-                        raise CorruptedWorldlineError(
-                            f"Derived event {rec.get('event_id')} references missing ancestor event {ancestor_id}"
+
+                cached_anc = ancestor_meta_cache.get(ancestor_id)
+                if cached_anc is not None:
+                    anc_ok, parent_ids_tuple = cached_anc
+                    if not anc_ok:
+                        dependency_violation = True
+                        break
+                    for clean_gpid in parent_ids_tuple or ():
+                        if clean_gpid not in visited_ancestors:
+                            ancestor_queue.append(clean_gpid)
+                    continue
+
+                p_rec = events_by_id.get(ancestor_id)
+                if p_rec is None:
+                    p_path = self._event_path(plot_id, ancestor_id, tenant_id, namespace)
+                    if not p_path.exists():
+                        logger.warning(
+                            "Derived event %s references missing ancestor %s; fail closed",
+                            rec.get("event_id"), ancestor_id
                         )
-                    dependency_violation = True
-                    break
+                        if fail_on_corrupt:
+                            raise CorruptedWorldlineError(
+                                f"Derived event {rec.get('event_id')} references missing ancestor event {ancestor_id}"
+                            )
+                        dependency_violation = True
+                        break
+                    p_rec_raw: Optional[Dict[str, Any]] = None
+                else:
+                    p_rec_raw = p_rec
 
                 try:
-                    p_rec = self._read(p_path)
+                    if p_rec_raw is None:
+                        p_rec = self._read(p_path)
+                    else:
+                        p_rec = p_rec_raw
                     if not p_rec:
                         if fail_on_corrupt:
                             raise CorruptedWorldlineError(
@@ -1029,6 +1062,7 @@ class CanonicalWorldlineService:
                                 "Derived event %s references ancestor %s committed after cutoff (%s > %s)",
                                 rec.get("event_id"), ancestor_id, p_comm_str, k_dt.isoformat()
                             )
+                            ancestor_meta_cache[ancestor_id] = (False, None)
                             dependency_violation = True
                             break
 
@@ -1039,6 +1073,7 @@ class CanonicalWorldlineService:
                                 "Derived event %s references ancestor %s observed after valid time T (%s > %s)",
                                 rec.get("event_id"), ancestor_id, p_val_str, t_dt.isoformat()
                             )
+                            ancestor_meta_cache[ancestor_id] = (False, None)
                             dependency_violation = True
                             break
 
@@ -1055,13 +1090,19 @@ class CanonicalWorldlineService:
                                         "Derived event %s ancestor %s has nested BMA/calibration derived after cutoff (%s > %s)",
                                         rec.get("event_id"), ancestor_id, cal_at, k_dt.isoformat()
                                     )
+                                    ancestor_meta_cache[ancestor_id] = (False, None)
                                     dependency_violation = True
                                     break
 
-                    # Queue transitive ancestors
-                    for gp_id in p_rec.get("parent_event_ids") or []:
-                        clean_gpid = str(gp_id).strip()
-                        if clean_gpid and clean_gpid not in visited_ancestors:
+                    # Queue transitive ancestors and memoize clean node metadata
+                    parent_ids_tuple = tuple(
+                        str(gp_id).strip()
+                        for gp_id in (p_rec.get("parent_event_ids") or [])
+                        if str(gp_id).strip()
+                    )
+                    ancestor_meta_cache[ancestor_id] = (True, parent_ids_tuple)
+                    for clean_gpid in parent_ids_tuple:
+                        if clean_gpid not in visited_ancestors:
                             ancestor_queue.append(clean_gpid)
                 except Exception as p_exc:
                     if fail_on_corrupt:

@@ -358,9 +358,16 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
       setDraftCoordinates((prev) => [...prev, coord]);
       return;
     }
-    if (activeAsmaeAvailability?.canRenderPixels && activeAsmaeAvailability?.rasterSurface) {
-      const sample = sampleSirePixel(activeAsmaeAvailability.rasterSurface as any, coord, plotBounds);
-      setSirePixelHover(sample.valid ? sample : null);
+    const sample = sampleSirePixel(activeAsmaeAvailability.rasterSurface as any, coord, plotBounds);
+    if (activeAsmaeAvailability?.canRenderPixels && activeAsmaeAvailability?.rasterSurface && sample.valid) {
+      const uGrid = (activeAsmaeAvailability.rasterSurface as any)?.uncertainty;
+      const sigmaVal = Array.isArray(uGrid) ? uGrid?.[sample.row]?.[sample.col] : null;
+      setSirePixelHover({
+        ...sample,
+        sigma: typeof sigmaVal === "number" && Number.isFinite(sigmaVal) ? Number(sigmaVal.toFixed(4)) : null,
+      } as any);
+    } else {
+      setSirePixelHover(null);
     }
   }, [drawingKind, activeAsmaeAvailability, plotBounds]);
 
@@ -720,7 +727,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
           activeAsmaeKey={activeAsmaeKey}
           onSelectAsmaeState={handleSelectAsmaeState}
           activeAsmaeAvailability={activeAsmaeAvailability}
-          sirePixelHover={sirePixelHover}
+          sirePixelHover={activeAsmaeAvailability?.canRenderPixels ? sirePixelHover : null}
           historicalAsOfDate={historicalAsOfDate}
           historicalLoading={historicalLoading}
           historicalError={historicalError}

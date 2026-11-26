@@ -739,3 +739,152 @@ def test_fastapi_historical_intelligence_endpoint_auth_and_tenant_isolation():
         ),
     )
     assert r403.status_code == 403
+
+    # 4. If afroun archive exists locally, verify 200 OK causal sub-slice scoping, spatial honesty & cache version key
+    from pathlib import Path as _P
+    afroun_rpt = (
+        _P("services/agribrain/artifacts/archive_pilot_reports")
+        / "697ddd3bd4195b809226a67b" / "69ad7b6f7e6843e8234afcf6" / "6a09d9e91dd0c7ed6fce7d50"
+        / "historical_state_intelligence_summary.json"
+    )
+    if afroun_rpt.is_file():
+        r2018 = client.get(
+            "/v2/plots/6a09d9e91dd0c7ed6fce7d50/historical-intelligence?as_of=2018-07-15",
+            headers=_signed_headers(
+                "6a09d9e91dd0c7ed6fce7d50", "697ddd3bd4195b809226a67b", "69ad7b6f7e6843e8234afcf6",
+                query_pairs=[("as_of", "2018-07-15")],
+            ),
+        )
+        assert r2018.status_code == 200
+        d18 = r2018.json()
+        assert d18["available"] is True
+        assert d18["assimilated_observation_count"] == 40
+        assert d18["spatial_estimation_mode"] == "inferred_state_anomaly_field"
+        import re as _re
+        assert _re.match(r"^wl=\d+:[^|]+\|cp=[^|]+\|rpt=\d+\|gh=", d18["archive_state_version"])
+        assert d18["temporal_query_scope"]["is_full_tail_epoch"] is False
+        assert d18["cross_layer_ablation"] == {}
+        assert d18["retrovalidation_summary"]["summary"]["n_evaluated_points"] < 90
+        assert d18["worldline_authority"] == "ARCHIVE_POSTERIOR_DIAGNOSTIC"
+
+
+def test_prospective_multi_horizon_zero_future_weather_or_sigma_leakage(tmp_path: Path):
+    """Prospective multi-horizon scoring MUST NOT leak future ERA5 weather or target scene obs_sigma."""
+    wl = CanonicalWorldlineService(root=tmp_path / "wl_prosp", require_durable_anchor=False)
+    plot_id = "prosp_plot"
+    geom_hash = "sha256:prosp_geom"
+    scenes = _make_seasonal_scenes([2022, 2023, 2024, 2025])
+    # Ensure a late-2025 pair lands inside (0.5d, 35d] right after 2025-10-22 (DOY 295)
+    dt_nov = datetime(2025, 11, 12, 10, 30, tzinfo=timezone.utc)
+    scenes.append({
+        "scene_id": f"S2_{dt_nov.strftime('%Y%m%d')}",
+        "acquisition_time": dt_nov.isoformat(),
+        "source": "sentinel2",
+        "product_level": "L2A",
+        "cloud_score": 0.05,
+        "quality_score": 0.95,
+        "valid_pixel_fraction": 0.96,
+        "source_content_hash": "2025_316_sentinel2".ljust(64, "0"),
+        "metrics": {"ndvi_mean": 0.44, "ndmi_mean": 0.13},
+    })
+    scenes.sort(key=lambda s: s["acquisition_time"])
+    weather_base = _build_synthetic_weather(2022, 2025)
+    _commit_obs_sequence(wl, plot_id, geom_hash, scenes)
+
+    recon = HistoricalStateReconstructor(
+        worldline=wl, checkpoint_root=tmp_path / "cp_prosp", n_ensemble=10, checkpoint_stride=8
+    )
+    res_base = recon.reconstruct(
+        plot_id=plot_id, geometry_hash=geom_hash, daily_weather=weather_base,
+        retrovalidation_fn=None, emit_worldline_posterior=False,
+    )
+    traj_orig = copy.deepcopy(res_base["trajectory"])
+    ctx_orig = {
+        "plot_id": plot_id,
+        "geometry_hash": geom_hash,
+        "daily_weather": copy.deepcopy(weather_base),
+        "crop_context": {"crop_type": "citrus", "crop_coefficient": 0.75},
+        "soil_context": {},
+    }
+    eval_base = HistoricalRetrovalidator().evaluate(traj_orig, ctx_orig)
+    mh_base = eval_base["multi_horizon"]
+    assert mh_base["uses_realized_future_weather"] is False
+    assert mh_base["uses_target_scene_obs_sigma"] is False
+
+    # Mutate ONLY weather > 2025-10-23 (after 2025-10-22 issue point) & mutate target scene obs_sigma
+    weather_post = copy.deepcopy(weather_base)
+    for d_key in list(weather_post.keys()):
+        if d_key >= "2025-10-23":
+            weather_post[d_key] = {"temp_max": 45.0, "temp_min": 30.0, "precipitation": 80.0, "et0": 12.0}
+    traj_mut = copy.deepcopy(traj_orig)
+    for step in traj_mut:
+        if str(step.get("acquisition_time", "")).startswith("2025-"):
+            for p_rec in (step.get("prior_predictions") or {}).values():
+                p_rec["obs_sigma"] = 0.45
+
+    eval_sigma_only = HistoricalRetrovalidator().evaluate(traj_mut, ctx_orig)
+    assert eval_sigma_only["multi_horizon"]["by_horizon"] == mh_base["by_horizon"]
+    assert eval_sigma_only["multi_horizon"]["by_heldout_year"] == mh_base["by_heldout_year"]
+
+    eval_post = HistoricalRetrovalidator().evaluate(traj_orig, {**ctx_orig, "daily_weather": weather_post})
+    assert eval_post["multi_horizon"]["by_horizon"] == mh_base["by_horizon"]
+    assert eval_post["multi_horizon"]["hindcast_realized_weather_reference"]["by_horizon"] != mh_base["hindcast_realized_weather_reference"]["by_horizon"]
+
+
+def test_strict_validation_gate_and_multi_crop_confirmed_events(tmp_path: Path):
+    """P1-B gate rejects negative overall persistence skill; CrossLayer & EventMemory support olive/wheat + confirmed events."""
+    from services.agribrain.layer05_asmae.cross_layer_intelligence import CrossLayerSpecialistBridge
+
+    wl = CanonicalWorldlineService(root=tmp_path / "wl_strict", require_durable_anchor=False)
+    plot_id = "olive_strict_plot"
+    geom_hash = "sha256:olive_geom"
+    scenes = _make_seasonal_scenes([2022, 2023])
+    weather = _build_synthetic_weather(2022, 2023)
+    _commit_obs_sequence(wl, plot_id, geom_hash, scenes)
+
+    svc = HistoricalStateIntelligenceService(
+        worldline=wl, bootstrap_root=tmp_path / "bs_s", checkpoint_root=tmp_path / "cp_s", n_ensemble=10
+    )
+    res = svc.run_full_intelligence(
+        plot_id=plot_id,
+        geometry_hash=geom_hash,
+        daily_weather=weather,
+        crop_context={"crop_type": "olive", "crop_coefficient": 0.65},
+        management_events=[
+            {"event_type": "irrigation", "status": "applied", "date": "2023-07-20", "amount_mm": 28.0},
+            {"event_type": "harvest", "status": "applied", "date": "2023-10-15"},
+        ],
+        skip_bootstrap=True,
+        compare_ablation=False,
+    )
+    recon = res["reconstruction"]
+    qual = recon["retrovalidation"]["qualification"]
+    if not qual["passed"]:
+        assert recon["worldline_posterior_event_type"] == "ARCHIVE_POSTERIOR_DIAGNOSTIC"
+        assert qual["qualification_tier"] == "DIAGNOSTIC_HISTORICAL_RECONSTRUCTION"
+    assert recon["event_memory"]["summary"]["agronomic_event_confirmed_count"] >= 2
+    confirmed_evs = [
+        e for e in recon["event_memory"]["events"]
+        if e["epistemic_class"] == "agronomic_event_confirmed"
+    ]
+    assert any(e["event_category"] == "irrigation" for e in confirmed_evs)
+    assert any(e["event_category"] == "canopy_change" for e in confirmed_evs)
+
+    # Verify annual crop (wheat) L2-8 cross-layer bridge executes cleanly without errors
+    bridge = CrossLayerSpecialistBridge()
+    st = bridge.initialize_chrono_state(crop_context={"crop_type": "wheat"})
+    bridge.advance_chrono_state(
+        st,
+        start_time=datetime(2023, 3, 1, tzinfo=timezone.utc),
+        end_time=datetime(2023, 4, 15, tzinfo=timezone.utc),
+        weather_daily_series=weather,
+        crop_context={"crop_type": "wheat"},
+    )
+    pre_w = bridge.evaluate_step_priors(
+        state=st,
+        timestamp=datetime(2023, 4, 15, 10, tzinfo=timezone.utc),
+        knowledge_cutoff=datetime(2023, 4, 15, 10, tzinfo=timezone.utc),
+        crop_context={"crop_type": "wheat"},
+    )
+    assert pre_w["priors"]["layer2"]["phenology_stage"]
+    assert pre_w["priors"]["layer3"]["et0"] >= 0.0

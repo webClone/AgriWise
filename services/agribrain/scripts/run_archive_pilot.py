@@ -618,11 +618,14 @@ def run_historical_intelligence_for_plot(
         service.bootstrap._fetcher_factory = _build_local_cache_fetcher(
             plot_id, geom_geojson, scene_store, service.bootstrap
         )
+    tenant_id = "697ddd3bd4195b809226a67b" if plot_id == "6a09d9e91dd0c7ed6fce7d50" else "default_tenant"
+    farm_id = "69ad7b6f7e6843e8234afcf6" if plot_id == "6a09d9e91dd0c7ed6fce7d50" else "default_farm"
+    ns_name = "default"
     res = service.run_full_intelligence(
         plot_id=plot_id,
         geometry_hash=canonical_geom_hash,
-        tenant_id="697ddd3bd4195b809226a67b" if plot_id == "6a09d9e91dd0c7ed6fce7d50" else "default_tenant",
-        namespace="default",
+        tenant_id=tenant_id,
+        namespace=ns_name,
         start_date=MISSION_START_DATE,
         target_end_date=end_dt.isoformat(),
         window_days=180,
@@ -646,7 +649,7 @@ def run_historical_intelligence_for_plot(
         f"excluded_cloud_or_qa={manifest_reconcile.get('excluded_cloud_or_qa_count', 0)}."
     )
 
-    out_dir = artifacts_dir / "archive_pilot_reports" / plot_id
+    out_dir = artifacts_dir / "archive_pilot_reports" / tenant_id / farm_id / plot_id
     out_dir.mkdir(parents=True, exist_ok=True)
     if daily_weather:
         weather_cache_path = out_dir / "historical_weather_cache.json"
@@ -658,7 +661,9 @@ def run_historical_intelligence_for_plot(
     summary_payload = {
         **res,
         "plot_id": plot_id,
-        "tenant_id": "697ddd3bd4195b809226a67b" if plot_id == "6a09d9e91dd0c7ed6fce7d50" else "default_tenant",
+        "tenant_id": tenant_id,
+        "farm_id": farm_id,
+        "namespace": ns_name,
         "geometry_hash": canonical_geom_hash,
         "weather_meta": weather_meta,
         "manifest_reconciliation": manifest_reconcile,

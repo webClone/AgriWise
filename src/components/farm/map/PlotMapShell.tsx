@@ -936,17 +936,16 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     }
   }, [showRaster]);
 
-  // Intercept map click to define transect line or geometry draft vertex
+  // Intercept map click to sample SIRE pixels, define transect line, or add geometry draft vertex
   const handleMapClick = useCallback((info: any) => {
-    if (props.onCanvasMapClick && props.draftGeometry) {
-      const { coordinate } = info;
-      if (coordinate && Array.isArray(coordinate)) {
-        props.onCanvasMapClick([coordinate[0], coordinate[1]]);
+    const coordinate = info?.coordinate;
+    if (props.onCanvasMapClick && !transectMode && coordinate && Array.isArray(coordinate)) {
+      props.onCanvasMapClick([coordinate[0], coordinate[1]]);
+      if (props.draftGeometry) {
         return;
       }
     }
     if (transectMode) {
-      const { coordinate } = info;
       if (coordinate && Array.isArray(coordinate)) {
         const [lng, lat] = coordinate;
         if (transectPoints.length === 0 || transectPoints.length === 2) {

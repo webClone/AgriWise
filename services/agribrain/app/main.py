@@ -691,7 +691,7 @@ def api_v2_canonical_plot_snapshot(
     )
 
 
-_HIST_INTEL_RESPONSE_CACHE: Dict[Tuple[str, str, str, str], bytes] = {}
+_HIST_INTEL_RESPONSE_CACHE: Dict[Tuple[str, str, str, str, str], bytes] = {}
 _HIST_INTEL_RESPONSE_CACHE_LOCK = _threading.Lock()
 
 
@@ -717,43 +717,60 @@ def api_v2_historical_intelligence(
     else:
         target_T = datetime.now(timezone.utc).isoformat()
     clean_kc = str(knowledge_cutoff).strip() if knowledge_cutoff else ""
-    cache_key = (namespace.stable_key(), plot_id, target_T, clean_kc)
 
-    with _HIST_INTEL_RESPONSE_CACHE_LOCK:
-        cached = _HIST_INTEL_RESPONSE_CACHE.get(cache_key)
-    if cached is not None:
-        return Response(content=cached, media_type="application/json", headers={"Cache-Control": "no-cache"})
+    from services.agribrain.layer0.asmae_scene_products.scene_product_store import SceneProductStore
+    from services.agribrain.layer05_asmae.history.historical_retrovalidation import HistoricalRetrovalidator
+    from services.agribrain.layer05_asmae.history.historical_state_reconstructor import HistoricalStateReconstructor
+    from services.agribrain.scripts.run_archive_pilot import COHORT_GEOMETRIES, _wkt_to_geojson_and_centroid
+    from services.agribrain.world_model.canonical_worldline import CanonicalWorldlineService, _parse_utc_iso
 
     artifacts_dir = Path(__file__).resolve().parents[1] / "artifacts"
-    report_dir = artifacts_dir / "archive_pilot_reports" / plot_id
+    ns_name = "default"
+    scoped_report_dir = artifacts_dir / "archive_pilot_reports" / namespace.tenant_id / namespace.farm_id / plot_id
+    alt_scoped_dir = artifacts_dir / "archive_pilot_reports" / namespace.tenant_id / ns_name / plot_id
+    legacy_report_dir = artifacts_dir / "archive_pilot_reports" / plot_id
+    if (scoped_report_dir / "historical_state_intelligence_summary.json").is_file():
+        report_dir = scoped_report_dir
+    elif (alt_scoped_dir / "historical_state_intelligence_summary.json").is_file():
+        report_dir = alt_scoped_dir
+    else:
+        report_dir = legacy_report_dir
     summary_path = report_dir / "historical_state_intelligence_summary.json"
     weather_cache_path = report_dir / "historical_weather_cache.json"
 
     summary_data: Dict[str, Any] = {}
     if summary_path.is_file():
         try:
-            summary_data = json.loads(summary_path.read_text(encoding="utf-8"))
+            loaded_sum = json.loads(summary_path.read_text(encoding="utf-8"))
+            # Enforce strict tenant/farm/plot scope before accepting any persisted report
+            loaded_farm = loaded_sum.get("farm_id")
+            if (
+                str(loaded_sum.get("tenant_id") or "") == namespace.tenant_id
+                and str(loaded_sum.get("plot_id") or "") == plot_id
+                and (loaded_farm is None or str(loaded_farm) == namespace.farm_id)
+            ):
+                summary_data = loaded_sum
         except Exception:
             summary_data = {}
 
-    daily_weather: Dict[str, Dict[str, Any]] = {}
-    if weather_cache_path.is_file():
-        try:
-            wc = json.loads(weather_cache_path.read_text(encoding="utf-8"))
-            daily_weather = dict(wc.get("daily_weather") or {})
-        except Exception:
-            daily_weather = {}
-
-    from services.agribrain.layer0.asmae_scene_products.scene_product_store import SceneProductStore
-    from services.agribrain.layer05_asmae.history.historical_state_reconstructor import HistoricalStateReconstructor
-    from services.agribrain.scripts.run_archive_pilot import COHORT_GEOMETRIES, _wkt_to_geojson_and_centroid
-    from services.agribrain.world_model.canonical_worldline import CanonicalWorldlineService, _parse_utc_iso
+    worldline = CanonicalWorldlineService(
+        root=artifacts_dir / "historical_intelligence_worldlines",
+        require_durable_anchor=False,
+    )
+    reconstructor = HistoricalStateReconstructor(
+        worldline=worldline,
+        checkpoint_root=artifacts_dir / "historical_intelligence_checkpoints",
+        scene_store=SceneProductStore(plot_id),
+    )
 
     polygon_geojson: Optional[Dict[str, Any]] = None
     if plot_id in COHORT_GEOMETRIES:
         polygon_geojson, _, _ = _wkt_to_geojson_and_centroid(COHORT_GEOMETRIES[plot_id])
 
     geometry_hash = str(summary_data.get("geometry_hash") or "")
+    if not geometry_hash and polygon_geojson is not None:
+        from services.agribrain.geometry_contract import compute_geometry_hash
+        geometry_hash = compute_geometry_hash(polygon_geojson)
     if not geometry_hash:
         try:
             head_snap = _plot_snapshot_store.load_snapshot(namespace=namespace, plot_id=plot_id)
@@ -766,32 +783,46 @@ def api_v2_historical_intelligence(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Historical intelligence archive not initialized for this plot",
         )
+    if summary_data and str(summary_data.get("geometry_hash") or "") != geometry_hash:
+        summary_data = {}
 
-    worldline = CanonicalWorldlineService(
-        root=artifacts_dir / "historical_intelligence_worldlines",
-        require_durable_anchor=False,
-    )
-    reconstructor = HistoricalStateReconstructor(
-        worldline=worldline,
-        checkpoint_root=artifacts_dir / "historical_intelligence_checkpoints",
-        scene_store=SceneProductStore(plot_id),
-    )
+    # Version cache strictly by immutable worldline head + checkpoint chain + report mtime (P1-C)
+    wl_events = worldline.load_all_events(plot_id, tenant_id=namespace.tenant_id, namespace=ns_name)
+    wl_head_id = str(wl_events[-1].get("event_id") or "") if wl_events else "none"
+    cp_idx = reconstructor.load_checkpoint_index(plot_id, namespace.tenant_id, ns_name)
+    cp_sig = f"{cp_idx.get('latest_worldline_posterior_event_id') or ''}:{cp_idx.get('updated_at') or ''}:{len(cp_idx.get('active_chain') or [])}"
+    rpt_mtime = int(summary_path.stat().st_mtime_ns) if (summary_data and summary_path.is_file()) else 0
+    archive_state_version = f"wl={len(wl_events)}:{wl_head_id[:12]}|cp={cp_sig}|rpt={rpt_mtime}|gh={geometry_hash[:12]}"
+    cache_key = (namespace.stable_key(), plot_id, target_T, clean_kc, archive_state_version)
 
-    # Tenant isolation strictly enforces authenticated namespace.tenant_id
+    with _HIST_INTEL_RESPONSE_CACHE_LOCK:
+        cached = _HIST_INTEL_RESPONSE_CACHE.get(cache_key)
+    if cached is not None:
+        return Response(content=cached, media_type="application/json", headers={"Cache-Control": "no-cache"})
+
+    daily_weather: Dict[str, Dict[str, Any]] = {}
+    if summary_data and weather_cache_path.is_file():
+        try:
+            wc = json.loads(weather_cache_path.read_text(encoding="utf-8"))
+            daily_weather = dict(wc.get("daily_weather") or {})
+        except Exception:
+            daily_weather = {}
+
+    # Tenant isolation strictly enforces authenticated namespace.tenant_id & namespace.namespace
     q_res = reconstructor.query_as_of(
         plot_id=plot_id,
         geometry_hash=geometry_hash,
         valid_time_T=target_T,
         knowledge_cutoff_K=clean_kc or None,
         tenant_id=namespace.tenant_id,
-        namespace="default",
+        namespace=ns_name,
         daily_weather=daily_weather,
         crop_context={"crop_type": "citrus", "crop_coefficient": 0.75},
         polygon_geojson=polygon_geojson,
         forecast_horizons_days=(7, 14, 28),
     )
 
-    # Strictly filter historical event memory <= target_T without leaking future outcomes
+    # Strictly filter historical event memory <= target_T without leaking future outcomes (P1-D)
     recon_sum = summary_data.get("reconstruction") or {}
     raw_mem = (recon_sum.get("event_memory") or {}).get("events") or []
     t_dt = _parse_utc_iso(target_T)
@@ -820,21 +851,78 @@ def api_v2_historical_intelligence(
             }
         causal_events.append(ev_copy)
 
-    retro = recon_sum.get("retrovalidation") or {}
+    # Strictly separate temporal scopes (P1-D): NEVER emit future-history metrics for an earlier as_of date!
+    avail_dates = q_res.get("available_dates") or []
+    latest_obs_day = avail_dates[-1] if avail_dates else ""
+    is_full_tail_epoch = bool(not clean_kc and latest_obs_day and target_T[:10] >= latest_obs_day)
+    full_retro = recon_sum.get("retrovalidation") or {}
+    full_traj = recon_sum.get("trajectory") or []
+
+    if is_full_tail_epoch and full_retro:
+        causal_retro = full_retro
+        causal_ablation = summary_data.get("cross_layer_ablation") or {}
+        ablation_scope = "full_archive_to_tail"
+        worldline_auth = recon_sum.get("worldline_posterior_event_type") or "ARCHIVE_POSTERIOR_DIAGNOSTIC"
+    else:
+        traj_to_T = [
+            step for step in full_traj
+            if step.get("acquisition_time") and _parse_utc_iso(step["acquisition_time"]) <= t_dt
+        ]
+        causal_weather_T = {
+            str(d): v for d, v in daily_weather.items() if str(d)[:10] <= target_T[:10]
+        }
+        if len(traj_to_T) >= 2:
+            causal_retro = HistoricalRetrovalidator().evaluate(
+                traj_to_T,
+                {"daily_weather": causal_weather_T, "plot_id": plot_id, "geometry_hash": geometry_hash},
+                evaluate_multi_horizon=False,
+            )
+            # Without full held-out multi-horizon verification at partial sub-slice, remain diagnostic
+            q_sub = dict(causal_retro.get("qualification") or {})
+            sub_blocks = list(q_sub.get("block_reasons") or [])
+            if "partial_historical_subslice_no_prospective_horizon_eval" not in sub_blocks:
+                sub_blocks.append("partial_historical_subslice_no_prospective_horizon_eval")
+            q_sub["passed"] = False
+            q_sub["qualification_tier"] = "DIAGNOSTIC_HISTORICAL_RECONSTRUCTION"
+            q_sub["block_reasons"] = sub_blocks
+            causal_retro["qualification"] = q_sub
+        else:
+            causal_retro = {
+                "status": "insufficient_observations_before_cutoff",
+                "summary": {"n_evaluated_points": 0},
+                "raw_uncalibrated_summary": {},
+                "by_channel": {},
+                "baselines": {},
+                "multi_horizon": {"status": "not_evaluated_for_subslice", "by_horizon": {}},
+                "bma": {},
+                "qualification": {"passed": False, "qualification_tier": "DIAGNOSTIC_HISTORICAL_RECONSTRUCTION", "block_reasons": ["insufficient_observations_before_cutoff"]},
+            }
+        causal_ablation = {}
+        ablation_scope = "withheld_historical_subslice_to_prevent_post_cutoff_leakage"
+        worldline_auth = "ARCHIVE_POSTERIOR_DIAGNOSTIC"
+
     payload = {
         "available": bool(q_res.get("available")),
         "reason": q_res.get("reason"),
         "plot_id": plot_id,
         "tenant_id": namespace.tenant_id,
+        "namespace": ns_name,
         "geometry_hash": geometry_hash,
+        "archive_state_version": archive_state_version,
         "as_of_date": target_T[:10],
         "valid_time_T": q_res.get("valid_time_T") or target_T,
         "knowledge_cutoff_K": q_res.get("knowledge_cutoff_K"),
+        "temporal_query_scope": {
+            "mode": "strict_as_of_cutoff",
+            "is_full_tail_epoch": is_full_tail_epoch,
+            "contains_post_cutoff_data": False,
+            "ablation_scope": ablation_scope,
+        },
         "publication_authority": "DIAGNOSTIC_ONLY",
         "claims_numerical_authority": False,
-        "worldline_authority": recon_sum.get("worldline_posterior_event_type") or "ARCHIVE_POSTERIOR_DIAGNOSTIC",
-        "qualification": retro.get("qualification") or {},
-        "available_dates": q_res.get("available_dates") or [],
+        "worldline_authority": worldline_auth,
+        "qualification": causal_retro.get("qualification") or {},
+        "available_dates": avail_dates,
         "assimilated_observation_count": q_res.get("assimilated_observation_count", 0),
         "last_observation_time": q_res.get("last_observation_time"),
         "days_since_last_observation": q_res.get("days_since_last_observation"),
@@ -843,6 +931,7 @@ def api_v2_historical_intelligence(
         "state_support_ledger": q_res.get("state_support_ledger") or {},
         "canonical_grid": q_res.get("canonical_grid"),
         "has_spatial_observations": bool(q_res.get("has_spatial_observations")),
+        "spatial_estimation_mode": "inferred_state_anomaly_field",
         "spatial_surfaces": q_res.get("spatial_surfaces") or [],
         "cross_layer_pre_priors": q_res.get("cross_layer_pre_priors") or {},
         "cross_layer_intelligence": q_res.get("cross_layer_intelligence") or {},
@@ -861,15 +950,16 @@ def api_v2_historical_intelligence(
             ),
         },
         "retrovalidation_summary": {
-            "raw_uncalibrated_summary": retro.get("raw_uncalibrated_summary") or {},
-            "summary": retro.get("summary") or {},
-            "by_channel": retro.get("by_channel") or {},
-            "baselines": retro.get("baselines") or {},
-            "multi_horizon": retro.get("multi_horizon") or {},
-            "bma": retro.get("bma") or {},
-            "qualification": retro.get("qualification") or {},
+            "scope": f"causal_observations_lte_{target_T[:10]}",
+            "raw_uncalibrated_summary": causal_retro.get("raw_uncalibrated_summary") or {},
+            "summary": causal_retro.get("summary") or {},
+            "by_channel": causal_retro.get("by_channel") or {},
+            "baselines": causal_retro.get("baselines") or {},
+            "multi_horizon": causal_retro.get("multi_horizon") or {},
+            "bma": causal_retro.get("bma") or {},
+            "qualification": causal_retro.get("qualification") or {},
         },
-        "cross_layer_ablation": summary_data.get("cross_layer_ablation") or {},
+        "cross_layer_ablation": causal_ablation,
         "manifest_reconciliation": summary_data.get("manifest_reconciliation") or {},
     }
 

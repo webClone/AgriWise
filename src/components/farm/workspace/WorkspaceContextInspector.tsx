@@ -77,7 +77,7 @@ export default function WorkspaceContextInspector({
   activeAsmaeKey?: AsmaeStateKey;
   onSelectAsmaeState?: (key: AsmaeStateKey) => void;
   activeAsmaeAvailability?: AsmaeStateAvailabilityResult;
-  sirePixelHover?: { value: number | null; row: number; col: number; coordinate: [number, number] } | null;
+  sirePixelHover?: { value: number | null; sigma?: number | null; row: number; col: number; coordinate: [number, number] } | null;
   historicalAsOfDate?: string | null;
   historicalLoading?: boolean;
   historicalError?: string | null;
@@ -1131,6 +1131,7 @@ export default function WorkspaceContextInspector({
                 </div>
                 <div style={{ fontSize: "12px", color: "#f1f5f9", margin: "2px 0" }}>
                   Value: <strong style={{ color: "#34d399" }}>{sirePixelHover.value ?? "N/A"}</strong> {activeDef.unit}
+                  {sirePixelHover.sigma != null ? <span style={{ color: "#38bdf8", fontSize: "10.5px" }}> ± {sirePixelHover.sigma}</span> : null}
                 </div>
                 <div style={{ fontSize: "9.5px", color: "#94a3b8" }}>
                   Row {sirePixelHover.row}, Col {sirePixelHover.col} · [{sirePixelHover.coordinate[1].toFixed(5)}°N, {sirePixelHover.coordinate[0].toFixed(5)}°E]

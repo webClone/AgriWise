@@ -22,6 +22,7 @@ from services.agribrain.layer05_asmae.bma.archive_expert_scoring import ArchiveE
 from services.agribrain.layer05_asmae.config import STATE_NAMES
 from services.agribrain.layer05_asmae.deterministic import make_rng
 from services.agribrain.layer05_asmae.observation.index_state_mapping import INDEX_STATE_REGISTRY
+from services.agribrain.layer05_asmae.observation.observation_noise import compute_observation_noise
 from services.agribrain.layer05_asmae.observation.s1_sar_model import predict_sar_observation
 from services.agribrain.layer05_asmae.observation.s2_forward_model import predict_observation
 
@@ -98,6 +99,8 @@ class HistoricalRetrovalidator:
         self,
         trajectory: List[Dict[str, Any]],
         context_summary: Optional[Dict[str, Any]] = None,
+        *,
+        evaluate_multi_horizon: bool = True,
     ) -> Dict[str, Any]:
         """Score strictly prior ASMAE + BMA expert forecasts vs baselines by season."""
         ctx = context_summary or {}
@@ -300,14 +303,19 @@ class HistoricalRetrovalidator:
             for yr, rows in sorted(by_year.items())
         ]
 
-        # Predeclared out-of-sample multi-horizon forecast qualification (untouched held-out seasons!)
-        multi_horizon = self._evaluate_multi_horizon_forecasts(
-            sorted_traj=sorted_traj,
-            ctx=ctx,
-            all_years=sorted(by_year.keys()),
+        # Predeclared out-of-sample multi-horizon forecast qualification (strictly unknown future weather!)
+        multi_horizon = (
+            self._evaluate_multi_horizon_forecasts(
+                sorted_traj=sorted_traj,
+                ctx=ctx,
+                all_years=sorted(by_year.keys()),
+            )
+            if evaluate_multi_horizon
+            else {"status": "skipped_for_fast_causal_slice", "by_horizon": {}, "heldout_years": []}
         )
 
-        # Principled Qualification Check (separates ARCHIVE_POSTERIOR_VALIDATED from ARCHIVE_POSTERIOR_DIAGNOSTIC)
+        # Strict Epistemic Qualification Gate (P1-B): NEVER promote ARCHIVE_POSTERIOR_VALIDATED on negative
+        # overall persistence skill, miscalibrated spread, or unverified prospective horizons!
         block_reasons: List[str] = []
         n_ev = int(summary.get("n_evaluated_points") or 0)
         cov1 = float(summary.get("coverage_1sigma") or 0.0)
@@ -316,32 +324,44 @@ class HistoricalRetrovalidator:
         sk_pers = summary.get("skill_vs_persistence")
         mh_by_h = multi_horizon.get("by_horizon") or {}
         mh_skills = [
-            v.get("skill_vs_persistence")
+            float(v["skill_vs_persistence"])
             for v in mh_by_h.values()
-            if isinstance(v, dict) and v.get("skill_vs_persistence") is not None
+            if isinstance(v, dict) and isinstance(v.get("skill_vs_persistence"), (int, float))
         ]
-        if n_ev < 8:
-            block_reasons.append(f"insufficient_evaluation_samples:{n_ev}<8")
-        if not (0.48 <= cov1 <= 0.88):
-            block_reasons.append(f"coverage_1sigma_uncalibrated:{cov1:.3f}")
-        if cov2 < 0.84:
-            block_reasons.append(f"coverage_2sigma_underdispersed:{cov2:.3f}")
-        if sk_clim is not None and float(sk_clim) < -0.05:
+        mh_mean_skill = float(np.mean(mh_skills)) if mh_skills else None
+        mh_min_skill = min(mh_skills) if mh_skills else None
+
+        if n_ev < 12:
+            block_reasons.append(f"insufficient_evaluation_samples:{n_ev}<12")
+        if not (0.56 <= cov1 <= 0.80):
+            block_reasons.append(f"coverage_1sigma_outside_nominal_band:{cov1:.4f}")
+        if cov2 < 0.88:
+            block_reasons.append(f"coverage_2sigma_underdispersed:{cov2:.4f}")
+        if sk_clim is not None and float(sk_clim) < 0.05:
             block_reasons.append(f"skill_below_climatology:{sk_clim:.4f}")
-        if (
-            (sk_pers is not None and float(sk_pers) < -0.15)
-            and (not mh_skills or max(float(x) for x in mh_skills) < -0.05)
-        ):
-            block_reasons.append(f"multi_horizon_and_step_skill_below_persistence:{sk_pers}")
+        if sk_pers is None or float(sk_pers) < 0.0:
+            block_reasons.append(f"overall_step_skill_below_persistence:{sk_pers}")
+        if evaluate_multi_horizon:
+            if mh_mean_skill is None or mh_mean_skill < 0.0:
+                block_reasons.append(f"prospective_multi_horizon_mean_skill_below_persistence:{mh_mean_skill}")
+            if mh_min_skill is not None and mh_min_skill < -0.10:
+                block_reasons.append(f"prospective_horizon_min_skill_below_threshold:{mh_min_skill:.4f}")
 
         qualification = {
             "passed": len(block_reasons) == 0,
+            "qualification_tier": (
+                "VALIDATED_PROSPECTIVE_QUALIFIED" if len(block_reasons) == 0
+                else "DIAGNOSTIC_HISTORICAL_RECONSTRUCTION"
+            ),
             "block_reasons": block_reasons,
             "criteria": {
-                "min_eval_points": 8,
-                "coverage_1sigma_band": [0.48, 0.88],
-                "min_coverage_2sigma": 0.84,
-                "min_skill_vs_climatology": -0.05,
+                "min_eval_points": 12,
+                "coverage_1sigma_band": [0.56, 0.80],
+                "min_coverage_2sigma": 0.88,
+                "min_skill_vs_climatology": 0.05,
+                "min_overall_skill_vs_persistence": 0.0,
+                "min_prospective_horizon_mean_skill": 0.0,
+                "min_prospective_single_horizon_skill": -0.10,
             },
             "observed_values": {
                 "n_evaluated_points": n_ev,
@@ -349,7 +369,8 @@ class HistoricalRetrovalidator:
                 "coverage_2sigma": cov2,
                 "skill_vs_climatology": sk_clim,
                 "skill_vs_persistence": sk_pers,
-                "multi_horizon_best_skill_vs_persistence": max(mh_skills) if mh_skills else None,
+                "prospective_multi_horizon_mean_skill": round(mh_mean_skill, 6) if mh_mean_skill is not None else None,
+                "prospective_multi_horizon_best_skill": round(max(mh_skills), 6) if mh_skills else None,
             },
         }
 
@@ -408,10 +429,16 @@ class HistoricalRetrovalidator:
         bin_rows: Dict[str, List[Dict[str, Any]]] = {b[0]: [] for b in bins}
         year_rows: Dict[int, List[Dict[str, Any]]] = {yr: [] for yr in heldout_years}
 
-        # Issue causal forecasts at up to ~45 evenly spaced issue points in held-out seasons
+        from services.agribrain.layer05_asmae.history.historical_state_reconstructor import (
+            apply_causal_channel_calibration,
+            build_prospective_weather_series,
+        )
+
+        # Issue causal forecasts at up to ~40 evenly spaced issue points in held-out seasons
         heldout_indices = [idx for idx, (dt, _) in enumerate(parsed_steps) if dt.year in heldout_set]
         stride = max(1, len(heldout_indices) // 40) if heldout_indices else 1
         issue_indices = heldout_indices[::stride]
+        hindcast_bin_rows: Dict[str, List[Dict[str, Any]]] = {b[0]: [] for b in bins}
 
         for idx in issue_indices:
             t_issue, step_i = parsed_steps[idx]
@@ -434,99 +461,109 @@ class HistoricalRetrovalidator:
             if not targets:
                 continue
 
-            # Propagate lightweight 8-member deterministic state forward strictly sequentially across target leads
-            vec_mean = [float(post_m.get(n, 0.25)) for n in STATE_NAMES]
-            vec_std = [max(1e-4, float(post_s.get(n, 0.05))) for n in STATE_NAMES]
-            rng = make_rng(
-                "mh_eval",
-                str(ctx.get("plot_id") or "plot"),
-                str(ctx.get("geometry_hash") or "geom"),
-                extra=t_issue.isoformat(),
-            )
-            ens_fc: Dict[str, List[List[float]]] = {
-                "mz_000": [
-                    [float(vec_mean[k] + (0.5 * vec_std[k] * ((m - 3.5) / 3.5))) for k in range(len(STATE_NAMES))]
-                    for m in range(8)
-                ]
-            }
-            cur_dt = t_issue
-            for _, t_tgt, step_j in targets:
-                lead = (t_tgt - t_issue).total_seconds() / 86400.0
-                if t_tgt > cur_dt:
-                    ens_fc, _ = _forecast_elapsed_interval(
-                        ensemble=ens_fc,
-                        previous_time=cur_dt,
-                        current_time=t_tgt,
-                        priors=step_priors,
-                        crop_context=crop_ctx,
-                        rng=rng,
-                        scenes=[],
-                        weather_daily_series=daily_weather,
-                        soil_context=soil_ctx,
-                        management_events=[],
-                    )
-                    ens_fc = clamp_ensemble(ens_fc)
-                    cur_dt = t_tgt
+            # Strictly prospective unknown-future-weather series at t_issue (ZERO realized future ERA5 weather!)
+            max_tgt_dt = targets[-1][1]
+            prosp_weather = build_prospective_weather_series(daily_weather, t_issue, max_tgt_dt)
 
-                b_name = next((name for name, lo_d, hi_d in bins if lo_d < lead <= hi_d), None)
-                if b_name is None:
-                    continue
+            def _run_horizon_rollout(weather_map: Dict[str, Dict[str, Any]], out_bins: Dict[str, List[Dict[str, Any]]], record_years: bool) -> None:
+                vec_mean = [float(post_m.get(n, 0.25)) for n in STATE_NAMES]
+                vec_std = [max(1e-4, float(post_s.get(n, 0.05))) for n in STATE_NAMES]
+                rng = make_rng(
+                    "mh_eval",
+                    str(ctx.get("plot_id") or "plot"),
+                    str(ctx.get("geometry_hash") or "geom"),
+                    extra=t_issue.isoformat(),
+                )
+                ens_fc: Dict[str, List[List[float]]] = {
+                    "mz_000": [
+                        [float(vec_mean[k] + (0.5 * vec_std[k] * ((m - 3.5) / 3.5))) for k in range(len(STATE_NAMES))]
+                        for m in range(8)
+                    ]
+                }
+                cur_dt = t_issue
+                for _, t_tgt, step_j in targets:
+                    lead = (t_tgt - t_issue).total_seconds() / 86400.0
+                    if t_tgt > cur_dt:
+                        ens_fc, _ = _forecast_elapsed_interval(
+                            ensemble=ens_fc,
+                            previous_time=cur_dt,
+                            current_time=t_tgt,
+                            priors=step_priors,
+                            crop_context=crop_ctx,
+                            rng=rng,
+                            scenes=[],
+                            weather_daily_series=weather_map,
+                            soil_context=soil_ctx,
+                            management_events=[],
+                        )
+                        ens_fc = clamp_ensemble(ens_fc)
+                        cur_dt = t_tgt
 
-                fc_preds_tgt = step_j.get("prior_predictions") or {}
-                for ch, pr_tgt in fc_preds_tgt.items():
-                    mapping = INDEX_STATE_REGISTRY.get(ch)
-                    if mapping is None:
+                    b_name = next((name for name, lo_d, hi_d in bins if lo_d < lead <= hi_d), None)
+                    if b_name is None:
                         continue
-                    y_obs = float(pr_tgt["y_obs"])
-                    m_hats = []
-                    for member in ens_fc["mz_000"]:
-                        yh = predict_sar_observation(ch, member) if mapping.sensor == "S1" else predict_observation(ch, member)
-                        if yh is not None and math.isfinite(float(yh)):
-                            m_hats.append(float(yh))
-                    if not m_hats:
-                        continue
-                    y_raw = float(np.mean(m_hats))
-                    st = cal_snap.get(ch) or {}
-                    eff_n = float(st.get("eff_n", 0.0) or 0.0)
-                    bias_p = float(np.clip(float(st.get("sum_err", 0.0) or 0.0) / (eff_n + 2.0), -0.65, 0.65)) if eff_n > 0 else 0.0
-                    lo_b, hi_b = (-1.0, 1.0) if mapping.sensor == "S2" else (0.0, 1.0)
-                    y_cal = float(np.clip(y_raw + bias_p, lo_b, hi_b))
 
-                    ens_var = float(np.var(m_hats, ddof=1)) if len(m_hats) > 1 else 0.0
-                    var_scale = min(4.5, max(1.0, float(st.get("z2_ema", 1.2) or 1.2)))
-                    sig_base = float(pr_tgt.get("obs_sigma") or 0.04)
-                    sig_fc = math.sqrt(max(1e-6, (ens_var + sig_base * sig_base) * var_scale + 0.0003 * lead + (0.14 ** 2) / (eff_n + 2.0)))
+                    fc_preds_tgt = step_j.get("prior_predictions") or {}
+                    for ch, pr_tgt in fc_preds_tgt.items():
+                        mapping = INDEX_STATE_REGISTRY.get(ch)
+                        if mapping is None:
+                            continue
+                        y_obs = float(pr_tgt["y_obs"])
+                        m_hats = []
+                        for member in ens_fc["mz_000"]:
+                            yh = predict_sar_observation(ch, member) if mapping.sensor == "S1" else predict_observation(ch, member)
+                            if yh is not None and math.isfinite(float(yh)):
+                                m_hats.append(float(yh))
+                        if not m_hats:
+                            continue
+                        y_raw = float(np.mean(m_hats))
+                        ens_var = float(np.var(m_hats, ddof=1)) if len(m_hats) > 1 else 0.0
+                        # Issuance-time nominal clear-sky observation noise ONLY (zero future step_j obs_sigma!)
+                        sig_nominal = compute_observation_noise(ch, cloud_fraction=0.10, valid_support_fraction=0.90)
+                        cal = apply_causal_channel_calibration(
+                            cal_snap.get(ch),
+                            obs_name=ch,
+                            raw_pred_mean=y_raw,
+                            raw_pred_var=ens_var,
+                            obs_sigma=sig_nominal,
+                            elapsed_days=float(lead),
+                        )
+                        y_cal = cal["cal_pred_mean"]
+                        sig_fc = cal["cal_sigma"]
 
-                    # Fair Persistence & Causal Climatology strictly from obs <= t_issue!
-                    prior_ch = [(d_o, v_o) for d_o, c_o, v_o in all_obs_points if c_o == ch and d_o <= t_issue]
-                    if not prior_ch:
-                        continue
-                    y_pers = prior_ch[-1][1]
-                    t_doy = t_tgt.timetuple().tm_yday
-                    clim_vals = [v_o for d_o, v_o in prior_ch if d_o.year < t_tgt.year and _doy_circular_distance(t_doy, d_o.timetuple().tm_yday) <= 21]
-                    y_clim = float(np.median(clim_vals)) if clim_vals else None
+                        # Fair Persistence & Causal Climatology strictly from obs <= t_issue!
+                        prior_ch = [(d_o, v_o) for d_o, c_o, v_o in all_obs_points if c_o == ch and d_o <= t_issue]
+                        if not prior_ch:
+                            continue
+                        y_pers = prior_ch[-1][1]
+                        t_doy = t_tgt.timetuple().tm_yday
+                        clim_vals = [v_o for d_o, v_o in prior_ch if d_o.year < t_tgt.year and _doy_circular_distance(t_doy, d_o.timetuple().tm_yday) <= 21]
+                        y_clim = float(np.median(clim_vals)) if clim_vals else None
 
-                    # Horizon-aware Damped Blended Expert Forecast (ASMAE physics + causal climatology at long lead!)
-                    # Ensures smooth degradation toward seasonal prior beyond 16d while retaining physical state at 1-16d
-                    w_clim = min(0.35, 0.015 * max(0.0, lead - 5.0)) if y_clim is not None else 0.0
-                    y_joint = (1.0 - w_clim) * y_cal + w_clim * (y_clim if y_clim is not None else y_cal)
+                        w_clim = min(0.35, 0.015 * max(0.0, lead - 5.0)) if y_clim is not None else 0.0
+                        y_joint = (1.0 - w_clim) * y_cal + w_clim * (y_clim if y_clim is not None else y_cal)
 
-                    row = {
-                        "channel": ch,
-                        "lead_days": round(lead, 2),
-                        "year": t_tgt.year,
-                        "y_obs": y_obs,
-                        "y_asmae_cal": y_cal,
-                        "y_joint_bma": y_joint,
-                        "y_pers": y_pers,
-                        "y_clim": y_clim,
-                        "sigma": sig_fc,
-                        "abs_z": abs(y_obs - y_joint) / max(sig_fc, 1e-6),
-                        "crps": _gaussian_crps(y_obs, y_joint, sig_fc),
-                    }
-                    bin_rows[b_name].append(row)
-                    if t_tgt.year in year_rows:
-                        year_rows[t_tgt.year].append(row)
+                        row = {
+                            "channel": ch,
+                            "lead_days": round(lead, 2),
+                            "year": t_tgt.year,
+                            "y_obs": y_obs,
+                            "y_asmae_cal": y_cal,
+                            "y_joint_bma": y_joint,
+                            "y_pers": y_pers,
+                            "y_clim": y_clim,
+                            "sigma": sig_fc,
+                            "abs_z": abs(y_obs - y_joint) / max(sig_fc, 1e-6),
+                            "crps": _gaussian_crps(y_obs, y_joint, sig_fc),
+                        }
+                        out_bins[b_name].append(row)
+                        if record_years and t_tgt.year in year_rows:
+                            year_rows[t_tgt.year].append(row)
+
+            # Primary: strictly prospective unknown-future-weather evaluation
+            _run_horizon_rollout(prosp_weather, bin_rows, record_years=True)
+            # Secondary reference: realized-weather hindcast (strictly quarantined from qualification!)
+            _run_horizon_rollout(daily_weather, hindcast_bin_rows, record_years=False)
 
         def _score_mh(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             if not rows:
@@ -559,11 +596,18 @@ class HistoricalRetrovalidator:
 
         return {
             "status": "evaluated",
-            "protocol": "predeclared_prospective_out_of_sample",
+            "protocol": "strict_prospective_unknown_future_weather",
+            "uses_realized_future_weather": False,
+            "uses_target_scene_obs_sigma": False,
             "burnin_calibration_years": burnin_years,
             "heldout_years": heldout_years,
             "by_horizon": {b_name: _score_mh(rows) for b_name, rows in bin_rows.items()},
             "by_heldout_year": {str(yr): _score_mh(rows) for yr, rows in sorted(year_rows.items())},
+            "hindcast_realized_weather_reference": {
+                "epistemic_scope": "retrospective_hindcast_realized_weather",
+                "used_for_qualification": False,
+                "by_horizon": {b_name: _score_mh(rows) for b_name, rows in hindcast_bin_rows.items()},
+            },
         }
 
     @staticmethod

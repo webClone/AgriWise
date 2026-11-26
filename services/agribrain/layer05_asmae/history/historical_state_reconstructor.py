@@ -79,8 +79,155 @@ from services.agribrain.world_model.canonical_worldline import (
 logger = logging.getLogger(__name__)
 
 RECONSTRUCTOR_MODEL_VERSION = "asmae_hist_cross_layer_v2"
-CALIBRATION_VERSION = "asmae_causal_spatial_cal_v3"
+CALIBRATION_VERSION = "asmae_causal_spatial_cal_v4"
 POSTERIOR_CHECKPOINT_SCHEMA = "asmae_posterior_checkpoint_v2"
+
+
+def build_prospective_weather_series(
+    daily_weather: Optional[Dict[str, Dict[str, Any]]],
+    issue_dt: datetime,
+    horizon_end_dt: datetime,
+) -> Dict[str, Dict[str, Any]]:
+    """Build strictly causal weather dict: realized <= issue_dt, causal DOY/trailing climatology > issue_dt."""
+    issue_day = issue_dt.date()
+    end_day = horizon_end_dt.date()
+    issue_iso = issue_day.isoformat()
+    out: Dict[str, Dict[str, Any]] = {}
+    past_rows: List[Tuple[datetime, Dict[str, Any]]] = []
+    for d_str, w in (daily_weather or {}).items():
+        d_clean = str(d_str)[:10]
+        if d_clean <= issue_iso and isinstance(w, dict):
+            out[d_clean] = dict(w)
+            try:
+                past_rows.append((datetime.fromisoformat(d_clean), w))
+            except Exception:
+                continue
+
+    past_rows.sort(key=lambda item: item[0])
+    recent_tail = [w for _, w in past_rows[-7:]] if past_rows else []
+
+    def _doy_dist(d1: int, d2: int) -> int:
+        diff = abs(d1 - d2)
+        return min(diff, 365 - diff)
+
+    def _mean_field(rows: List[Dict[str, Any]], key: str, default_val: float) -> float:
+        vals = [float(r[key]) for r in rows if isinstance(r.get(key), (int, float)) and math.isfinite(float(r[key]))]
+        return round(float(np.mean(vals)), 3) if vals else default_val
+
+    cur = issue_day + timedelta(days=1)
+    while cur <= end_day:
+        c_iso = cur.isoformat()
+        c_doy = cur.timetuple().tm_yday
+        doy_rows = [
+            w for p_dt, w in past_rows
+            if p_dt.year < cur.year and _doy_dist(c_doy, p_dt.timetuple().tm_yday) <= 21
+        ]
+        ref_rows = doy_rows if doy_rows else recent_tail
+        if ref_rows:
+            t_max = _mean_field(ref_rows, "temp_max", 22.0)
+            t_min = _mean_field(ref_rows, "temp_min", 12.0)
+            et0_v = _mean_field(ref_rows, "et0", 3.0)
+            precip_vals = [
+                float(r["precipitation"]) for r in ref_rows
+                if isinstance(r.get("precipitation"), (int, float)) and math.isfinite(float(r["precipitation"]))
+            ]
+            # Expected daily climatological precipitation (no future storm knowledge!)
+            precip_exp = round(float(np.mean(precip_vals)), 3) if precip_vals else 0.0
+            out[c_iso] = {
+                "temp_max": t_max,
+                "temp_min": t_min,
+                "precipitation": precip_exp,
+                "et0": et0_v,
+                "source_role": "causal_doy_climatology_projection",
+            }
+        cur += timedelta(days=1)
+    return out
+
+
+def apply_causal_channel_calibration(
+    cal_entry: Optional[Dict[str, Any]],
+    *,
+    obs_name: str,
+    raw_pred_mean: float,
+    raw_pred_var: float,
+    obs_sigma: float,
+    elapsed_days: float = 0.0,
+) -> Dict[str, float]:
+    """Apply strictly causal Bayesian linear-shrinkage operator & variance calibration from t < now."""
+    st = cal_entry or {}
+    eff_n = float(st.get("eff_n", 0.0) or 0.0)
+    sum_x = float(st.get("sum_x", 0.0) or 0.0)
+    sum_y = float(st.get("sum_y", 0.0) or 0.0)
+    sum_xx = float(st.get("sum_xx", 0.0) or 0.0)
+    sum_xy = float(st.get("sum_xy", 0.0) or 0.0)
+    sum_err = float(st.get("sum_err", 0.0) or 0.0)
+
+    slope_prior = 1.0
+    bias_prior = 0.0
+    if eff_n > 0.0:
+        if sum_x != 0.0 or sum_y != 0.0:
+            mx = sum_x / eff_n
+            my = sum_y / eff_n
+            if eff_n >= 4.0:
+                s_xx = max(0.0, sum_xx - (sum_x * sum_x) / eff_n)
+                s_xy = sum_xy - (sum_x * sum_y) / eff_n
+                kappa = 0.03
+                slope_prior = float(np.clip((s_xy + kappa * 1.0) / (s_xx + kappa), 0.20, 2.25))
+            bias_prior = float(np.clip((eff_n / (eff_n + 2.0)) * (my - slope_prior * mx), -0.65, 0.65))
+        else:
+            bias_prior = float(np.clip(sum_err / (eff_n + 2.0), -0.65, 0.65))
+
+    lo_b, hi_b = _CHANNEL_BOUNDS.get(obs_name, (-1.0, 1.0))
+    cal_pred_mean = float(np.clip(slope_prior * raw_pred_mean + bias_prior, lo_b, hi_b))
+
+    bias_epistemic_var = (0.10 ** 2) / (eff_n + 2.0)
+    gap_infl_var = 0.00018 * min(45.0, max(0.0, float(elapsed_days)))
+    base_var = max(
+        1e-8,
+        (slope_prior * slope_prior) * raw_pred_var + (obs_sigma * obs_sigma) + bias_epistemic_var + gap_infl_var,
+    )
+    z2_prev = float(st.get("z2_ema", 1.0) if st.get("z2_ema") is not None else 1.0)
+    var_scale_prior = float(min(4.5, max(0.30, z2_prev)))
+    cal_var = max(1e-8, base_var * var_scale_prior)
+    return {
+        "cal_pred_mean": cal_pred_mean,
+        "bias_prior": bias_prior,
+        "slope_prior": slope_prior,
+        "cal_sigma": math.sqrt(cal_var),
+        "unscaled_sigma": math.sqrt(base_var),
+        "var_scale_prior": var_scale_prior,
+    }
+
+
+def update_channel_cal_entry(
+    cal_entry: Optional[Dict[str, Any]],
+    *,
+    obs_val: float,
+    raw_pred: float,
+    cal_pred: float,
+    unscaled_sig: float,
+) -> Dict[str, Any]:
+    """Update causal sufficient statistics AFTER scoring current observation."""
+    st = cal_entry or {}
+    decay = 0.92
+    eff_n = decay * float(st.get("eff_n", 0.0) or 0.0) + 1.0
+    sum_x = decay * float(st.get("sum_x", 0.0) or 0.0) + float(raw_pred)
+    sum_y = decay * float(st.get("sum_y", 0.0) or 0.0) + float(obs_val)
+    sum_xx = decay * float(st.get("sum_xx", 0.0) or 0.0) + float(raw_pred) * float(raw_pred)
+    sum_xy = decay * float(st.get("sum_xy", 0.0) or 0.0) + float(raw_pred) * float(obs_val)
+    sum_err = decay * float(st.get("sum_err", 0.0) or 0.0) + (float(obs_val) - float(raw_pred))
+    z2_sample = ((float(obs_val) - float(cal_pred)) ** 2) / max(1e-6, float(unscaled_sig) * float(unscaled_sig))
+    z2_prev = float(st.get("z2_ema", 1.0) if st.get("z2_ema") is not None else 1.0)
+    return {
+        "sum_err": round(sum_err, 8),
+        "sum_x": round(sum_x, 8),
+        "sum_y": round(sum_y, 8),
+        "sum_xx": round(sum_xx, 8),
+        "sum_xy": round(sum_xy, 8),
+        "eff_n": round(eff_n, 6),
+        "z2_ema": round(0.86 * z2_prev + 0.14 * min(6.0, z2_sample), 6),
+        "obs_count": int(st.get("obs_count", 0) or 0) + 1,
+    }
 
 _CHANNEL_BOUNDS: Dict[str, Tuple[float, float]] = {
     "ndvi": (-1.0, 1.0),
@@ -878,20 +1025,21 @@ class HistoricalStateReconstructor:
             raw_var = max(1e-8, pred_var + sigma_obs * sigma_obs)
             raw_sigma = math.sqrt(raw_var)
 
-            # Strictly causal prior bias & predictive spread calibration from observations < t
-            st = cal_map.get(obs_name) or {}
-            eff_n = float(st.get("eff_n", 0.0) or 0.0)
-            sum_err = float(st.get("sum_err", 0.0) or 0.0)
-            raw_bias_prior = (sum_err / (eff_n + 2.0)) if eff_n > 0.0 else 0.0
-            bias_prior = float(np.clip(raw_bias_prior, -0.65, 0.65))
-            lo_b, hi_b = _CHANNEL_BOUNDS.get(obs_name, (-1.0, 1.0))
-            cal_pred_mean = float(np.clip(raw_pred_mean + bias_prior, lo_b, hi_b))
-
-            bias_epistemic_var = (0.14 ** 2) / (eff_n + 2.0)
-            var_scale_prior = min(4.5, max(1.0, float(st.get("z2_ema", 1.2) or 1.2)))
-            gap_infl_var = 0.00025 * min(45.0, max(0.0, float(elapsed_days)))
-            cal_var = max(1e-8, raw_var * var_scale_prior + bias_epistemic_var + gap_infl_var)
-            cal_sigma = math.sqrt(cal_var)
+            # Strictly causal prior linear-shrinkage & predictive spread calibration from observations < t
+            cal = apply_causal_channel_calibration(
+                cal_map.get(obs_name),
+                obs_name=obs_name,
+                raw_pred_mean=raw_pred_mean,
+                raw_pred_var=pred_var,
+                obs_sigma=sigma_obs,
+                elapsed_days=elapsed_days,
+            )
+            cal_pred_mean = cal["cal_pred_mean"]
+            bias_prior = cal["bias_prior"]
+            slope_prior = cal["slope_prior"]
+            cal_sigma = cal["cal_sigma"]
+            unscaled_sigma = cal["unscaled_sigma"]
+            var_scale_prior = cal["var_scale_prior"]
 
             residual_cal = float(obs_val) - cal_pred_mean
             residual_raw = float(obs_val) - raw_pred_mean
@@ -902,7 +1050,9 @@ class HistoricalStateReconstructor:
                 "y_pred_calibrated": round(cal_pred_mean, 6),
                 "y_pred_raw": round(raw_pred_mean, 6),
                 "bias_offset_applied": round(bias_prior, 6),
+                "slope_applied": round(slope_prior, 6),
                 "pred_sigma": round(cal_sigma, 6),
+                "unscaled_pred_sigma": round(unscaled_sigma, 6),
                 "raw_pred_sigma": round(raw_sigma, 6),
                 "var_scale_applied": round(var_scale_prior, 4),
                 "obs_sigma": round(float(sigma_obs), 6),
@@ -1073,6 +1223,7 @@ class HistoricalStateReconstructor:
                 for r in range(H)
             ]
             stype = surface_type_map[s_name]
+            is_sar_driven = s_name in ("root_zone_water", "surface_wetness_event", "structure")
             surfaces.append({
                 "surface_id": f"hist_{stype.lower()}",
                 "type": stype,
@@ -1081,6 +1232,8 @@ class HistoricalStateReconstructor:
                 "diagnostic_only": True,
                 "prescription_driver_allowed": False,
                 "state_update_allowed": False,
+                "spatial_estimation_mode": "inferred_state_anomaly_field",
+                "direct_pixel_measurement": False,
                 "resolution_m": res_m,
                 "effective_resolution_m": res_m,
                 "bounds": bounds,
@@ -1090,6 +1243,13 @@ class HistoricalStateReconstructor:
                 "provenance": {
                     "has_spatial_grid": True,
                     "reprojected_to_canonical_grid": True,
+                    "spatial_estimation_mode": "inferred_state_anomaly_field",
+                    "direct_pixel_measurement": False,
+                    "grounding_note": (
+                        "Inferred 2D field combining Sentinel-1 SAR backscatter spatial anomalies with L3 water balance & EnKF posterior mean; not a direct soil-moisture pixel sensor."
+                        if is_sar_driven
+                        else "Inferred 2D field combining Sentinel-2 optical spectral anomalies (NDVI/NDMI) with EnKF posterior mean & evolving spatial uncertainty."
+                    ),
                     "crs": canonical_grid.get("crs", "EPSG:4326"),
                     "transform": canonical_grid.get("transform"),
                 },
@@ -1414,8 +1574,9 @@ class HistoricalStateReconstructor:
                 )
                 pred_rec = prior_predictions.get(obs_name) or {}
                 bias_prior = float(pred_rec.get("bias_offset_applied", 0.0) or 0.0)
+                slope_prior = max(0.20, float(pred_rec.get("slope_applied", 1.0) or 1.0))
                 lo_b, hi_b = _CHANNEL_BOUNDS.get(obs_name, (-1.0, 1.0))
-                obs_for_filter = float(np.clip(float(obs_val) - bias_prior, lo_b, hi_b))
+                obs_for_filter = float(np.clip((float(obs_val) - bias_prior) / slope_prior, lo_b, hi_b))
                 r_var = sigma_obs * sigma_obs
                 _proxy_update_single_obs(
                     ensemble, self.node_ids, obs_name, obs_for_filter,
@@ -1426,28 +1587,18 @@ class HistoricalStateReconstructor:
                     accepted_counts[s_name] = accepted_counts.get(s_name, 0) + 1
                 updated_channels.append(obs_name)
 
-                # Causally update channel offset & variance calibration AFTER scoring obs_val
+                # Causally update channel linear-shrinkage & variance calibration AFTER scoring obs_val
                 if pred_rec:
                     raw_pred = float(pred_rec.get("y_pred_raw", obs_val))
                     cal_pred = float(pred_rec.get("y_pred_calibrated", obs_val))
-                    raw_sig = max(1e-4, float(pred_rec.get("raw_pred_sigma", sigma_obs)))
-                    cal_sig = max(1e-4, float(pred_rec.get("pred_sigma", sigma_obs)))
-                    st = channel_cal.get(obs_name) or {
-                        "sum_err": 0.0,
-                        "eff_n": 0.0,
-                        "z2_ema": 1.2,
-                        "obs_count": 0,
-                    }
-                    raw_err = float(obs_val) - raw_pred
-                    # Normalized squared residual relative to raw variance measures true variance multiplier
-                    z2_sample = ((float(obs_val) - cal_pred) ** 2) / max(1e-6, raw_sig * raw_sig)
-                    decay = 0.90
-                    channel_cal[obs_name] = {
-                        "sum_err": round(decay * float(st.get("sum_err", 0.0)) + raw_err, 8),
-                        "eff_n": round(decay * float(st.get("eff_n", 0.0)) + 1.0, 6),
-                        "z2_ema": round(0.88 * float(st.get("z2_ema", 1.2)) + 0.12 * min(6.0, z2_sample), 6),
-                        "obs_count": int(st.get("obs_count", 0)) + 1,
-                    }
+                    unscaled_sig = max(1e-4, float(pred_rec.get("unscaled_pred_sigma", pred_rec.get("raw_pred_sigma", sigma_obs))))
+                    channel_cal[obs_name] = update_channel_cal_entry(
+                        channel_cal.get(obs_name),
+                        obs_val=float(obs_val),
+                        raw_pred=raw_pred,
+                        cal_pred=cal_pred,
+                        unscaled_sig=unscaled_sig,
+                    )
 
             ensemble = clamp_ensemble(ensemble)
             assimilated_ids.append(ev_id)
@@ -2051,8 +2202,9 @@ class HistoricalStateReconstructor:
                 )
                 pred_rec = prior_preds.get(obs_name) or {}
                 bias_prior = float(pred_rec.get("bias_offset_applied", 0.0) or 0.0)
+                slope_prior = max(0.20, float(pred_rec.get("slope_applied", 1.0) or 1.0))
                 lo_b, hi_b = _CHANNEL_BOUNDS.get(obs_name, (-1.0, 1.0))
-                obs_for_filter = float(np.clip(float(obs_val) - bias_prior, lo_b, hi_b))
+                obs_for_filter = float(np.clip((float(obs_val) - bias_prior) / slope_prior, lo_b, hi_b))
                 _proxy_update_single_obs(
                     ensemble, self.node_ids, obs_name, obs_for_filter,
                     mapping, sigma_obs, sigma_obs * sigma_obs, rng, target_indices=target_indices,
@@ -2062,15 +2214,14 @@ class HistoricalStateReconstructor:
                 if pred_rec:
                     raw_pred = float(pred_rec.get("y_pred_raw", obs_val))
                     cal_pred = float(pred_rec.get("y_pred_calibrated", obs_val))
-                    raw_sig = max(1e-4, float(pred_rec.get("raw_pred_sigma", sigma_obs)))
-                    st = channel_cal.get(obs_name) or {"sum_err": 0.0, "eff_n": 0.0, "z2_ema": 1.2, "obs_count": 0}
-                    z2_sample = ((float(obs_val) - cal_pred) ** 2) / max(1e-6, raw_sig * raw_sig)
-                    channel_cal[obs_name] = {
-                        "sum_err": 0.96 * float(st.get("sum_err", 0.0)) + (float(obs_val) - raw_pred),
-                        "eff_n": 0.90 * float(st.get("eff_n", 0.0)) + 1.0,
-                        "z2_ema": 0.88 * float(st.get("z2_ema", 1.2)) + 0.12 * min(6.0, z2_sample),
-                        "obs_count": int(st.get("obs_count", 0)) + 1,
-                    }
+                    unscaled_sig = max(1e-4, float(pred_rec.get("unscaled_pred_sigma", pred_rec.get("raw_pred_sigma", sigma_obs))))
+                    channel_cal[obs_name] = update_channel_cal_entry(
+                        channel_cal.get(obs_name),
+                        obs_val=float(obs_val),
+                        raw_pred=raw_pred,
+                        cal_pred=cal_pred,
+                        unscaled_sig=unscaled_sig,
+                    )
             ensemble = clamp_ensemble(ensemble)
             step_means, step_stds, _, _, _ = _summarize_13_state_ensemble(ensemble, self.node_ids)
             if isinstance(obs_channels.get("ndvi"), (int, float)):
@@ -2171,12 +2322,17 @@ class HistoricalStateReconstructor:
             gap_days=state_age_days,
         )
 
-        # Causal multi-horizon forward forecast issued at T using strictly info <= T
+        # Causal multi-horizon forward forecast issued at T using strictly info <= T + causal DOY weather
+        sorted_horizons = sorted({int(h) for h in forecast_horizons_days if int(h) > 0})
+        max_h = max(sorted_horizons) if sorted_horizons else 28
+        causal_fc_weather = build_prospective_weather_series(
+            daily_weather, t_dt, t_dt + timedelta(days=max_h)
+        )
         causal_forecasts: List[Dict[str, Any]] = []
         fc_ens = copy.deepcopy(ensemble)
         fc_rng = make_rng("asmae_causal_fc", plot_id, geometry_hash, t_dt.isoformat())
         cur_fc_dt = t_dt
-        for h_days in sorted({int(h) for h in forecast_horizons_days if int(h) > 0}):
+        for h_days in sorted_horizons:
             target_fc_dt = t_dt + timedelta(days=h_days)
             fc_ens, _ = _forecast_elapsed_interval(
                 ensemble=fc_ens,
@@ -2186,7 +2342,7 @@ class HistoricalStateReconstructor:
                 crop_context=crop_ctx,
                 rng=fc_rng,
                 scenes=[],
-                weather_daily_series=weather_series,
+                weather_daily_series=causal_fc_weather,
                 soil_context=soil_ctx,
                 management_events=[],
             )
