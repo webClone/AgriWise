@@ -177,8 +177,8 @@ class HistoricalEventMemory:
             w = daily_weather.get(d_str)
             day_dt = datetime.combine(cur_day, datetime.min.time(), tzinfo=timezone.utc)
             if isinstance(w, dict):
-                precip = w.get("precipitation")
-                et0 = w.get("et0")
+                precip = w.get("precipitation") if w.get("precipitation") is not None else w.get("precipitation_mm")
+                et0 = w.get("et0") if w.get("et0") is not None else w.get("et0_mm")
                 if isinstance(precip, (int, float)) and float(precip) >= self.rain_threshold_mm:
                     # Group daily heavy rain pulses without over-counting adjacent days unless separated
                     if not (events and events[-1].event_category == "rainfall_forcing"
@@ -314,6 +314,23 @@ class HistoricalEventMemory:
                         competing_explanations={"confirmed_management_or_sensor_record": 1.0},
                         consistency_uncertainty=0.0,
                         trigger_evidence={"source": "management_log", **entry},
+                    ))
+                    seq_counter += 1
+                elif any(k in etype for k in ("scout", "pest", "disease", "compaction", "observation")):
+                    events.append(ReconstructedMemoryEvent(
+                        event_id=f"mem_scout_obs_{seq_counter:04d}",
+                        event_category="field_scouting_confirmed",
+                        epistemic_class="agronomic_event_confirmed",
+                        hypothesis_status="confirmed",
+                        start_time=day_dt.isoformat(),
+                        peak_time=day_dt.isoformat(),
+                        end_time=(day_dt + timedelta(days=1)).isoformat(),
+                        season_year=day_dt.year,
+                        severity=round(max(0.1, min(1.0, float(entry.get("severity_score") or 0.6))), 4),
+                        confidence=0.97,
+                        competing_explanations={"verified_field_scouting": 1.0},
+                        consistency_uncertainty=0.0,
+                        trigger_evidence={"source": "verified_field_scouting_observation", **entry},
                     ))
                     seq_counter += 1
 

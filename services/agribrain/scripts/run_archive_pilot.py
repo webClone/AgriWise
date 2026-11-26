@@ -118,19 +118,29 @@ def _fetch_real_daily_weather(
     daily_weather: Dict[str, Dict[str, Any]] = {}
     for d_key, entry in daily_series.items():
         if d_key and isinstance(entry, dict):
-            daily_weather[str(d_key)[:10]] = {
+            row_w: Dict[str, Any] = {
                 "temp_max": entry.get("temp_max_c"),
                 "temp_min": entry.get("temp_min_c"),
                 "precipitation": entry.get("precipitation_mm"),
                 "et0": entry.get("et0_mm"),
-                "source_role": role_val,
+                "humidity_mean_pct": entry.get("humidity_mean_pct"),
+                "wind_speed_m_s": entry.get("wind_speed_m_s"),
+                "source_role": entry.get("source_role") or role_val,
+                "source_reality": entry.get("source_reality") or "reanalysis_archive",
+                "reanalysis_lag_days": entry.get("reanalysis_lag_days", 5),
+                "is_reanalysis_backfill": entry.get("is_reanalysis_backfill", True),
+                "available_at": entry.get("available_at"),
             }
+            if entry.get("observed_before"):
+                row_w["observed_before"] = entry["observed_before"]
+            daily_weather[str(d_key)[:10]] = row_w
     return daily_weather, {
         "status": norm.get("weather_archive_status", "available" if daily_weather else "unavailable"),
         "days": len(daily_weather),
         "provider": source_name,
         "source_reality": norm.get("weather_source_reality", "reanalysis_archive"),
         "weather_archive_hash": norm.get("weather_archive_hash"),
+        "weather_provenance_summary": norm.get("weather_provenance_summary") or {},
     }
 
 def get_lookback_years(depth_mode: str) -> float:
@@ -573,6 +583,249 @@ def _build_local_cache_fetcher(
     return _fetcher
 
 
+REAL_COHORT_PLOT_IDS: tuple[str, ...] = (
+    "6a09d9e91dd0c7ed6fce7d50",
+    "6a1dec37c645fc20253af5bb",
+    "69de624047f8c01c4979d381",
+    "69fb754f2ab4b04e9f00394c",
+    "699d819a55a7933e54521aad",
+    "6aa0082f01e5f3c405fd9734",
+)
+
+
+def _extract_geojson_and_centroid(raw_gj: Any) -> Optional[tuple[Dict[str, Any], float, float]]:
+    """Normalize a GeoJSON Feature/Geometry Polygon/MultiPolygon and compute centroid (lat, lng)."""
+    if not isinstance(raw_gj, dict):
+        return None
+    geom = raw_gj.get("geometry") if raw_gj.get("type") == "Feature" else raw_gj
+    if not isinstance(geom, dict):
+        return None
+    gtype = geom.get("type")
+    coords = geom.get("coordinates")
+    if not coords:
+        return None
+    ring = coords[0][0] if gtype == "MultiPolygon" else (coords[0] if gtype == "Polygon" else None)
+    if not ring:
+        return None
+    pts = ring[:-1] if len(ring) > 3 and ring[0] == ring[-1] else ring
+    lng = sum(float(p[0]) for p in pts) / len(pts)
+    lat = sum(float(p[1]) for p in pts) / len(pts)
+    feat = raw_gj if raw_gj.get("type") == "Feature" else {"type": "Feature", "properties": {}, "geometry": geom}
+    return feat, float(lat), float(lng)
+
+
+def _json_safe_doc(val: Any) -> Any:
+    """Convert BSON/datetime objects into deterministic JSON-serializable values."""
+    if isinstance(val, dict):
+        return {str(k): _json_safe_doc(v) for k, v in val.items()}
+    if isinstance(val, (list, tuple)):
+        return [_json_safe_doc(v) for v in val]
+    if isinstance(val, datetime):
+        return val.isoformat()
+    if type(val).__name__ == "ObjectId":
+        return str(val)
+    return val
+
+
+def _stamp_weather_provenance(daily_weather: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Ensure cached daily ERA5 rows carry explicit source_role and publication-lag provenance."""
+    from datetime import date as date_cls
+
+    stamped: Dict[str, Dict[str, Any]] = {}
+    for d_key, w in (daily_weather or {}).items():
+        if not isinstance(w, dict):
+            continue
+        d_clean = str(d_key)[:10]
+        row = dict(w)
+        if row.get("temp_max") is None and row.get("temp_max_c") is not None:
+            row["temp_max"] = row.get("temp_max_c")
+        if row.get("temp_min") is None and row.get("temp_min_c") is not None:
+            row["temp_min"] = row.get("temp_min_c")
+        if row.get("precipitation") is None and row.get("precipitation_mm") is not None:
+            row["precipitation"] = row.get("precipitation_mm")
+        if row.get("et0") is None and row.get("et0_mm") is not None:
+            row["et0"] = row.get("et0_mm")
+        reality = str(row.get("source_reality") or "reanalysis_archive")
+        row.setdefault("source_reality", reality)
+        row.setdefault("source_role", "HISTORICAL_REANALYSIS" if reality == "reanalysis_archive" else "OBSERVED_WEATHER")
+        lag_d = int(row.get("reanalysis_lag_days") if row.get("reanalysis_lag_days") is not None else (5 if reality == "reanalysis_archive" else 0))
+        row["reanalysis_lag_days"] = lag_d
+        row.setdefault("is_reanalysis_backfill", reality == "reanalysis_archive")
+        if not row.get("available_at"):
+            try:
+                avail_day = date_cls.fromisoformat(d_clean) + timedelta(days=lag_d)
+                row["available_at"] = datetime(avail_day.year, avail_day.month, avail_day.day, tzinfo=timezone.utc).isoformat()
+            except ValueError:
+                pass
+        stamped[d_clean] = row
+    return stamped
+
+
+def _resolve_plot_domain_context(
+    plot_id: str,
+    artifacts_dir: Path,
+    *,
+    offline: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """Resolve plot geometry, tenant/farm identity, soil, crop cycle, and withheld field records dynamically."""
+    meta_dir = artifacts_dir / "multiplot_meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    domain_cache_path = meta_dir / f"{plot_id}_domain.json"
+
+    dom: Dict[str, Any] = {}
+    domain_source = "static_fallback"
+    is_offline = bool(offline is True or os.environ.get("AGRIWISE_ARCHIVE_OFFLINE", "false").lower() == "true")
+
+    if not is_offline:
+        try:
+            from dotenv import load_dotenv
+            from bson import ObjectId
+            from pymongo import MongoClient
+
+            load_dotenv(Path(__file__).resolve().parents[3] / ".env")
+            db_url = os.environ.get("DATABASE_URL", "").strip()
+            if db_url and ObjectId.is_valid(plot_id):
+                client = MongoClient(db_url, serverSelectionTimeoutMS=2500)
+                db = client.get_default_database()
+                oid = ObjectId(plot_id)
+                plot_doc = db["Plot"].find_one({"_id": oid}) or {}
+                if plot_doc:
+                    sa_list = list(db["SoilAnalysis"].find({"plotId": {"$in": [oid, plot_id]}}).sort("date", -1))
+                    cc_list = list(db["CropCycle"].find({"plotId": {"$in": [oid, plot_id]}}).sort("createdAt", -1))
+                    cids = [c["_id"] for c in cc_list]
+                    sensors = list(db["Sensor"].find({"plotId": {"$in": [oid, plot_id]}}))
+                    sens_by_id = {s["_id"]: s for s in sensors}
+                    sids = list(sens_by_id.keys())
+                    raw_sr = list(
+                        db["SensorReading"]
+                        .find({"$or": [{"sensorId": {"$in": sids}}, {"plotId": {"$in": [oid, plot_id]}}]})
+                        .sort("timestamp", -1)
+                        .limit(5000)
+                    )
+                    enriched_sr = []
+                    for r in raw_sr:
+                        s_meta = sens_by_id.get(r.get("sensorId")) or {}
+                        rec = dict(r)
+                        rec["vendor"] = rec.get("vendor") or s_meta.get("vendor") or ""
+                        rec["deviceId"] = rec.get("deviceId") or s_meta.get("deviceId") or ""
+                        rec["sensorType"] = s_meta.get("type")
+                        if rec.get("depth_cm") is None and s_meta.get("depthCm") is not None:
+                            rec["depth_cm"] = s_meta.get("depthCm")
+                        enriched_sr.append(rec)
+                    co_list = list(
+                        db["CropObservation"]
+                        .find({"$or": [{"plotId": {"$in": [oid, plot_id]}}, {"cropCycleId": {"$in": cids}}]})
+                        .limit(200)
+                    )
+                    ct_list = list(
+                        db["CropTask"]
+                        .find({"$or": [{"plotId": {"$in": [oid, plot_id]}}, {"cropCycleId": {"$in": cids}}]})
+                        .limit(200)
+                    )
+                    dom = _json_safe_doc({
+                        "plot_doc": plot_doc,
+                        "soil_analyses": sa_list,
+                        "crop_cycles": cc_list,
+                        "sensors": sensors,
+                        "sensor_readings": enriched_sr,
+                        "crop_observations": co_list,
+                        "crop_tasks": ct_list,
+                    })
+                    domain_cache_path.write_text(json.dumps(dom, indent=2), encoding="utf-8")
+                    domain_source = "mongodb_domain_registry"
+                client.close()
+        except Exception:
+            dom = {}
+
+    if not dom and domain_cache_path.is_file():
+        try:
+            dom = json.loads(domain_cache_path.read_text(encoding="utf-8"))
+            domain_source = "local_domain_metadata_cache"
+        except Exception:
+            dom = {}
+
+    plot_doc = dict(dom.get("plot_doc") or {})
+    soil_analyses = list(dom.get("soil_analyses") or [])
+    crop_cycles = list(dom.get("crop_cycles") or [])
+    plot_name = str(plot_doc.get("name") or "")
+
+    from services.agribrain.layer05_asmae.history.independent_field_validation import (
+        build_soil_and_crop_context_from_domain,
+    )
+
+    fallback_crop = "wheat" if ("wheat" in plot_name.lower() or "pivot" in plot_name.lower()) else "citrus"
+    soil_ctx, crop_ctx = build_soil_and_crop_context_from_domain(
+        plot_doc=plot_doc or None,
+        soil_analysis=soil_analyses[0] if soil_analyses else None,
+        crop_cycle=crop_cycles[0] if crop_cycles else None,
+        fallback_crop=fallback_crop,
+    )
+
+    parsed_geom = _extract_geojson_and_centroid(plot_doc.get("geoJson") or plot_doc.get("geometry"))
+    if parsed_geom is not None:
+        geom_geojson, centroid_lat, centroid_lng = parsed_geom
+    else:
+        geom_wkt = COHORT_GEOMETRIES.get(plot_id)
+        if not geom_wkt:
+            raise ValueError(f"No geometry defined in MongoDB or COHORT_GEOMETRIES for plot {plot_id}")
+        geom_geojson, centroid_lat, centroid_lng = _wkt_to_geojson_and_centroid(geom_wkt)
+
+    tenant_id = str(
+        plot_doc.get("tenantId")
+        or ("697ddd3bd4195b809226a67b" if plot_id == "6a09d9e91dd0c7ed6fce7d50" else "default_tenant")
+    )
+    farm_id = str(
+        plot_doc.get("farmId")
+        or ("69ad7b6f7e6843e8234afcf6" if plot_id == "6a09d9e91dd0c7ed6fce7d50" else "default_farm")
+    )
+
+    # Extract strictly confirmed/completed management & scouting observations (never unconfirmed planned!)
+    confirmed_mgmt: List[Dict[str, Any]] = []
+    for tk in dom.get("crop_tasks") or []:
+        is_completed = bool(tk.get("completed")) or str(tk.get("status") or "").upper() in (
+            "COMPLETED", "APPLIED", "OBSERVED_CONFIRMED"
+        )
+        if not is_completed:
+            continue
+        ts_val = tk.get("completedAt") or tk.get("dueDate") or tk.get("createdAt")
+        if ts_val:
+            confirmed_mgmt.append({
+                "type": str(tk.get("type") or "agronomic_operation").lower(),
+                "date": str(ts_val)[:10],
+                "timestamp": str(ts_val),
+                "status": "CONFIRMED",
+                "title": str(tk.get("title") or ""),
+            })
+    for co in dom.get("crop_observations") or []:
+        ts_val = co.get("createdAt") or co.get("timestamp")
+        if ts_val:
+            confirmed_mgmt.append({
+                "type": f"scouting_{str(co.get('type') or 'observation').lower()}",
+                "date": str(ts_val)[:10],
+                "timestamp": str(ts_val),
+                "status": "OBSERVED_CONFIRMED",
+                "title": str(co.get("title") or ""),
+            })
+
+    return {
+        "plot_id": plot_id,
+        "plot_name": plot_name or plot_id,
+        "tenant_id": tenant_id,
+        "farm_id": farm_id,
+        "geom_geojson": geom_geojson,
+        "centroid_lat": centroid_lat,
+        "centroid_lng": centroid_lng,
+        "soil_context": soil_ctx,
+        "crop_context": crop_ctx,
+        "confirmed_management": confirmed_mgmt,
+        "sensor_readings": list(dom.get("sensor_readings") or []),
+        "soil_analyses": soil_analyses,
+        "crop_observations": list(dom.get("crop_observations") or []),
+        "crop_tasks": list(dom.get("crop_tasks") or []),
+        "domain_source": domain_source,
+    }
+
+
 def run_historical_intelligence_for_plot(
     plot_id: str,
     workspace_root: str = ".",
@@ -580,34 +833,94 @@ def run_historical_intelligence_for_plot(
     skip_bootstrap: bool = False,
     local_scene_cache: bool = False,
 ) -> Dict[str, Any]:
-    """Run full 2015–present Historical State Intelligence reconstruction + event memory + retrovalidation."""
+    """Run canonical Historical State Intelligence reconstruction across real plot domain metadata."""
     repo_root = str(Path(__file__).resolve().parents[3])
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
     from services.agribrain.layer0.asmae_scene_products.scene_product_store import SceneProductStore
     from services.agribrain.layer05_asmae.history.archive_bootstrap_service import MISSION_START_DATE
     from services.agribrain.layer05_asmae.history.historical_state_intelligence import HistoricalStateIntelligenceService
-    from services.agribrain.world_model.canonical_worldline import CanonicalWorldlineService
-
-    geom_wkt = COHORT_GEOMETRIES.get(plot_id)
-    if not geom_wkt:
-        raise ValueError(f"No geometry defined for plot {plot_id}")
-    geom_geojson, centroid_lat, centroid_lng = _wkt_to_geojson_and_centroid(geom_wkt)
-    canonical_geom_hash = compute_geometry_hash(geom_geojson)
-
-    start_dt = datetime(2015, 6, 23, tzinfo=timezone.utc)
-    end_dt = datetime.now(timezone.utc)
-    daily_weather, weather_meta = _fetch_real_daily_weather(
-        centroid_lat, centroid_lng, start_dt, end_dt, offline=offline
+    from services.agribrain.layer05_asmae.history.independent_field_validation import (
+        evaluate_independent_field_evidence,
     )
+    from services.agribrain.world_model.canonical_worldline import CanonicalWorldlineService
 
     ws_path = Path(workspace_root).resolve()
     artifacts_dir = ws_path / "services" / "agribrain" / "artifacts"
+    dom = _resolve_plot_domain_context(plot_id, artifacts_dir, offline=offline)
+    geom_geojson = dom["geom_geojson"]
+    centroid_lat = dom["centroid_lat"]
+    centroid_lng = dom["centroid_lng"]
+    soil_ctx = dom["soil_context"]
+    crop_ctx = dom["crop_context"]
+    tenant_id = dom["tenant_id"]
+    farm_id = dom["farm_id"]
+    canonical_geom_hash = compute_geometry_hash(geom_geojson)
+
+    scene_store = SceneProductStore(plot_id)
+    earliest_cache_dt: Optional[datetime] = None
+    if local_scene_cache:
+        s_base = Path(scene_store.base_dir)
+        plot_sdir = s_base if getattr(scene_store, "plot_id", None) == plot_id else s_base / plot_id
+        if plot_sdir.is_dir():
+            for sd in plot_sdir.iterdir():
+                mf = sd / "metadata.json"
+                if sd.is_dir() and mf.is_file():
+                    try:
+                        m = json.loads(mf.read_text(encoding="utf-8"))
+                        raw_acq = m.get("acquisition_datetime")
+                        if raw_acq:
+                            dt_a = datetime.fromisoformat(str(raw_acq).replace("Z", "+00:00"))
+                            if dt_a.tzinfo is None:
+                                dt_a = dt_a.replace(tzinfo=timezone.utc)
+                            if earliest_cache_dt is None or dt_a < earliest_cache_dt:
+                                earliest_cache_dt = dt_a
+                    except Exception:
+                        continue
+
+    start_dt = (
+        max(datetime(2015, 6, 23, tzinfo=timezone.utc), earliest_cache_dt - timedelta(days=30))
+        if earliest_cache_dt is not None
+        else datetime(2015, 6, 23, tzinfo=timezone.utc)
+    )
+    end_dt = datetime.now(timezone.utc)
+    start_iso = (
+        max(datetime.fromisoformat(MISSION_START_DATE.replace("Z", "+00:00")), earliest_cache_dt - timedelta(days=1))
+        .strftime("%Y-%m-%dT00:00:00+00:00")
+        if earliest_cache_dt is not None
+        else MISSION_START_DATE
+    )
+
+    daily_weather, weather_meta = _fetch_real_daily_weather(
+        centroid_lat, centroid_lng, start_dt, end_dt, offline=offline
+    )
+    if not daily_weather:
+        for cand_w in (
+            artifacts_dir / "multiplot_meta" / f"{plot_id}_weather.json",
+            artifacts_dir / "archive_pilot_reports" / tenant_id / farm_id / plot_id / "historical_weather_cache.json",
+        ):
+            if cand_w.is_file():
+                try:
+                    wc_loaded = json.loads(cand_w.read_text(encoding="utf-8"))
+                    dw_cand = dict(wc_loaded.get("daily_weather") or {})
+                    if dw_cand:
+                        daily_weather = _stamp_weather_provenance(dw_cand)
+                        weather_meta = dict(wc_loaded.get("weather_meta") or {
+                            "status": "available",
+                            "days": len(daily_weather),
+                            "provider": "era5_local_archive_cache",
+                            "source_reality": "reanalysis_archive",
+                        })
+                        break
+                except Exception:
+                    pass
+    else:
+        daily_weather = _stamp_weather_provenance(daily_weather)
+
     worldline = CanonicalWorldlineService(
         root=artifacts_dir / "historical_intelligence_worldlines",
         require_durable_anchor=False,
     )
-    scene_store = SceneProductStore(plot_id)
     service = HistoricalStateIntelligenceService(
         worldline=worldline,
         bootstrap_root=artifacts_dir / "historical_intelligence_bootstrap",
@@ -618,23 +931,38 @@ def run_historical_intelligence_for_plot(
         service.bootstrap._fetcher_factory = _build_local_cache_fetcher(
             plot_id, geom_geojson, scene_store, service.bootstrap
         )
-    tenant_id = "697ddd3bd4195b809226a67b" if plot_id == "6a09d9e91dd0c7ed6fce7d50" else "default_tenant"
-    farm_id = "69ad7b6f7e6843e8234afcf6" if plot_id == "6a09d9e91dd0c7ed6fce7d50" else "default_farm"
     ns_name = "default"
     res = service.run_full_intelligence(
         plot_id=plot_id,
         geometry_hash=canonical_geom_hash,
         tenant_id=tenant_id,
         namespace=ns_name,
-        start_date=MISSION_START_DATE,
+        start_date=start_iso,
         target_end_date=end_dt.isoformat(),
-        window_days=180,
+        window_days=365 if earliest_cache_dt is not None else 180,
         polygon_geojson=geom_geojson,
         daily_weather=daily_weather,
-        crop_context={"crop_type": "citrus", "crop_coefficient": 0.75},
+        crop_context=crop_ctx,
+        soil_context=soil_ctx,
+        management_events=dom["confirmed_management"],
         skip_bootstrap=skip_bootstrap,
         use_cross_layer_priors=True,
         compare_ablation=True,
+    )
+    recon = res.get("reconstruction") or {}
+    tail_surfaces = recon.get("spatial_surfaces") or []
+    field_val = evaluate_independent_field_evidence(
+        plot_id=plot_id,
+        trajectory=recon.get("trajectory") or [],
+        sensor_readings=dom["sensor_readings"],
+        soil_analyses=dom["soil_analyses"],
+        crop_observations=dom["crop_observations"],
+        crop_tasks=dom["crop_tasks"],
+        mesia_packets=[],
+        exclude_mock_vendors=True,
+        polygon_geojson=geom_geojson,
+        spatial_surfaces=tail_surfaces,
+        soil_context=soil_ctx,
     )
     cache_inventory = _inspect_scene_cache_inventory(plot_id, scene_store)
     manifest_reconcile = dict(res.get("manifest_reconciliation") or {})
@@ -661,11 +989,17 @@ def run_historical_intelligence_for_plot(
     summary_payload = {
         **res,
         "plot_id": plot_id,
+        "plot_name": dom["plot_name"],
         "tenant_id": tenant_id,
         "farm_id": farm_id,
         "namespace": ns_name,
         "geometry_hash": canonical_geom_hash,
+        "polygon_geojson": geom_geojson,
+        "soil_context": soil_ctx,
+        "crop_context": crop_ctx,
+        "domain_metadata_source": dom["domain_source"],
         "weather_meta": weather_meta,
+        "independent_field_validation": field_val,
         "manifest_reconciliation": manifest_reconcile,
     }
     summary_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
@@ -675,54 +1009,104 @@ def run_historical_intelligence_for_plot(
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Run Controlled Historical Archive Pilot Benchmark")
-    parser.add_argument("--plot_id", help="Single plot to run (otherwise runs entire cohort)")
+    parser.add_argument("--plot_id", help="Single plot, comma-separated IDs, or 'all_cohort'")
     parser.add_argument("--depth", default="historical_3y", help="Lookback depth mode")
     parser.add_argument("--budget", default="offline_fixture", help="Budget profile")
     parser.add_argument("--context", default="regular_asmae_run", help="Trigger context")
     parser.add_argument("--mode", default="pilot", choices=["pilot", "intelligence"], help="Run legacy pilot benchmark or full Historical State Intelligence")
     parser.add_argument("--skip-bootstrap", action="store_true", help="Skip live STAC queries and reconstruct from existing worldline observations")
     parser.add_argument("--local-scene-cache", action="store_true", help="Ingest verified real .SAFE scenes from SceneProductStore without re-downloading")
+    parser.add_argument("--offline", action="store_true", help="Run strictly from local domain/weather/scene caches without network or DB calls")
+    parser.add_argument("--json-summary-out", help="Optional path to write multi-plot compact summary JSON")
     args = parser.parse_args()
 
     if args.mode == "intelligence":
-        target_plot = args.plot_id or "6a09d9e91dd0c7ed6fce7d50"
-        res = run_historical_intelligence_for_plot(
-            target_plot,
-            skip_bootstrap=bool(args.skip_bootstrap),
-            local_scene_cache=bool(args.local_scene_cache),
-        )
-        recon = res.get("reconstruction") or {}
-        retro_full = recon.get("retrovalidation") or {}
-        retro = retro_full.get("summary") or {}
-        raw_retro = retro_full.get("raw_uncalibrated_summary") or {}
-        qual = retro_full.get("qualification") or {}
-        mem = (recon.get("event_memory") or {}).get("summary") or {}
-        abl = res.get("cross_layer_ablation") or {}
-        voi = ((res.get("cross_layer_intelligence") or {}).get("next_best_observation") or {})
-        reconcile = res.get("manifest_reconciliation") or {}
-        print(
-            f"[INTELLIGENCE] plot={target_plot} tenant={res.get('tenant_id')} "
-            f"obs={recon.get('observation_count')} checkpoints={len(recon.get('checkpoints') or [])} "
-            f"spatial_surfaces={recon.get('spatial_surfaces_count')} "
-            f"authority={recon.get('worldline_posterior_event_type')} qual_passed={qual.get('passed')} "
-            f"blocks={qual.get('block_reasons')}"
-        )
-        print(
-            f"[RETROVALIDATION] events={mem.get('total_events')} "
-            f"tiers={{'met': {mem.get('meteorological_forcing_reanalysis_count')}, "
-            f"'conf': {mem.get('agronomic_event_confirmed_count')}, "
-            f"'hypo': {mem.get('model_hypothesis_count')}}} "
-            f"raw_rmse={raw_retro.get('rmse')} cal_rmse={retro.get('rmse')} "
-            f"bias={retro.get('bias')} cov1={retro.get('coverage_1sigma')} cov2={retro.get('coverage_2sigma')} "
-            f"skill_pers={retro.get('skill_vs_persistence')} skill_clim={retro.get('skill_vs_climatology')}"
-        )
-        print(
-            f"[CROSS_LAYER_ABLATION] cross_layer_rmse={abl.get('cross_layer_rmse')} "
-            f"s1_s2_only_rmse={abl.get('s1_s2_only_rmse')} delta_rmse={abl.get('delta_rmse_cross_minus_s1s2')} "
-            f"skill_gain={abl.get('skill_gain_vs_s1_s2_only')} "
-            f"voi_top={voi.get('observation_type')}"
-        )
-        print(f"[RECONCILE] {reconcile.get('reconciliation_note')}")
+        raw_arg = (args.plot_id or "6a09d9e91dd0c7ed6fce7d50").strip()
+        if raw_arg.lower() in ("all", "all_cohort", "cohort"):
+            target_plots = list(REAL_COHORT_PLOT_IDS)
+        else:
+            target_plots = [p.strip() for p in raw_arg.split(",") if p.strip()]
+        compact_rows: List[Dict[str, Any]] = []
+        for target_plot in target_plots:
+            res = run_historical_intelligence_for_plot(
+                target_plot,
+                offline=True if args.offline else None,
+                skip_bootstrap=bool(args.skip_bootstrap),
+                local_scene_cache=bool(args.local_scene_cache),
+            )
+            recon = res.get("reconstruction") or {}
+            retro_full = recon.get("retrovalidation") or {}
+            retro = retro_full.get("summary") or {}
+            raw_retro = retro_full.get("raw_uncalibrated_summary") or {}
+            mh_by_h = (retro_full.get("multi_horizon") or {}).get("by_horizon") or {}
+            qual = retro_full.get("qualification") or {}
+            mem = (recon.get("event_memory") or {}).get("summary") or {}
+            abl = res.get("cross_layer_ablation") or {}
+            voi = ((res.get("cross_layer_intelligence") or {}).get("next_best_observation") or {})
+            reconcile = res.get("manifest_reconciliation") or {}
+            fval = res.get("independent_field_validation") or {}
+            vwc_val = fval.get("sensor_vwc_validation") or {}
+            print(
+                f"[INTELLIGENCE] plot={target_plot} ({res.get('plot_name')}) crop={(res.get('crop_context') or {}).get('crop_type')} "
+                f"soil={(res.get('soil_context') or {}).get('texture')} tenant={res.get('tenant_id')} "
+                f"obs={recon.get('observation_count')} checkpoints={len(recon.get('checkpoints') or [])} "
+                f"spatial_surfaces={recon.get('spatial_surfaces_count')} "
+                f"authority={recon.get('worldline_posterior_event_type')} qual_passed={qual.get('passed')} "
+                f"blocks={qual.get('block_reasons')}"
+            )
+            print(
+                f"[RETROVALIDATION] events={mem.get('total_events')} "
+                f"tiers={{'met': {mem.get('meteorological_forcing_reanalysis_count')}, "
+                f"'conf': {mem.get('agronomic_event_confirmed_count')}, "
+                f"'hypo': {mem.get('model_hypothesis_count')}}} "
+                f"raw_rmse={raw_retro.get('rmse')} cal_rmse={retro.get('rmse')} "
+                f"cov1={retro.get('coverage_1sigma')} cov2={retro.get('coverage_2sigma')} "
+                f"skill_pers={retro.get('skill_vs_persistence')} "
+                f"1-7d={(mh_by_h.get('short_1_7d') or {}).get('skill_vs_persistence')} "
+                f"8-16d={(mh_by_h.get('medium_8_16d') or {}).get('skill_vs_persistence')} "
+                f"17-35d={(mh_by_h.get('extended_17_35d') or {}).get('skill_vs_persistence')}"
+            )
+            print(
+                f"[INDEPENDENT_VAL] raw={vwc_val.get('raw_readings_matched', vwc_val.get('n_readings'))} "
+                f"indep_device_days={vwc_val.get('n_independent_device_days')} "
+                f"indep_rmse={vwc_val.get('independent_rmse_vwc')} "
+                f"excluded_post={vwc_val.get('excluded_post_reading_non_causal', 0)} "
+                f"voi_top={voi.get('observation_type')}"
+            )
+            print(f"[RECONCILE] {reconcile.get('reconciliation_note')}")
+            compact_rows.append({
+                "plot_id": target_plot,
+                "plot_name": res.get("plot_name"),
+                "crop_type": (res.get("crop_context") or {}).get("crop_type"),
+                "soil_texture": (res.get("soil_context") or {}).get("texture"),
+                "tenant_id": res.get("tenant_id"),
+                "farm_id": res.get("farm_id"),
+                "observation_count": recon.get("observation_count"),
+                "cal_rmse": retro.get("rmse"),
+                "bma_rmse": retro.get("bma_rmse"),
+                "persistence_rmse": retro.get("persistence_rmse"),
+                "coverage_1sigma": retro.get("coverage_1sigma"),
+                "coverage_2sigma": retro.get("coverage_2sigma"),
+                "skill_vs_persistence": retro.get("skill_vs_persistence"),
+                "bma_skill_vs_persistence": retro.get("bma_skill_vs_persistence"),
+                "skill_vs_climatology": retro.get("skill_vs_climatology"),
+                "short_1_7d_skill": (mh_by_h.get("short_1_7d") or {}).get("skill_vs_persistence"),
+                "medium_8_16d_skill": (mh_by_h.get("medium_8_16d") or {}).get("skill_vs_persistence"),
+                "extended_17_35d_skill": (mh_by_h.get("extended_17_35d") or {}).get("skill_vs_persistence"),
+                "qualification_passed": qual.get("passed"),
+                "block_reasons": qual.get("block_reasons"),
+                "worldline_authority": recon.get("worldline_posterior_event_type"),
+                "effective_resolution_by_state": recon.get("effective_resolution_by_state"),
+                "resolution_summary_by_state": recon.get("resolution_summary_by_state"),
+                "weather_provenance_summary": recon.get("weather_provenance_summary"),
+                "independent_field_validation": fval,
+                "ablation_cross_layer_rmse": abl.get("cross_layer_rmse"),
+                "ablation_s1_s2_only_rmse": abl.get("s1_s2_only_rmse"),
+            })
+        if args.json_summary_out:
+            out_p = Path(args.json_summary_out)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            out_p.write_text(json.dumps({"generated_at": datetime.now(timezone.utc).isoformat(), "plots": compact_rows}, indent=2, default=str), encoding="utf-8")
         sys.exit(0)
 
     plots = [args.plot_id] if args.plot_id else list(ARCHIVE_PILOT_REGISTRY.keys())

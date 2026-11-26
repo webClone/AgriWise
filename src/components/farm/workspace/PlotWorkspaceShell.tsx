@@ -207,6 +207,8 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
   const isModeLensActive = scientific.l10.userLensSelectionSeq > asmaeSeenLensSeq;
   const [sirePixelHover, setSirePixelHover] = useState<{
     value: number | null;
+    sigma?: number | null;
+    localResolutionM?: number | null;
     row: number;
     col: number;
     coordinate: [number, number];
@@ -422,10 +424,16 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
     if (activeAsmaeAvailability?.canRenderPixels && activeAsmaeAvailability?.rasterSurface && sample.valid) {
       const uGrid = (activeAsmaeAvailability.rasterSurface as any)?.uncertainty;
       const sigmaVal = Array.isArray(uGrid) ? uGrid?.[sample.row]?.[sample.col] : null;
+      const lGrid = (activeAsmaeAvailability.rasterSurface as any)?.local_resolution_map_m;
+      const localResRaw = Array.isArray(lGrid)
+        ? lGrid?.[sample.row]?.[sample.col]
+        : (activeAsmaeAvailability.rasterSurface as any)?.effective_resolution_m;
       setSirePixelHover({
         ...sample,
         sigma: typeof sigmaVal === "number" && Number.isFinite(sigmaVal) ? Number(sigmaVal.toFixed(4)) : null,
-      } as any);
+        localResolutionM:
+          typeof localResRaw === "number" && Number.isFinite(localResRaw) ? Number(localResRaw.toFixed(1)) : null,
+      });
     } else {
       setSirePixelHover(null);
     }

@@ -12,6 +12,7 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, is_dataclass
+from datetime import date as date_cls, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 import os
 
@@ -364,10 +365,50 @@ def _normalize_record(raw: Any) -> Optional[Dict[str, Any]]:
         if values.get(var) is not None
     ) and any(values.get(var) is not None for var in CORE_VARIABLES)
 
+    raw_lag = _finite_float(record.get("reanalysis_lag_days"))
+    reanalysis_lag_days = (
+        max(0, int(round(raw_lag)))
+        if raw_lag is not None
+        else (5 if reality == "reanalysis_archive" else 0)
+    )
+    is_reanalysis_backfill = bool(
+        record.get("is_reanalysis_backfill")
+        if record.get("is_reanalysis_backfill") is not None
+        else (reality == "reanalysis_archive")
+    )
+    explicit_avail = _first_non_none(record, "available_at", "observed_before", "issued_at")
+    available_at_iso: str
+    if explicit_avail is not None and str(explicit_avail).strip():
+        available_at_iso = str(explicit_avail).strip()
+    else:
+        try:
+            rec_day = date_cls.fromisoformat(date)
+            if reality == "reanalysis_archive":
+                avail_day = rec_day + timedelta(days=reanalysis_lag_days)
+            elif reality == "observed_archive":
+                avail_day = rec_day + timedelta(days=1)
+            else:
+                avail_day = rec_day
+            available_at_iso = datetime(
+                avail_day.year, avail_day.month, avail_day.day, tzinfo=timezone.utc,
+            ).isoformat()
+        except ValueError:
+            available_at_iso = f"{date}T23:59:59+00:00"
+
+    effective_role = source_role or (
+        "HISTORICAL_REANALYSIS"
+        if reality == "reanalysis_archive"
+        else ("OBSERVED_WEATHER" if reality == "observed_archive" else "FORECAST_MODEL")
+    )
+
     normalized = {
         **values,
         "date": date,
         "source_reality": reality,
+        "source_role": effective_role,
+        "reanalysis_lag_days": reanalysis_lag_days,
+        "is_reanalysis_backfill": is_reanalysis_backfill,
+        "available_at": available_at_iso,
         "evidence_ids": final_evidence_ids,
         "native_evidence_ids": reconciled_native,
         "variable_evidence": variable_evidence,
@@ -375,6 +416,8 @@ def _normalize_record(raw: Any) -> Optional[Dict[str, Any]]:
         "authority_refs": [authority] if authority else [],
         "overall_confidence": _finite_float(record.get("overall_confidence")),
     }
+    if record.get("observed_before"):
+        normalized["observed_before"] = str(record["observed_before"])
     return normalized
 
 
@@ -427,6 +470,20 @@ def _merge_day(existing: Optional[Dict[str, Any]], incoming: Dict[str, Any]) -> 
         for var in CORE_VARIABLES
         if merged.get(var) is not None
     ) and any(merged.get(var) is not None for var in CORE_VARIABLES)
+
+    if not merged.get("source_role") and incoming.get("source_role"):
+        merged["source_role"] = incoming.get("source_role")
+    merged["reanalysis_lag_days"] = max(
+        int(merged.get("reanalysis_lag_days") or 0),
+        int(incoming.get("reanalysis_lag_days") or 0),
+    )
+    merged["is_reanalysis_backfill"] = bool(
+        merged.get("is_reanalysis_backfill") or incoming.get("is_reanalysis_backfill")
+    )
+    if incoming.get("available_at") and (
+        not merged.get("available_at") or str(incoming["available_at"]) > str(merged["available_at"])
+    ):
+        merged["available_at"] = str(incoming["available_at"])
 
     return merged
 
@@ -490,6 +547,10 @@ def normalize_weather_archive(raw_weather: Any) -> Dict[str, Any]:
         and all(row.get("all_variables_verified", False) for row in all_rows)
     )
     hash_payload = {"historical": historical, "forecast": forecast, "evidence_ids": evidence_ids}
+    reanalysis_days = sum(1 for row in historical.values() if row.get("source_reality") == "reanalysis_archive")
+    observed_days = sum(1 for row in historical.values() if row.get("source_reality") == "observed_archive")
+    roles = sorted({str(row.get("source_role")) for row in historical.values() if row.get("source_role")})
+    max_lag = max((int(row.get("reanalysis_lag_days") or 0) for row in historical.values()), default=0)
     return {
         "weather_archive_status": status,
         "weather_source_reality": reality,
@@ -501,4 +562,12 @@ def normalize_weather_archive(raw_weather: Any) -> Dict[str, Any]:
         "weather_evidence_ids": evidence_ids,
         "weather_native_evidence_ids": verified_native_ids,
         "native_evidence_verified": all_rows_verified,
+        "weather_provenance_summary": {
+            "source_reality": reality,
+            "source_roles": roles,
+            "reanalysis_days": reanalysis_days,
+            "observed_days": observed_days,
+            "forecast_days": len(forecast),
+            "max_reanalysis_lag_days": max_lag,
+        },
     }

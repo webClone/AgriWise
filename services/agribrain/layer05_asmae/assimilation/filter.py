@@ -24,7 +24,10 @@ from ..config import (
     ENSEMBLE_SIZE_OFFLINE,
     ENSEMBLE_SIZE_SHADOW,
     ENSEMBLE_SIZE_STANDARD,
+    IDX_BARE_SOIL,
+    IDX_LAI,
     IDX_ROOT_ZONE_WATER,
+    IDX_STRUCTURE,
     IDX_VIGOR,
     LARGE_PLOT_MICROZONE_THRESHOLD,
     N_STATES,
@@ -896,9 +899,11 @@ def forecast_step(
     l2_growth_pos = _prior_float(l2_prior.get("growth_position")) if l2_prior.get("usable_as_prior") else None
     l2_expected_vigor = _prior_float(l2_prior.get("expected_vigor")) if l2_prior.get("usable_as_prior") else None
     l2_expected_lai = _prior_float(l2_prior.get("expected_lai")) if l2_prior.get("usable_as_prior") else None
+    l2_stage = str(l2_prior.get("phenology_stage") or "").lower() if l2_prior.get("usable_as_prior") else ""
     l3_water_lim = _prior_float(l3_prior.get("water_limitation_probability")) if l3_prior.get("usable_as_prior") else None
     l7_unc_scale = _prior_float(l7_prior.get("forecast_uncertainty")) if l7_prior.get("usable_as_prior") else None
     shock_unc_mult = max(1.0, min(1.35, float(l7_unc_scale))) if l7_unc_scale is not None else 1.0
+    is_clim_proj = str(weather_day.get("source_role") or "") == "causal_doy_climatology_projection"
 
     # Physical soil hydrology parameters: Delta theta_v = flux_mm / root_depth_mm
     root_depth_mm = max(100.0, (rooting_depth or 0.4) * 1000.0)
@@ -946,9 +951,13 @@ def forecast_step(
         current = values[:, :, i]
         if name == "surface_wetness_event":
             wetting = effective_rain * delta_days + irrigation
-            rain_pulse = min(1.0, max(0.0, wetting / 20.0)) if wetting > 0.0 else 0.0
+            if is_clim_proj and irrigation <= 0.0:
+                # Expected daily climatological rainfall is mean drizzle, not a discrete storm pulse
+                rain_pulse = min(0.30, max(0.0, wetting / 45.0)) if wetting > 0.0 else 0.0
+            else:
+                rain_pulse = min(1.0, max(0.0, wetting / 20.0)) if wetting > 0.0 else 0.0
             updated = current * (0.65 ** delta_days) + rain_pulse + _centered_normal(
-                generator, 0.05 * missing_driver_scale * sqrt_delta_days, member_shape,
+                generator, 0.04 * missing_driver_scale * sqrt_delta_days, member_shape,
             )
         elif name == "root_zone_water":
             # Actual ET based on FAO-56 moisture stress factor Ks
@@ -1029,21 +1038,37 @@ def forecast_step(
             radiation_factor = max(0.0, min(1.0, radiation / 25.0)) if radiation is not None else 0.52
             water_lim_val = float(l3_water_lim) if l3_water_lim is not None else 0.35
             ks_growth = max(0.0, 1.0 - water_lim_val)
-            # Differential physiological growth/senescence forcing without pulling toward a fixed NDVI target
+            # Differential physiological growth/senescence forcing with carrying-capacity headroom
+            headroom = np.maximum(0.05, 1.0 - np.clip(current / 0.92, 0.0, 1.0))
             l3_growth_delta = (
-                delta_days * (0.0025 * ks_growth * radiation_factor - 0.003 * max(0.0, water_lim_val - 0.65))
+                delta_days * (0.0024 * ks_growth * radiation_factor * headroom - 0.003 * max(0.0, water_lim_val - 0.65))
                 if l3_water_lim is not None else 0.0
             )
-            net_rad_delta = delta_days * (0.008 * radiation_factor - 0.008 * max(0.0, -normalized_daily_water_delta)) if radiation is not None else 0.0
-            sigma_v = (0.016 if l3_water_lim is not None else 0.03) * missing_driver_scale
+            net_rad_delta = (
+                delta_days * (0.0065 * radiation_factor * headroom - 0.008 * max(0.0, -normalized_daily_water_delta))
+                if radiation is not None else 0.0
+            )
+            sigma_v = (0.015 if l3_water_lim is not None else 0.028) * missing_driver_scale
             updated = current + net_rad_delta + l3_growth_delta + _centered_normal(
                 generator, sigma_v * sqrt_delta_days, member_shape,
             )
         elif name == "lai" and l3_water_lim is not None:
             water_lim_val = float(l3_water_lim)
-            l3_lai_delta = delta_days * (0.006 * max(0.0, 0.5 - water_lim_val) - 0.008 * max(0.0, water_lim_val - 0.7))
+            headroom_lai = np.maximum(0.05, 1.0 - np.clip(current / 5.5, 0.0, 1.0))
+            l3_lai_delta = delta_days * (0.0055 * max(0.0, 0.5 - water_lim_val) * headroom_lai - 0.0075 * max(0.0, water_lim_val - 0.7))
             updated = current + l3_lai_delta + _centered_normal(
-                generator, (hi - lo) * 0.014 * missing_driver_scale * sqrt_delta_days, member_shape,
+                generator, (hi - lo) * 0.013 * missing_driver_scale * sqrt_delta_days, member_shape,
+            )
+        elif name == "structure":
+            lai_cur = values[:, :, IDX_LAI]
+            vigor_cur = values[:, :, IDX_VIGOR]
+            struct_eq = np.clip(
+                0.22 + 0.45 * np.minimum(1.0, np.maximum(0.0, lai_cur) / 5.0) + 0.15 * np.clip(vigor_cur, 0.0, 1.0),
+                0.15, 0.88,
+            )
+            relax_s = 0.985 ** delta_days
+            updated = current * relax_s + (1.0 - relax_s) * struct_eq + _centered_normal(
+                generator, (hi - lo) * 0.010 * missing_driver_scale * sqrt_delta_days, member_shape,
             )
         elif name == "stress_memory":
             heat_signal = max(0.0, min(1.0, (float(temp_max) - optimal_temperature) / (maximum_temperature - optimal_temperature))) if temp_max is not None else 0.0

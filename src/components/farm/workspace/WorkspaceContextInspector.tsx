@@ -77,7 +77,14 @@ export default function WorkspaceContextInspector({
   activeAsmaeKey?: AsmaeStateKey;
   onSelectAsmaeState?: (key: AsmaeStateKey) => void;
   activeAsmaeAvailability?: AsmaeStateAvailabilityResult;
-  sirePixelHover?: { value: number | null; sigma?: number | null; row: number; col: number; coordinate: [number, number] } | null;
+  sirePixelHover?: {
+    value: number | null;
+    sigma?: number | null;
+    localResolutionM?: number | null;
+    row: number;
+    col: number;
+    coordinate: [number, number];
+  } | null;
   historicalAsOfDate?: string | null;
   historicalLoading?: boolean;
   historicalError?: string | null;
@@ -1029,11 +1036,19 @@ export default function WorkspaceContextInspector({
               </div>
               <p style={{ fontSize: "10.5px", color: "#94a3b8", margin: "2px 0 6px" }}>
                 {activeDef.shortName} · Surface: {activeDef.surfaceType}
-                {historicalData?.effective_resolution_by_state?.[activeDef.surfaceType] != null
-                  ? ` · Eff. Resolution: ${historicalData.effective_resolution_by_state[activeDef.surfaceType]}m`
-                  : historicalData?.suppressed_spatial_states?.[activeDef.key]
-                    ? ` · Spatial: Withheld (${historicalData.suppressed_spatial_states[activeDef.key].spatial_support || "scalar_only"})`
-                    : ""}
+                {(() => {
+                  const resSum = historicalData?.resolution_summary_by_state?.[activeDef.surfaceType];
+                  if (resSum && resSum.is_spatially_varying && resSum.min_m != null && resSum.max_m != null) {
+                    return ` · Local Res: ${resSum.min_m}–${resSum.max_m}m`;
+                  }
+                  if (historicalData?.effective_resolution_by_state?.[activeDef.surfaceType] != null) {
+                    return ` · Eff. Resolution: ${historicalData.effective_resolution_by_state[activeDef.surfaceType]}m`;
+                  }
+                  if (historicalData?.suppressed_spatial_states?.[activeDef.key]) {
+                    return ` · Spatial: Withheld (${historicalData.suppressed_spatial_states[activeDef.key].spatial_support || "scalar_only"})`;
+                  }
+                  return "";
+                })()}
               </p>
             </div>
 
@@ -1140,9 +1155,12 @@ export default function WorkspaceContextInspector({
                 </div>
                 <div style={{ fontSize: "9.5px", color: "#94a3b8" }}>
                   Row {sirePixelHover.row}, Col {sirePixelHover.col} · [{sirePixelHover.coordinate[1].toFixed(5)}°N, {sirePixelHover.coordinate[0].toFixed(5)}°E]
-                  {historicalData?.effective_resolution_by_state?.[activeDef.surfaceType] != null
-                    ? ` · ${historicalData.effective_resolution_by_state[activeDef.surfaceType]}m adaptive grid`
-                    : ""}
+                  {(() => {
+                    const localRes =
+                      sirePixelHover.localResolutionM ??
+                      historicalData?.effective_resolution_by_state?.[activeDef.surfaceType];
+                    return localRes != null ? ` · Local Res: ${localRes}m adaptive cell` : "";
+                  })()}
                 </div>
               </div>
             )}

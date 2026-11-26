@@ -78,8 +78,8 @@ from services.agribrain.world_model.canonical_worldline import (
 
 logger = logging.getLogger(__name__)
 
-RECONSTRUCTOR_MODEL_VERSION = "asmae_hist_cross_layer_v2"
-CALIBRATION_VERSION = "asmae_causal_spatial_cal_v5"
+RECONSTRUCTOR_MODEL_VERSION = "asmae_hist_cross_layer_v3"
+CALIBRATION_VERSION = "asmae_causal_spatial_cal_v7"
 POSTERIOR_CHECKPOINT_SCHEMA = "asmae_posterior_checkpoint_v2"
 
 _CAL_DECAY_BY_CHANNEL: Dict[str, float] = {
@@ -103,17 +103,29 @@ _CAL_TAU_DAYS_BY_CHANNEL: Dict[str, float] = {
 def filter_causal_daily_weather_at_cutoff(
     daily_weather: Optional[Dict[str, Dict[str, Any]]],
     cutoff_dt: datetime,
+    *,
+    knowledge_cutoff_dt: Optional[datetime] = None,
+    enforce_publication_lag: bool = False,
+    stats_out: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Restrict daily weather aggregates strictly to what was observable by `cutoff_dt`.
+    """Restrict daily weather aggregates strictly to what was observable by `cutoff_dt` (and optional K).
 
     Daily ERA5 aggregates on `cutoff_dt.date()` are excluded before day-end (`< 23:59`)
     unless explicitly stamped with `observed_before` / `issued_at` / `as_of <= cutoff_dt`.
+    When `enforce_publication_lag=True` and `knowledge_cutoff_dt` is supplied, records
+    carrying `available_at` later than `knowledge_cutoff_dt` (e.g., 5-day ERA5 backfill lag)
+    are withheld as non-available at knowledge cutoff K.
     """
     c_day = cutoff_dt.date()
     c_iso = c_day.isoformat()
     is_day_end = cutoff_dt.hour >= 23 and cutoff_dt.minute >= 59
     prev_complete_iso = c_iso if is_day_end else (c_day - timedelta(days=1)).isoformat()
     out: Dict[str, Dict[str, Any]] = {}
+    excluded_valid_cutoff = 0
+    excluded_lag_k = 0
+    reanalysis_days = 0
+    observed_days = 0
+    max_lag_days = 0
     for d_str, w in (daily_weather or {}).items():
         if not isinstance(w, dict):
             continue
@@ -126,9 +138,76 @@ def filter_causal_daily_weather_at_cutoff(
                     allow_same_day = _parse_utc_iso(ts_tag) <= cutoff_dt
                 except Exception:
                     allow_same_day = False
-        if d_clean <= prev_complete_iso or allow_same_day:
-            out[d_clean] = dict(w)
+        if not (d_clean <= prev_complete_iso or allow_same_day):
+            excluded_valid_cutoff += 1
+            continue
+        avail_tag = w.get("available_at")
+        if enforce_publication_lag and knowledge_cutoff_dt is not None and avail_tag:
+            try:
+                if _parse_utc_iso(avail_tag) > knowledge_cutoff_dt:
+                    excluded_lag_k += 1
+                    continue
+            except Exception:
+                pass
+        row = dict(w)
+        reality = str(row.get("source_reality") or "")
+        if reality == "reanalysis_archive":
+            reanalysis_days += 1
+        elif reality == "observed_archive":
+            observed_days += 1
+        lag_v = int(row.get("reanalysis_lag_days") or 0)
+        if lag_v > max_lag_days:
+            max_lag_days = lag_v
+        out[d_clean] = row
+    if stats_out is not None:
+        stats_out.update({
+            "admitted_days": len(out),
+            "excluded_after_valid_cutoff": excluded_valid_cutoff,
+            "excluded_reanalysis_lag_count": excluded_lag_k,
+            "reanalysis_days": reanalysis_days,
+            "observed_days": observed_days,
+            "max_reanalysis_lag_days": max_lag_days,
+            "enforce_publication_lag": bool(enforce_publication_lag),
+        })
     return out
+
+
+def summarize_weather_provenance(
+    daily_weather: Optional[Dict[str, Dict[str, Any]]],
+    *,
+    knowledge_cutoff_dt: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Summarize daily weather provenance roles, reanalysis publication lag, and K exposure."""
+    rows = [w for w in (daily_weather or {}).values() if isinstance(w, dict)]
+    roles = sorted({str(w.get("source_role")) for w in rows if w.get("source_role")})
+    realities = sorted({str(w.get("source_reality")) for w in rows if w.get("source_reality")})
+    reanalysis_cnt = sum(1 for w in rows if w.get("source_reality") == "reanalysis_archive" or w.get("is_reanalysis_backfill"))
+    observed_cnt = sum(1 for w in rows if w.get("source_reality") == "observed_archive")
+    max_lag = max((int(w.get("reanalysis_lag_days") or 0) for w in rows), default=0)
+    lag_exposed = 0
+    if knowledge_cutoff_dt is not None:
+        for w in rows:
+            av = w.get("available_at")
+            if av:
+                try:
+                    if _parse_utc_iso(av) > knowledge_cutoff_dt:
+                        lag_exposed += 1
+                except Exception:
+                    pass
+    return {
+        "total_days": len(rows),
+        "source_realities": realities,
+        "source_roles": roles,
+        "reanalysis_backfill_days": reanalysis_cnt,
+        "observed_station_days": observed_cnt,
+        "max_reanalysis_lag_days": max_lag,
+        "days_beyond_reanalysis_lag_at_k": lag_exposed,
+        "weather_availability_note": (
+            f"ERA5 reanalysis records carry {max_lag}d publication lag metadata (`available_at`); historical replay assumes full historical availability unless `enforce_publication_lag=True`."
+            if reanalysis_cnt > 0
+            else "No reanalysis publication-lag records detected."
+        ),
+    }
 
 
 def build_prospective_weather_series(
@@ -279,7 +358,18 @@ def apply_causal_channel_calibration(
         (slope_prior * slope_prior) * raw_pred_var + (obs_sigma * obs_sigma) + bias_epistemic_var + gap_infl_var,
     )
     z2_prev = float(st.get("z2_ema", 1.0) if st.get("z2_ema") is not None else 1.0)
-    var_scale_prior = float(min(4.5, max(0.20, z2_prev)))
+    # Hierarchical Bayesian shrinkage during cold warmup only (fades to 0 as obs_count >= 8)
+    obs_cnt_cal = int(st.get("obs_count", 0) or 0)
+    warmup_weight = 1.5 * math.exp(-0.35 * obs_cnt_cal)
+    shrunk_z2 = (eff_n * z2_prev + warmup_weight) / max(1e-6, eff_n + warmup_weight)
+    var_scale_prior = float(min(4.5, max(0.008, shrunk_z2)))
+    if obs_cnt_cal >= 6 and st.get("cov1_ema") is not None:
+        cov1_ema = float(st["cov1_ema"])
+        if cov1_ema > 0.71:
+            var_scale_prior *= math.exp(-2.2 * min(0.35, cov1_ema - 0.6827))
+        elif cov1_ema < 0.65:
+            var_scale_prior *= math.exp(2.0 * min(0.35, 0.6827 - cov1_ema))
+        var_scale_prior = float(min(4.5, max(0.008, var_scale_prior)))
     cal_var = max(1e-8, base_var * var_scale_prior)
     return {
         "cal_pred_mean": cal_pred_mean,
@@ -302,6 +392,7 @@ def update_channel_cal_entry(
     obs_name: str = "ndvi",
     obs_dt: Optional[datetime] = None,
     post_raw_pred: Optional[float] = None,
+    var_scale_used: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Update causal sufficient statistics and post-update AR(1) anchor AFTER scoring obs_val."""
     st = cal_entry or {}
@@ -333,6 +424,10 @@ def update_channel_cal_entry(
 
     z2_sample = ((float(obs_val) - float(cal_pred)) ** 2) / max(1e-6, float(unscaled_sig) * float(unscaled_sig))
     z2_prev = float(st.get("z2_ema", 1.0) if st.get("z2_ema") is not None else 1.0)
+    v_used = float(var_scale_used if var_scale_used is not None else max(0.008, z2_prev))
+    prior_sig = max(1e-6, float(unscaled_sig) * math.sqrt(max(0.008, v_used)))
+    hit_1s = 1.0 if abs(float(obs_val) - float(cal_pred)) <= prior_sig else 0.0
+    cov1_prev = float(st.get("cov1_ema", 0.6827) if st.get("cov1_ema") is not None else 0.6827)
     return {
         "sum_err": round(sum_err, 8),
         "sum_x": round(sum_x, 8),
@@ -340,7 +435,8 @@ def update_channel_cal_entry(
         "sum_xx": round(sum_xx, 8),
         "sum_xy": round(sum_xy, 8),
         "eff_n": round(eff_n, 6),
-        "z2_ema": round(0.86 * z2_prev + 0.14 * min(6.0, z2_sample), 6),
+        "z2_ema": round(0.86 * z2_prev + 0.14 * min(3.5, z2_sample), 6),
+        "cov1_ema": round(0.88 * cov1_prev + 0.12 * hit_1s, 6),
         "last_post_resid": round(last_post_resid, 6),
         "last_obs_ts": obs_dt.isoformat() if obs_dt is not None else st.get("last_obs_ts"),
         "obs_count": int(st.get("obs_count", 0) or 0) + 1,
@@ -1436,17 +1532,32 @@ class HistoricalStateReconstructor:
         spatial_delta: Optional[np.ndarray],
         spatial_var: Optional[np.ndarray],
         has_spatial_observations: bool,
+        spatial_obs_count: Optional[np.ndarray] = None,
     ) -> List[Dict[str, Any]]:
-        """Assemble Layer-10 compatible 2D state surfaces at state-dependent adaptive resolutions."""
+        """Assemble Layer-10 compatible 2D state surfaces with spatially varying local effective resolution."""
         if not has_spatial_observations or canonical_grid is None or spatial_delta is None:
             return []
         H = int(canonical_grid["height"])
         W = int(canonical_grid["width"])
         inside = np.asarray(canonical_grid["inside_mask"], dtype=bool)
-        if inside.shape != (H, W):
+        if inside.shape != (H, W) or not np.any(inside):
             return []
         bounds = canonical_grid.get("bounds")
         grid_res_m = float(canonical_grid.get("resolution_m", 10.0) or 10.0)
+
+        # Perimeter / edge pixels experience Sentinel PSF mixed-pixel boundary contamination
+        padded = np.pad(inside, 1, mode="constant", constant_values=False)
+        interior_4 = padded[1:-1, 1:-1] & padded[:-2, 1:-1] & padded[2:, 1:-1] & padded[1:-1, :-2] & padded[1:-1, 2:]
+        edge_mask = inside & (~interior_4)
+
+        low_obs_mask = np.zeros((H, W), dtype=bool)
+        very_low_obs_mask = np.zeros((H, W), dtype=bool)
+        if spatial_obs_count is not None and spatial_obs_count.shape == (H, W):
+            obs_inside = spatial_obs_count[inside]
+            med_obs = float(np.median(obs_inside)) if obs_inside.size > 0 else 0.0
+            if med_obs >= 2.0:
+                low_obs_mask = inside & (spatial_obs_count < 0.70 * med_obs)
+                very_low_obs_mask = inside & (spatial_obs_count < 0.40 * med_obs)
 
         # Map ASMAE state key -> Layer 10 frontend surfaceType expected by asmae-13-states.ts
         surface_type_map = {
@@ -1495,25 +1606,76 @@ class HistoricalStateReconstructor:
             else:
                 unc_arr[inside] = float(state_stds.get(s_name, 0.05))
 
-            # Coarsen field physically to match declared state-dependent effective_resolution_m
-            if block_k > 1:
+            # Spatially varying per-pixel local resolution driven by boundary mixing,
+            # local observation density, and local uncertainty dispersion.
+            high_disp_mask = np.zeros((H, W), dtype=bool)
+            unc_in = unc_arr[inside]
+            med_unc = float(np.median(unc_in)) if unc_in.size > 0 else 0.05
+            if med_unc > 1e-6:
+                high_disp_mask = inside & (unc_arr > 1.22 * med_unc)
+
+            local_block = np.ones((H, W), dtype=np.int32)
+            local_block[inside] = block_k
+            bump = np.zeros((H, W), dtype=np.int32)
+            bump[edge_mask] += 1
+            bump[low_obs_mask] += 1
+            bump[very_low_obs_mask] += 1
+            bump[high_disp_mask] += 1
+            if not np.any(interior_4) and np.any(edge_mask):
+                bump[edge_mask] -= 1
+            local_block[inside] = np.clip(block_k + bump[inside], block_k, 6)
+
+            local_res_arr = np.full((H, W), np.nan, dtype=np.float32)
+            local_res_arr[inside] = np.maximum(
+                eff_res_m,
+                np.round(grid_res_m * local_block[inside], 1),
+            ).astype(np.float32)
+
+            # Locally coarsen pixels matching each cell's effective support radius
+            if np.any(local_block[inside] > 1):
                 arr_coarse = np.full((H, W), np.nan, dtype=np.float32)
                 unc_coarse = np.full((H, W), np.nan, dtype=np.float32)
-                for r0 in range(0, H, block_k):
-                    r1 = min(H, r0 + block_k)
-                    for c0 in range(0, W, block_k):
-                        c1 = min(W, c0 + block_k)
+                for r in range(H):
+                    for c in range(W):
+                        if not inside[r, c] or not math.isfinite(float(arr[r, c])):
+                            continue
+                        k_loc = int(local_block[r, c])
+                        if k_loc <= 1:
+                            arr_coarse[r, c] = arr[r, c]
+                            unc_coarse[r, c] = unc_arr[r, c]
+                            continue
+                        half_lo = k_loc // 2
+                        half_hi = k_loc - half_lo
+                        r0, r1 = max(0, r - half_lo), min(H, r + half_hi)
+                        c0, c1 = max(0, c - half_lo), min(W, c + half_hi)
                         m_blk = inside[r0:r1, c0:c1] & np.isfinite(arr[r0:r1, c0:c1])
                         if not np.any(m_blk):
+                            arr_coarse[r, c] = arr[r, c]
+                            unc_coarse[r, c] = unc_arr[r, c]
                             continue
                         blk_vals = arr[r0:r1, c0:c1][m_blk]
                         blk_mean = float(np.mean(blk_vals))
                         blk_rep_var = float(np.var(blk_vals)) if blk_vals.size > 1 else 0.0
                         blk_base_var = float(np.mean(np.square(unc_arr[r0:r1, c0:c1][m_blk])))
-                        arr_coarse[r0:r1, c0:c1][m_blk] = blk_mean
-                        unc_coarse[r0:r1, c0:c1][m_blk] = math.sqrt(max(1e-8, blk_base_var + 0.5 * blk_rep_var))
+                        arr_coarse[r, c] = blk_mean
+                        unc_coarse[r, c] = math.sqrt(max(1e-8, blk_base_var + 0.5 * blk_rep_var))
                 arr = arr_coarse
                 unc_arr = unc_coarse
+
+            inside_res_vals = local_res_arr[inside]
+            min_loc_m = round(float(np.min(inside_res_vals)), 1) if inside_res_vals.size > 0 else eff_res_m
+            med_loc_m = round(float(np.median(inside_res_vals)), 1) if inside_res_vals.size > 0 else eff_res_m
+            max_loc_m = round(float(np.max(inside_res_vals)), 1) if inside_res_vals.size > 0 else eff_res_m
+            res_summary = {
+                "base_m": eff_res_m,
+                "min_m": min_loc_m,
+                "median_m": med_loc_m,
+                "max_m": max_loc_m,
+                "is_spatially_varying": bool(max_loc_m > min_loc_m + 1e-6),
+                "edge_degraded_pixels": int(np.sum(edge_mask)) if np.any(interior_4) else 0,
+                "low_support_pixels": int(np.sum(low_obs_mask)),
+                "high_dispersion_pixels": int(np.sum(high_disp_mask)),
+            }
 
             values_list = [
                 [round(float(arr[r, c]), 5) if bool(inside[r, c]) and math.isfinite(float(arr[r, c])) else None for c in range(W)]
@@ -1521,6 +1683,10 @@ class HistoricalStateReconstructor:
             ]
             unc_list = [
                 [round(float(unc_arr[r, c]), 5) if bool(inside[r, c]) and math.isfinite(float(unc_arr[r, c])) else None for c in range(W)]
+                for r in range(H)
+            ]
+            local_res_list = [
+                [round(float(local_res_arr[r, c]), 1) if bool(inside[r, c]) and math.isfinite(float(local_res_arr[r, c])) else None for c in range(W)]
                 for r in range(H)
             ]
             stype = surface_type_map[s_name]
@@ -1537,6 +1703,8 @@ class HistoricalStateReconstructor:
                 "direct_pixel_measurement": False,
                 "resolution_m": grid_res_m,
                 "effective_resolution_m": eff_res_m,
+                "local_resolution_map_m": local_res_list,
+                "resolution_summary": res_summary,
                 "spatial_support_tier": res_info["spatial_support"],
                 "aggregation_factor": block_k,
                 "limiting_factor": res_info["limiting_factor"],
@@ -1551,13 +1719,22 @@ class HistoricalStateReconstructor:
                     "spatial_estimation_mode": "inferred_state_anomaly_field",
                     "direct_pixel_measurement": False,
                     "effective_resolution_m": eff_res_m,
+                    "resolution_summary": res_summary,
                     "spatial_support_tier": res_info["spatial_support"],
                     "limiting_factor": res_info["limiting_factor"],
                     "certified_1m": False,
                     "grounding_note": (
-                        f"Inferred {int(eff_res_m)}m field combining Sentinel-1 SAR anomalies with L3 water balance & EnKF posterior mean ({res_info['limiting_factor']})."
-                        if is_sar_driven
-                        else f"Inferred {int(eff_res_m)}m field combining Sentinel-2 spectral anomalies with EnKF posterior mean ({res_info['limiting_factor']})."
+                        f"Inferred {int(min_loc_m)}-{int(max_loc_m)}m adaptive field combining Sentinel-1 SAR anomalies with L3 water balance & EnKF posterior mean ({res_info['limiting_factor']})."
+                        if is_sar_driven and res_summary["is_spatially_varying"]
+                        else (
+                            f"Inferred {int(eff_res_m)}m field combining Sentinel-1 SAR anomalies with L3 water balance & EnKF posterior mean ({res_info['limiting_factor']})."
+                            if is_sar_driven
+                            else (
+                                f"Inferred {int(min_loc_m)}-{int(max_loc_m)}m adaptive field combining Sentinel-2 spectral anomalies with EnKF posterior mean ({res_info['limiting_factor']})."
+                                if res_summary["is_spatially_varying"]
+                                else f"Inferred {int(eff_res_m)}m field combining Sentinel-2 spectral anomalies with EnKF posterior mean ({res_info['limiting_factor']})."
+                            )
+                        )
                     ),
                     "crs": canonical_grid.get("crs", "EPSG:4326"),
                     "transform": canonical_grid.get("transform"),
@@ -1889,7 +2066,7 @@ class HistoricalStateReconstructor:
                 slope_prior = max(0.20, float(pred_rec.get("slope_applied", 1.0) or 1.0))
                 lo_b, hi_b = _CHANNEL_BOUNDS.get(obs_name, (-1.0, 1.0))
                 obs_for_filter = float(np.clip((float(obs_val) - bias_prior) / slope_prior, lo_b, hi_b))
-                r_var = sigma_obs * sigma_obs
+                r_var = (sigma_obs * sigma_obs) / max(0.30, slope_prior * slope_prior)
                 _proxy_update_single_obs(
                     ensemble, self.node_ids, obs_name, obs_for_filter,
                     mapping, sigma_obs, r_var, rng, target_indices=target_indices,
@@ -1925,6 +2102,7 @@ class HistoricalStateReconstructor:
                     obs_name=obs_name,
                     obs_dt=obs_time,
                     post_raw_pred=float(post_raw) if (post_raw is not None and math.isfinite(float(post_raw))) else raw_pred,
+                    var_scale_used=pred_rec.get("var_scale_applied"),
                 )
             support_step_ledger = _build_historical_support_ledger(
                 accepted_counts,
@@ -2271,6 +2449,7 @@ class HistoricalStateReconstructor:
                 spatial_delta=spatial_delta,
                 spatial_var=spatial_var,
                 has_spatial_observations=has_spatial_obs,
+                spatial_obs_count=spatial_obs_count,
             )
 
         tail_cross_layer = (full_trajectory[-1].get("cross_layer_refined") or {}) if full_trajectory else {}
@@ -2307,6 +2486,12 @@ class HistoricalStateReconstructor:
                 s["surface_type"]: s.get("effective_resolution_m")
                 for s in tail_surfaces
             },
+            "resolution_summary_by_state": {
+                s["surface_type"]: s.get("resolution_summary")
+                for s in tail_surfaces
+                if s.get("resolution_summary") is not None
+            },
+            "weather_provenance_summary": summarize_weather_provenance(weather_series),
             "cross_layer_intelligence": tail_cross_layer,
             "gap_summary": gap_summary,
             "trajectory": full_trajectory,
@@ -2542,9 +2727,10 @@ class HistoricalStateReconstructor:
                 slope_prior = max(0.20, float(pred_rec.get("slope_applied", 1.0) or 1.0))
                 lo_b, hi_b = _CHANNEL_BOUNDS.get(obs_name, (-1.0, 1.0))
                 obs_for_filter = float(np.clip((float(obs_val) - bias_prior) / slope_prior, lo_b, hi_b))
+                r_var_q = (sigma_obs * sigma_obs) / max(0.30, slope_prior * slope_prior)
                 _proxy_update_single_obs(
                     ensemble, self.node_ids, obs_name, obs_for_filter,
-                    mapping, sigma_obs, sigma_obs * sigma_obs, rng, target_indices=target_indices,
+                    mapping, sigma_obs, r_var_q, rng, target_indices=target_indices,
                 )
                 for s_idx in target_indices:
                     accepted_counts[STATE_NAMES[s_idx]] = accepted_counts.get(STATE_NAMES[s_idx], 0) + 1
@@ -2572,6 +2758,7 @@ class HistoricalStateReconstructor:
                     obs_name=obs_name,
                     obs_dt=obs_time,
                     post_raw_pred=float(post_raw) if (post_raw is not None and math.isfinite(float(post_raw))) else raw_pred,
+                    var_scale_used=pred_rec.get("var_scale_applied"),
                 )
             if isinstance(obs_channels.get("ndvi"), (int, float)):
                 exp_v = float((q_step_priors.get("layer2") or {}).get("expected_vigor", 0.55) or 0.55)
@@ -2669,6 +2856,7 @@ class HistoricalStateReconstructor:
             spatial_delta=spatial_delta,
             spatial_var=spatial_var,
             has_spatial_observations=has_spatial_obs,
+            spatial_obs_count=spatial_obs_count,
         )
         suppressed_spatial = {
             name: {
@@ -2782,6 +2970,15 @@ class HistoricalStateReconstructor:
                 s["surface_type"]: s.get("effective_resolution_m")
                 for s in surfaces_T
             },
+            "resolution_summary_by_state": {
+                s["surface_type"]: s.get("resolution_summary")
+                for s in surfaces_T
+                if s.get("resolution_summary") is not None
+            },
+            "weather_provenance_summary": summarize_weather_provenance(
+                weather_series,
+                knowledge_cutoff_dt=k_dt,
+            ),
             "suppressed_spatial_states": suppressed_spatial,
             "cross_layer_pre_priors": q_priors_T,
             "cross_layer_intelligence": q_refined_T,

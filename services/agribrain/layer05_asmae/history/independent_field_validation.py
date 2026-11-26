@@ -145,6 +145,175 @@ def normalize_soil_moisture_vwc(raw_val: Any) -> Optional[float]:
     return round(v, 5)
 
 
+def _parse_probe_depth_cm(rec: Dict[str, Any]) -> Optional[float]:
+    """Extract probe sensing depth in centimetres when reported."""
+    meta = rec.get("metadata") if isinstance(rec.get("metadata"), dict) else {}
+    for key in ("depth_cm", "sensorDepthCm", "probeDepthCm", "depthCm", "depth"):
+        val = rec.get(key) if rec.get(key) is not None else meta.get(key)
+        if val is None or isinstance(val, bool):
+            continue
+        if isinstance(val, (int, float)) and math.isfinite(float(val)) and float(val) >= 0.0:
+            return float(val)
+        txt = str(val).strip().lower()
+        if not txt:
+            continue
+        if "surface" in txt or "0-5" in txt or "0_5" in txt:
+            return 2.5
+        if "root" in txt:
+            return 20.0
+        import re as _re
+        m_m = _re.search(r"(\d+(?:\.\d+)?)\s*m\b", txt)
+        if m_m and "cm" not in txt and "mm" not in txt:
+            return float(m_m.group(1)) * 100.0
+        m_cm = _re.search(r"(\d+(?:\.\d+)?)", txt)
+        if m_cm:
+            return float(m_cm.group(1))
+    for key in ("depth_m", "depthM"):
+        val = rec.get(key) if rec.get(key) is not None else meta.get(key)
+        if isinstance(val, (int, float)) and not isinstance(val, bool) and math.isfinite(float(val)) and float(val) >= 0.0:
+            return float(val) * 100.0
+    return None
+
+
+def _classify_depth_zone(depth_cm: Optional[float], max_root_depth_cm: float = 120.0) -> Tuple[str, bool, str]:
+    """Classify probe depth compatibility against ASMAE `root_zone_water`."""
+    if depth_cm is None:
+        return "unspecified", True, "probe_depth_not_reported_provisional"
+    if depth_cm <= 7.5:
+        return "surface_0_5cm", False, "surface_probe_incompatible_with_root_zone_vwc"
+    if depth_cm <= min(75.0, max(45.0, max_root_depth_cm)):
+        return "root_zone_5_60cm", True, "compatible_root_zone_depth"
+    return "sub_root_zone_deep", False, "deep_sub_root_probe_excluded_from_root_zone_vwc"
+
+
+def _extract_probe_lat_lng(rec: Dict[str, Any]) -> Optional[Tuple[float, float]]:
+    """Extract (lat, lng) from probe metadata or GeoJSON point."""
+    lat = rec.get("lat") if rec.get("lat") is not None else rec.get("latitude")
+    lng = rec.get("lng") if rec.get("lng") is not None else (
+        rec.get("lon") if rec.get("lon") is not None else rec.get("longitude")
+    )
+    if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
+        if math.isfinite(float(lat)) and math.isfinite(float(lng)):
+            return float(lat), float(lng)
+    loc = rec.get("location")
+    if isinstance(loc, dict) and isinstance(loc.get("coordinates"), (list, tuple)) and len(loc["coordinates"]) >= 2:
+        try:
+            return float(loc["coordinates"][1]), float(loc["coordinates"][0])
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _point_in_ring(lat: float, lng: float, ring: Sequence[Sequence[float]], tol_deg: float = 1e-4) -> bool:
+    """Ray-casting point-in-ring test with small boundary tolerance (~10m GPS jitter)."""
+    if len(ring) < 3:
+        return False
+    xs = [float(p[0]) for p in ring]
+    ys = [float(p[1]) for p in ring]
+    if lng < min(xs) - tol_deg or lng > max(xs) + tol_deg or lat < min(ys) - tol_deg or lat > max(ys) + tol_deg:
+        return False
+    inside = False
+    n = len(ring)
+    for i in range(n):
+        x1, y1 = float(ring[i][0]), float(ring[i][1])
+        x2, y2 = float(ring[(i + 1) % n][0]), float(ring[(i + 1) % n][1])
+        if ((y1 > lat) != (y2 > lat)) and (lng < (x2 - x1) * (lat - y1) / ((y2 - y1) or 1e-12) + x1):
+            inside = not inside
+    if inside:
+        return True
+    # Boundary tolerance check against polygon edges
+    for i in range(n):
+        x1, y1 = float(ring[i][0]), float(ring[i][1])
+        x2, y2 = float(ring[(i + 1) % n][0]), float(ring[(i + 1) % n][1])
+        dx, dy = x2 - x1, y2 - y1
+        seg2 = dx * dx + dy * dy
+        if seg2 > 0:
+            t = max(0.0, min(1.0, ((lng - x1) * dx + (lat - y1) * dy) / seg2))
+            if math.hypot(lng - (x1 + t * dx), lat - (y1 + t * dy)) <= tol_deg:
+                return True
+    return False
+
+
+def _point_in_geojson(lat: float, lng: float, polygon_geojson: Optional[Dict[str, Any]]) -> Optional[bool]:
+    """Return True if point falls in polygon, False if outside, or None if geometry missing."""
+    if not isinstance(polygon_geojson, dict):
+        return None
+    geom = polygon_geojson.get("geometry") if polygon_geojson.get("type") == "Feature" else polygon_geojson
+    if not isinstance(geom, dict):
+        return None
+    gtype = geom.get("type")
+    coords = geom.get("coordinates") or []
+    if gtype == "Polygon" and coords:
+        return _point_in_ring(lat, lng, coords[0])
+    if gtype == "MultiPolygon" and coords:
+        return any(poly and _point_in_ring(lat, lng, poly[0]) for poly in coords)
+    return None
+
+
+def _sample_spatial_surface_at_coord(
+    lat: float,
+    lng: float,
+    spatial_surfaces: Optional[Sequence[Dict[str, Any]]],
+    surface_type: str = "ASMAE_ROOT_ZONE_WATER",
+) -> Optional[Dict[str, Any]]:
+    """Sample local pixel prediction, uncertainty, and local resolution at probe (lat, lng)."""
+    for surf in spatial_surfaces or []:
+        if not isinstance(surf, dict) or surf.get("surface_type") != surface_type:
+            continue
+        bounds = surf.get("bounds")
+        vals = surf.get("values")
+        if not (isinstance(bounds, (list, tuple)) and len(bounds) == 4 and isinstance(vals, list) and vals):
+            continue
+        min_lng, min_lat, max_lng, max_lat = [float(b) for b in bounds]
+        if max_lng <= min_lng or max_lat <= min_lat:
+            continue
+        if not (min_lng <= lng <= max_lng and min_lat <= lat <= max_lat):
+            continue
+        H = len(vals)
+        W = len(vals[0]) if vals[0] else 0
+        if H == 0 or W == 0:
+            continue
+        r = max(0, min(H - 1, int((max_lat - lat) / (max_lat - min_lat) * H)))
+        c = max(0, min(W - 1, int((lng - min_lng) / (max_lng - min_lng) * W)))
+        px_v = vals[r][c]
+        if px_v is None or not math.isfinite(float(px_v)):
+            continue
+        u_grid = surf.get("uncertainty")
+        px_u = u_grid[r][c] if isinstance(u_grid, list) and r < len(u_grid) and c < len(u_grid[r]) else None
+        l_grid = surf.get("local_resolution_map_m")
+        px_res = l_grid[r][c] if isinstance(l_grid, list) and r < len(l_grid) and c < len(l_grid[r]) else surf.get("effective_resolution_m")
+        return {
+            "row": r,
+            "col": c,
+            "value": float(px_v),
+            "sigma": float(px_u) if (px_u is not None and math.isfinite(float(px_u))) else None,
+            "local_resolution_m": float(px_res) if px_res is not None else None,
+        }
+    return None
+
+
+def _classify_probe_calibration(
+    rec: Dict[str, Any],
+    vendor: str,
+    vwc: float,
+    theta_sat: float,
+) -> Tuple[bool, str]:
+    """Determine if a probe reading represents calibrated, physically plausible instrumentation."""
+    if rec.get("isCalibrated") is False or rec.get("calibrated") is False:
+        return False, "explicit_uncalibrated"
+    cal_st = str(rec.get("calibrationStatus") or rec.get("calibration_status") or "").strip().lower()
+    if cal_st in ("uncalibrated", "raw", "draft", "factory_uncalibrated", "pending"):
+        return False, f"status_{cal_st}"
+    if float(vwc) > float(theta_sat) + 0.08:
+        return False, "implausible_above_saturation"
+    v_low = str(vendor or "").strip().lower()
+    if not v_low or v_low in ("unspecified", "unknown", "none", "unverified"):
+        if rec.get("isCalibrated") is True or rec.get("calibrated") is True or cal_st in ("calibrated", "verified"):
+            return True, "explicit_calibrated"
+        return False, "unspecified_vendor_unverified_calibration"
+    return True, "calibrated"
+
+
 def evaluate_independent_field_evidence(
     *,
     plot_id: str,
@@ -155,25 +324,55 @@ def evaluate_independent_field_evidence(
     crop_tasks: Optional[Sequence[Dict[str, Any]]] = None,
     mesia_packets: Optional[Sequence[Dict[str, Any]]] = None,
     exclude_mock_vendors: bool = True,
+    polygon_geojson: Optional[Dict[str, Any]] = None,
+    spatial_surfaces: Optional[List[Dict[str, Any]]] = None,
+    soil_context: Optional[Dict[str, Any]] = None,
+    max_scene_gap_days: float = 21.0,
+    enforce_causal_pre_reading: bool = True,
 ) -> Dict[str, Any]:
-    """Cross-check withheld physical evidence against ASMAE's S1/S2/ERA5 posterior trajectory."""
+    """Cross-check withheld physical evidence strictly causally, by depth, space, calibration, and independent device-days."""
     parsed_steps: List[Tuple[datetime, Dict[str, Any]]] = []
     for st in trajectory:
         if st.get("acquisition_time") and isinstance(st.get("posterior_state_means"), dict):
             parsed_steps.append((_parse_dt(st["acquisition_time"]), st))
     parsed_steps.sort(key=lambda item: item[0])
 
-    def _nearest_asmae_state(ts: datetime, max_gap_days: float = 14.0) -> Optional[Tuple[float, Dict[str, Any]]]:
-        best: Optional[Tuple[float, Dict[str, Any]]] = None
+    theta_sat = float((soil_context or {}).get("theta_sat") or 0.46)
+    max_root_cm = float((soil_context or {}).get("rooting_depth_m") or 1.2) * 100.0
+
+    def _causal_asmae_state(
+        ts: datetime,
+        max_gap_days: float = max_scene_gap_days,
+    ) -> Tuple[Optional[Tuple[float, Dict[str, Any]]], Optional[Tuple[float, Dict[str, Any]]]]:
+        """Find strictly causal (step_dt <= ts) match, plus separate post-reading reference."""
+        best_pre: Optional[Tuple[float, Dict[str, Any]]] = None
+        best_post: Optional[Tuple[float, Dict[str, Any]]] = None
         for dt_s, st in parsed_steps:
-            gap_d = abs((ts - dt_s).total_seconds()) / 86400.0
-            if gap_d <= max_gap_days and (best is None or gap_d < best[0]):
-                best = (gap_d, st)
-        return best
+            diff_d = (ts - dt_s).total_seconds() / 86400.0
+            if 0.0 <= diff_d <= max_gap_days:
+                if best_pre is None or diff_d < best_pre[0]:
+                    best_pre = (diff_d, st)
+            elif -max_gap_days <= diff_d < 0.0:
+                lead_d = -diff_d
+                if best_post is None or lead_d < best_post[0]:
+                    best_post = (lead_d, st)
+        return best_pre, best_post
 
     # 1. In-situ SensorReading validation (Soil Moisture VWC vs ASMAE root_zone_water)
     vwc_comparisons: List[Dict[str, Any]] = []
+    post_reading_refs: List[Dict[str, Any]] = []
+    grouped_device_days: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
     skipped_mock_count = 0
+    excluded_post_reading_non_causal = 0
+    excluded_surface_depth_count = 0
+    excluded_deep_depth_count = 0
+    excluded_out_of_plot_count = 0
+    unspecified_depth_count = 0
+    spatial_pixel_matched_count = 0
+    plot_mean_fallback_count = 0
+    uncalibrated_or_outlier_count = 0
+    depth_breakdown: Dict[str, int] = {}
+
     for rec in sensor_readings or []:
         vendor = str(rec.get("vendor") or "")
         if exclude_mock_vendors and any(tok in vendor.lower() for tok in ("mock", "simulator", "synthetic")):
@@ -184,18 +383,88 @@ def evaluate_independent_field_evidence(
         if vwc is None or not raw_ts:
             continue
         ts_dt = _parse_dt(raw_ts)
-        matched = _nearest_asmae_state(ts_dt, max_gap_days=21.0)
-        if matched is None:
+
+        depth_cm = _parse_probe_depth_cm(rec)
+        depth_zone, depth_compat, depth_note = _classify_depth_zone(depth_cm, max_root_cm)
+        depth_breakdown[depth_zone] = depth_breakdown.get(depth_zone, 0) + 1
+        if depth_zone == "unspecified":
+            unspecified_depth_count += 1
+        if not depth_compat:
+            if depth_zone == "surface_0_5cm":
+                excluded_surface_depth_count += 1
+            else:
+                excluded_deep_depth_count += 1
             continue
-        gap_d, st = matched
+
+        coords = _extract_probe_lat_lng(rec)
+        if coords is not None and polygon_geojson is not None:
+            in_poly = _point_in_geojson(coords[0], coords[1], polygon_geojson)
+            if in_poly is False:
+                excluded_out_of_plot_count += 1
+                continue
+
+        pre_match, post_match = _causal_asmae_state(ts_dt, max_gap_days=max_scene_gap_days)
+        if pre_match is None:
+            if post_match is not None:
+                excluded_post_reading_non_causal += 1
+                if len(post_reading_refs) < 5:
+                    p_gap, p_st = post_match
+                    p_mu = float((p_st.get("posterior_state_means") or {}).get("root_zone_water", 0.0))
+                    post_reading_refs.append({
+                        "timestamp": ts_dt.isoformat(),
+                        "device_id": str(rec.get("deviceId") or rec.get("sensorId") or ""),
+                        "observed_vwc": vwc,
+                        "post_reading_scene_lead_days": round(p_gap, 2),
+                        "asmae_rzw_mean_post_reading": round(p_mu, 5),
+                        "is_causal": False,
+                    })
+            if enforce_causal_pre_reading or post_match is None:
+                continue
+            gap_d, st = post_match
+            is_causal_lookup = False
+        else:
+            gap_d, st = pre_match
+            is_causal_lookup = True
+
         rzw_mu = float((st.get("posterior_state_means") or {}).get("root_zone_water", 0.0))
         rzw_sig = max(0.01, float((st.get("posterior_state_stds") or {}).get("root_zone_water", 0.05)))
+        spatial_mode = "plot_mean_no_probe_coords"
+        local_res_m: Optional[float] = None
+        if coords is not None:
+            px_sample = _sample_spatial_surface_at_coord(coords[0], coords[1], spatial_surfaces, "ASMAE_ROOT_ZONE_WATER")
+            if px_sample is not None:
+                rzw_mu = float(px_sample["value"])
+                if px_sample["sigma"] is not None:
+                    rzw_sig = max(0.01, float(px_sample["sigma"]))
+                local_res_m = px_sample.get("local_resolution_m")
+                spatial_mode = "local_canonical_grid_pixel"
+                spatial_pixel_matched_count += 1
+            else:
+                spatial_mode = "plot_mean_coords_unmapped_to_surface"
+                plot_mean_fallback_count += 1
+        else:
+            plot_mean_fallback_count += 1
+
+        is_cal, cal_reason = _classify_probe_calibration(rec, vendor, vwc, theta_sat)
+        if not is_cal:
+            uncalibrated_or_outlier_count += 1
+
         err = rzw_mu - vwc
         z_val = abs(err) / rzw_sig
-        vwc_comparisons.append({
+        dev_id = str(rec.get("deviceId") or rec.get("sensorId") or "unknown_device")
+        row = {
             "timestamp": ts_dt.isoformat(),
-            "device_id": str(rec.get("deviceId") or rec.get("sensorId") or ""),
+            "date_utc": ts_dt.date().isoformat(),
+            "device_id": dev_id,
             "vendor": vendor or "unspecified",
+            "depth_cm": depth_cm,
+            "depth_zone": depth_zone,
+            "depth_note": depth_note,
+            "spatial_lookup_mode": spatial_mode,
+            "local_resolution_m": local_res_m,
+            "is_calibrated": is_cal,
+            "calibration_status": cal_reason,
+            "is_causal_lookup": is_causal_lookup,
             "observed_vwc": vwc,
             "asmae_rzw_mean": round(rzw_mu, 5),
             "asmae_rzw_sigma": round(rzw_sig, 5),
@@ -203,38 +472,131 @@ def evaluate_independent_field_evidence(
             "abs_z": round(z_val, 3),
             "within_2sigma": bool(z_val <= 2.0),
             "scene_gap_days": round(gap_d, 2),
+        }
+        vwc_comparisons.append(row)
+        gkey = (str(plot_id), dev_id, ts_dt.date().isoformat())
+        grouped_device_days.setdefault(gkey, []).append(row)
+
+    # Collapse repeated timestamps on the same day into statistically independent (plot, device, date_utc) pairs
+    independent_rows: List[Dict[str, Any]] = []
+    for (_, dev_id, day_iso), grp in sorted(grouped_device_days.items()):
+        obs_mean = float(np.mean([r["observed_vwc"] for r in grp]))
+        pred_mean = float(grp[0]["asmae_rzw_mean"])
+        pred_sig = float(grp[0]["asmae_rzw_sigma"])
+        err_i = pred_mean - obs_mean
+        z_i = abs(err_i) / max(0.01, pred_sig)
+        independent_rows.append({
+            "date_utc": day_iso,
+            "device_id": dev_id,
+            "vendor": grp[0]["vendor"],
+            "raw_polls_collapsed": len(grp),
+            "depth_zone": grp[0]["depth_zone"],
+            "is_calibrated": all(r["is_calibrated"] for r in grp),
+            "calibration_status": grp[0]["calibration_status"],
+            "spatial_lookup_mode": grp[0]["spatial_lookup_mode"],
+            "is_causal_lookup": all(r["is_causal_lookup"] for r in grp),
+            "observed_vwc": round(obs_mean, 5),
+            "asmae_rzw_mean": round(pred_mean, 5),
+            "asmae_rzw_sigma": round(pred_sig, 5),
+            "error": round(err_i, 5),
+            "abs_z": round(z_i, 3),
+            "within_2sigma": bool(z_i <= 2.0),
+            "scene_gap_days": round(float(np.mean([r["scene_gap_days"] for r in grp])), 2),
         })
 
-    # Aggregate VWC metrics deduplicated by daily/device or across all readings
-    if vwc_comparisons:
-        errs = np.asarray([c["error"] for c in vwc_comparisons], dtype=float)
+    cal_indep = [r for r in independent_rows if r["is_calibrated"]]
+    uncal_indep = [r for r in independent_rows if not r["is_calibrated"]]
+
+    def _agg_subset(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        if not rows:
+            return {"n_independent_device_days": 0, "rmse_vwc": None, "mae_vwc": None, "bias_vwc": None, "coverage_2sigma": None}
+        e_arr = np.asarray([r["error"] for r in rows], dtype=float)
+        return {
+            "n_independent_device_days": len(rows),
+            "n_independent_devices": len({r["device_id"] for r in rows}),
+            "n_independent_days": len({r["date_utc"] for r in rows}),
+            "rmse_vwc": round(float(np.sqrt(np.mean(e_arr ** 2))), 5),
+            "mae_vwc": round(float(np.mean(np.abs(e_arr))), 5),
+            "bias_vwc": round(float(np.mean(e_arr)), 5),
+            "coverage_2sigma": round(float(np.mean([1.0 if r["within_2sigma"] else 0.0 for r in rows])), 4),
+        }
+
+    # Aggregate VWC metrics deduplicated into independent (plot_id, device_id, date_utc) pairs
+    if vwc_comparisons and independent_rows:
+        indep_errs = np.asarray([c["error"] for c in independent_rows], dtype=float)
+        n_indep_dev = len({r["device_id"] for r in independent_rows})
+        n_indep_days = len({r["date_utc"] for r in independent_rows})
+        indep_rmse = round(float(np.sqrt(np.mean(indep_errs ** 2))), 5)
+        indep_mae = round(float(np.mean(np.abs(indep_errs))), 5)
+        indep_bias = round(float(np.mean(indep_errs)), 5)
+        indep_cov2 = round(float(np.mean([1.0 if c["within_2sigma"] else 0.0 for c in independent_rows])), 4)
+        raw_errs = np.asarray([c["error"] for c in vwc_comparisons], dtype=float)
         vwc_summary = {
-            "n_readings": len(vwc_comparisons),
-            "rmse_vwc": round(float(np.sqrt(np.mean(errs ** 2))), 5),
-            "mae_vwc": round(float(np.mean(np.abs(errs))), 5),
-            "bias_vwc": round(float(np.mean(errs)), 5),
-            "coverage_2sigma": round(float(np.mean([1.0 if c["within_2sigma"] else 0.0 for c in vwc_comparisons])), 4),
+            "n_readings": len(independent_rows),
+            "raw_readings_matched": len(vwc_comparisons),
+            "n_independent_devices": n_indep_dev,
+            "n_independent_days": n_indep_days,
+            "n_independent_device_days": len(independent_rows),
+            "rmse_vwc": indep_rmse,
+            "mae_vwc": indep_mae,
+            "bias_vwc": indep_bias,
+            "coverage_2sigma": indep_cov2,
+            "independent_rmse_vwc": indep_rmse,
+            "independent_mae_vwc": indep_mae,
+            "independent_bias_vwc": indep_bias,
+            "independent_coverage_2sigma": indep_cov2,
+            "raw_uncollapsed_rmse_vwc": round(float(np.sqrt(np.mean(raw_errs ** 2))), 5),
+            "causal_only_enforced": bool(enforce_causal_pre_reading),
+            "excluded_post_reading_non_causal": excluded_post_reading_non_causal,
+            "excluded_surface_depth_count": excluded_surface_depth_count,
+            "excluded_deep_depth_count": excluded_deep_depth_count,
+            "unspecified_depth_count": unspecified_depth_count,
+            "depth_breakdown": depth_breakdown,
+            "excluded_out_of_plot_count": excluded_out_of_plot_count,
+            "spatial_pixel_matched_count": spatial_pixel_matched_count,
+            "plot_mean_fallback_count": plot_mean_fallback_count,
+            "uncalibrated_or_outlier_count": uncalibrated_or_outlier_count,
+            "calibrated_only_validation": _agg_subset(cal_indep),
+            "uncalibrated_reported_validation": _agg_subset(uncal_indep),
             "skipped_mock_or_simulator": skipped_mock_count,
+            "post_reading_reference": post_reading_refs,
+            "independent_sample_records": independent_rows[:5],
             "sample_records": vwc_comparisons[:5],
+            "deduplication_note": (
+                f"Collapsed {len(vwc_comparisons)} probe timestamps into {len(independent_rows)} statistically independent (plot, device, date_utc) pairs ({n_indep_dev} devices across {n_indep_days} days)."
+            ),
         }
     else:
         vwc_summary = {
             "n_readings": 0,
+            "raw_readings_matched": 0,
+            "n_independent_devices": 0,
+            "n_independent_days": 0,
+            "n_independent_device_days": 0,
+            "causal_only_enforced": bool(enforce_causal_pre_reading),
+            "excluded_post_reading_non_causal": excluded_post_reading_non_causal,
+            "excluded_surface_depth_count": excluded_surface_depth_count,
+            "excluded_deep_depth_count": excluded_deep_depth_count,
+            "excluded_out_of_plot_count": excluded_out_of_plot_count,
             "skipped_mock_or_simulator": skipped_mock_count,
-            "note": "No overlapping real soil moisture sensor timestamps within ±21 days of assimilated satellite scenes.",
+            "post_reading_reference": post_reading_refs,
+            "note": (
+                f"No causal pre-reading overlapping real soil moisture sensor timestamps within {int(max_scene_gap_days)} days before reading"
+                + (f" ({excluded_post_reading_non_causal} post-reading excluded for causality)." if excluded_post_reading_non_causal else ".")
+            ),
         }
 
-    # 2. MESIA multi-strata hydrological comparison via MesiaLayer3WaterBridge
+    # 2. MESIA multi-strata hydrological comparison via MesiaLayer3WaterBridge (strict causal pre-reading lookup)
     mesia_results: List[Dict[str, Any]] = []
     for m_pkt in mesia_packets or []:
         raw_ts = m_pkt.get("timestamp")
         if not raw_ts:
             continue
         ts_dt = _parse_dt(raw_ts)
-        matched = _nearest_asmae_state(ts_dt, max_gap_days=21.0)
-        if matched is None:
+        pre_match, _ = _causal_asmae_state(ts_dt, max_gap_days=max_scene_gap_days)
+        if pre_match is None:
             continue
-        _, st = matched
+        _, st = pre_match
         rzw_mu = float((st.get("posterior_state_means") or {}).get("root_zone_water", 0.25))
         stratum = LatticeStrata.ROOT_ZONE_5_30CM
         lik = BehaviourLikelihood(
@@ -263,17 +625,17 @@ def evaluate_independent_field_evidence(
             "is_hydrologically_consistent": bool(cmp_res.is_hydrologically_consistent),
         })
 
-    # 3. Scouting (CropObservation) honesty audit vs ASMAE satellite attribution
+    # 3. Scouting (CropObservation) honesty audit vs ASMAE satellite attribution (causal pre-reading)
     scouting_audits: List[Dict[str, Any]] = []
     for obs in crop_observations or []:
         raw_ts = obs.get("createdAt") or obs.get("timestamp")
         if not raw_ts:
             continue
         ts_dt = _parse_dt(raw_ts)
-        matched = _nearest_asmae_state(ts_dt, max_gap_days=21.0)
-        if matched is None:
+        pre_match, _ = _causal_asmae_state(ts_dt, max_gap_days=max_scene_gap_days)
+        if pre_match is None:
             continue
-        gap_d, st = matched
+        gap_d, st = pre_match
         means = st.get("posterior_state_means") or {}
         cl_ref = st.get("cross_layer_refined") or {}
         l5 = (cl_ref.get("layers_refined") or {}).get("layer5_biotic") or {}

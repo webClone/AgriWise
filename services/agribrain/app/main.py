@@ -769,8 +769,8 @@ def api_v2_historical_intelligence(
         scene_store=SceneProductStore(plot_id),
     )
 
-    polygon_geojson: Optional[Dict[str, Any]] = None
-    if plot_id in COHORT_GEOMETRIES:
+    polygon_geojson: Optional[Dict[str, Any]] = summary_data.get("polygon_geojson")
+    if polygon_geojson is None and plot_id in COHORT_GEOMETRIES:
         polygon_geojson, _, _ = _wkt_to_geojson_and_centroid(COHORT_GEOMETRIES[plot_id])
 
     geometry_hash = str(summary_data.get("geometry_hash") or "")
@@ -989,6 +989,9 @@ def api_v2_historical_intelligence(
         "has_spatial_observations": bool(q_res.get("has_spatial_observations")),
         "spatial_estimation_mode": "inferred_state_anomaly_field",
         "effective_resolution_by_state": q_res.get("effective_resolution_by_state") or {},
+        "resolution_summary_by_state": q_res.get("resolution_summary_by_state") or {},
+        "weather_provenance_summary": q_res.get("weather_provenance_summary") or {},
+        "independent_field_validation": summary_data.get("independent_field_validation") or {},
         "suppressed_spatial_states": q_res.get("suppressed_spatial_states") or {},
         "spatial_surfaces": q_res.get("spatial_surfaces") or [],
         "cross_layer_pre_priors": q_res.get("cross_layer_pre_priors") or {},

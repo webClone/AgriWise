@@ -1223,17 +1223,60 @@ class CrossLayerSpecialistBridge:
                 "detail": f"Layer 3 soil column VWC ({l3_rzw:.2f}) diverges from ASMAE SAR/optical-assimilated root-zone water ({rzw_post:.2f}).",
             })
 
-        # Normalized multi-layer competing explanations
-        pheno_score = 0.45 if l2_pre.get("phenology_stage") in ("senescence", "harvest") else 0.15
-        water_score = max(0.10, 0.70 * refined_water_prob + 0.30 * sm_post)
-        nutrient_score = max(0.08, n_prob_ref * (0.5 if contradictions else 0.8))
-        bio_score = max(0.05, float(l5_pre.get("weather_disease_suitability", 0.1) or 0.1) * 0.6)
-        tot_sc = pheno_score + water_score + nutrient_score + bio_score
+        # Normalized 6-mechanism multi-layer competing explanations (explicitly separated from field verification)
+        pheno_stage = str(l2_pre.get("phenology_stage") or "vegetative")
+        pheno_score = 0.45 if pheno_stage in ("senescence", "harvest", "maturation") else 0.12
+        water_score = max(0.08, 0.65 * refined_water_prob + 0.35 * sm_post)
+        vpd_val = float(l3_pre.get("vpd_kpa") or 1.0)
+        therm_prior = float(l2_pre.get("thermal_stress_prior") or 0.0)
+        heat_vpd_score = max(0.04, 0.60 * therm_prior + 0.40 * max(0.0, min(1.0, (vpd_val - 1.8) / 2.5)))
+        has_water_adequate_deficit = any(
+            c.get("code") == "unexplained_vigor_deficit_under_adequate_water" for c in contradictions
+        )
+        n_score = max(0.06, n_prob_ref * (1.25 if has_water_adequate_deficit else 0.85))
+        sal_raw = l4_pre.get("salinity_risk")
+        sal_measured = sal_raw is not None
+        sal_score = max(0.04, float(sal_raw)) if sal_measured else 0.06
+        bio_score = max(
+            0.05,
+            float(l5_pre.get("weather_disease_suitability", 0.1) or 0.1) * 0.65
+            + (0.14 if (vigor_anom <= -0.14 and refined_water_prob < 0.35) else 0.0),
+        )
+        mech_raw = {
+            "water_deficit": (water_score, "L3 water balance + ASMAE root-zone water & stress memory", "satellite_model_hypothesis"),
+            "heat_vpd": (heat_vpd_score, "L2 temperature thermal stress + L3 VPD atmospheric demand", "meteorological_forcing_hypothesis"),
+            "nitrogen_limitation": (n_score, "L4 water-gated N-deficiency & Photosynthesis NUE NNI", "satellite_model_hypothesis" if not contradictions else "contradiction_elevated_hypothesis"),
+            "salinity_osmotic_ec": (sal_score, "L4 SalinityEngine EC threshold risk", "measured_soil_ec" if sal_measured else "unverified_missing_input"),
+            "phenological_stage_transition": (pheno_score, f"L2 crop phenology stage ({pheno_stage})", "phenology_model_prior"),
+            "biotic_or_unobserved_management": (bio_score, "L5 biophysical canopy pathogen suitability + residual anomaly", "unverified_scouting_required"),
+        }
+        tot_sc = max(1e-8, sum(v[0] for v in mech_raw.values()))
+        ranked_mechanisms = sorted(
+            [
+                {
+                    "mechanism": m_name,
+                    "weight": round(score / tot_sc, 4),
+                    "raw_signal": round(score, 4),
+                    "evidence_basis": basis,
+                    "verification_status": v_stat,
+                    "confirmed_ground_truth": v_stat == "measured_soil_ec",
+                }
+                for m_name, (score, basis, v_stat) in mech_raw.items()
+            ],
+            key=lambda row: row["weight"],
+            reverse=True,
+        )
         competing_attribution = {
             "phenological_stage_transition": round(pheno_score / tot_sc, 4),
             "root_zone_water_deficit": round(water_score / tot_sc, 4),
-            "nutrient_or_salinity_limitation": round(nutrient_score / tot_sc, 4),
+            "heat_vpd_stress": round(heat_vpd_score / tot_sc, 4),
+            "nitrogen_limitation": round(n_score / tot_sc, 4),
+            "salinity_osmotic_ec": round(sal_score / tot_sc, 4),
+            "nutrient_or_salinity_limitation": round((n_score + sal_score) / tot_sc, 4),
             "biotic_or_canopy_confounder": round(bio_score / tot_sc, 4),
+            "dominant_hypothesis": ranked_mechanisms[0]["mechanism"] if ranked_mechanisms else None,
+            "ranked_mechanisms": ranked_mechanisms,
+            "verification_note": "Satellite & atmospheric stress attributions remain hypotheses until verified by field scouting, tissue assay, soil EC, or calibrated in-situ probes.",
         }
 
         # Refined L6 Yield + Profitability conditioned on ASMAE posterior vigor & water
@@ -1316,6 +1359,7 @@ class CrossLayerSpecialistBridge:
             "contradictions": contradictions,
             "trust_monitor": trust_conflict,
             "competing_attribution": competing_attribution,
+            "ranked_stress_mechanisms": ranked_mechanisms,
             "next_best_observation": voi_candidates[0],
             "value_of_information_ranking": voi_candidates,
             "engines_executed": [

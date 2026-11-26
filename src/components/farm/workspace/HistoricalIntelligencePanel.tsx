@@ -44,6 +44,26 @@ export interface HistoricalIntelligencePayload {
   has_spatial_observations: boolean;
   spatial_estimation_mode?: string;
   effective_resolution_by_state?: Record<string, number | null>;
+  resolution_summary_by_state?: Record<
+    string,
+    {
+      base_m?: number;
+      min_m?: number;
+      median_m?: number;
+      max_m?: number;
+      is_spatially_varying?: boolean;
+      edge_degraded_pixels?: number;
+      low_support_pixels?: number;
+      high_dispersion_pixels?: number;
+    }
+  >;
+  weather_provenance_summary?: {
+    total_days?: number;
+    source_roles?: string[];
+    reanalysis_backfill_days?: number;
+    max_reanalysis_lag_days?: number;
+    weather_availability_note?: string;
+  };
   suppressed_spatial_states?: Record<string, { spatial_support?: string; reason?: string | null }>;
   temporal_query_scope?: {
     mode?: string;
@@ -75,7 +95,19 @@ export interface HistoricalIntelligencePayload {
       dominant_hypothesis?: string;
       ambiguity_score?: number;
       attribution_uncertainty_note?: string;
+      ranked_mechanisms?: Array<{
+        mechanism: string;
+        weight: number;
+        evidence_basis?: string;
+        verification_status?: string;
+      }>;
     };
+    ranked_stress_mechanisms?: Array<{
+      mechanism: string;
+      weight: number;
+      evidence_basis?: string;
+      verification_status?: string;
+    }>;
     next_best_observation?: {
       observation_type?: string;
       voi_score?: number;
@@ -392,6 +424,15 @@ export default function HistoricalIntelligencePanel({
                     .map((r) => `${r}m`)
                     .join(" / ")}{" "}
                   across {Object.keys(data.effective_resolution_by_state).length} states
+                  {Object.values(data.resolution_summary_by_state || {}).some((rs) => rs?.is_spatially_varying)
+                    ? ` · locally varying (${Math.min(
+                        ...Object.values(data.resolution_summary_by_state || {})
+                          .map((rs) => rs?.min_m ?? 999)
+                      )}–${Math.max(
+                        ...Object.values(data.resolution_summary_by_state || {})
+                          .map((rs) => rs?.max_m ?? 0)
+                      )}m)`
+                    : ""}
                   {data.suppressed_spatial_states && Object.keys(data.suppressed_spatial_states).length > 0
                     ? ` · ${Object.keys(data.suppressed_spatial_states).length} scalar/withheld`
                     : ""}
@@ -474,12 +515,24 @@ export default function HistoricalIntelligencePanel({
                 </div>
               )}
 
-              {Object.keys(hypotheses).length > 0 && (
+              {((cl?.ranked_stress_mechanisms && cl.ranked_stress_mechanisms.length > 0) ||
+                Object.keys(hypotheses).length > 0) && (
                 <div style={{ marginTop: "6px", fontSize: "9.5px", color: "#cbd5e1" }}>
-                  <span style={{ color: "#94a3b8" }}>Competing Hypotheses: </span>
-                  {Object.entries(hypotheses)
-                    .map(([k, v]) => `${k.replaceAll("_", " ")} (${Math.round(Number(v) * 100)}%)`)
-                    .join(" · ")}
+                  <span style={{ color: "#94a3b8" }}>Ranked Mechanisms (Hypothesis vs Verified): </span>
+                  {cl?.ranked_stress_mechanisms && cl.ranked_stress_mechanisms.length > 0
+                    ? cl.ranked_stress_mechanisms
+                        .slice(0, 4)
+                        .map(
+                          (m) =>
+                            `${m.mechanism.replaceAll("_", " ")} (${Math.round(m.weight * 100)}%, ${
+                              m.verification_status === "measured_soil_ec" ? "measured" : "hypothesis"
+                            })`
+                        )
+                        .join(" · ")
+                    : Object.entries(hypotheses)
+                        .filter(([, v]) => typeof v === "number")
+                        .map(([k, v]) => `${k.replaceAll("_", " ")} (${Math.round(Number(v) * 100)}%)`)
+                        .join(" · ")}
                 </div>
               )}
             </div>
@@ -570,6 +623,9 @@ export default function HistoricalIntelligencePanel({
               </div>
               <div style={{ color: "#94a3b8", fontSize: "9px" }}>
                 Spatial maps: inferred state anomaly fields ({data.spatial_estimation_mode || "model + S1/S2 anomalies"}, not direct physical pixel sensors).
+                {data.weather_provenance_summary?.reanalysis_backfill_days
+                  ? ` Weather: ERA5 reanalysis (${data.weather_provenance_summary.max_reanalysis_lag_days ?? 5}d lag metadata).`
+                  : ""}
               </div>
               {ablation.s1_s2_only_rmse != null && (
                 <div>
