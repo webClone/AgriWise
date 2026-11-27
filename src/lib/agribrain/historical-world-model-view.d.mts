@@ -3,11 +3,18 @@ export interface WorldModelV1SummaryView {
   tenantVerified: boolean;
   syntheticRejected: boolean;
   cropBadgeLabel: string | null;
+  cropDeclarationAuthority: string | null;
   tenantLabel: string | null;
+  tenantOwnershipSource: string | null;
   asOfCropLabel: string | null;
   physicalRegime: string | null;
+  preKnownCycleUnknown: boolean;
   unknownMassPct: number | null;
   latestEoGroup: string | null;
+  withheldReprocessedAfterK: number;
+  cropChronologyHash: string | null;
+  weatherLineageHash: string | null;
+  crossLayerPriorVersion: string | null;
   exploratory36_90d: {
     n: number;
     skillVsPersistence: number | null;

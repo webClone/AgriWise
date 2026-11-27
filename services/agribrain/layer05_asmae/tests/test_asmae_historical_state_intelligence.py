@@ -1194,6 +1194,8 @@ def test_independent_field_validation_excludes_mocks_and_unconfirmed_tasks():
                 "vendor": "Sentek Drill & Drop",
                 "isCalibrated": True,
                 "calibrationCertificateId": "SENTEK-TEST-01",
+                "calibrationAuthority": "sentek_lab_cert_authority",
+                "calibrationVerifiedAt": "2026-05-01T00:00:00+00:00",
                 "deviceId": "S1",
             },
             {"timestamp": "2026-05-10T12:05:00+00:00", "soilMoisture": 99.0, "vendor": "Mock Vendor", "deviceId": "M1"},

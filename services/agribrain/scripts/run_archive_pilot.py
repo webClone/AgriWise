@@ -731,6 +731,7 @@ def _resolve_plot_domain_context(
                         farm_doc = None
                     ccl_list = []
                     try:
+                        id_candidates = [oid, plot_id]
                         ccl_list = list(db.ConfirmedCropLabel.find({"plotId": {"$in": id_candidates}}))
                     except Exception:
                         ccl_list = []
@@ -1086,8 +1087,20 @@ def run_historical_intelligence_for_plot(
             encoding="utf-8",
         )
     summary_path = out_dir / "historical_state_intelligence_summary.json"
-    summary_payload = {
-        **res,
+    res_disk = dict(res)
+    if isinstance(res_disk.get("crop_fusion"), dict):
+        cf_disk = dict(res_disk["crop_fusion"])
+        cf_disk.pop("_causal_prefix_cache", None)
+        res_disk["crop_fusion"] = cf_disk
+    recon_disk = dict(res_disk.get("reconstruction") or {})
+    retro_disk = dict(recon_disk.get("retrovalidation") or {})
+    step_samples = retro_disk.pop("step_transfer_samples", None)
+    if retro_disk:
+        recon_disk["retrovalidation"] = retro_disk
+    if recon_disk:
+        res_disk["reconstruction"] = recon_disk
+    disk_payload = {
+        **res_disk,
         "plot_id": plot_id,
         "plot_name": dom["plot_name"],
         "tenant_id": tenant_id,
@@ -1104,8 +1117,12 @@ def run_historical_intelligence_for_plot(
         "domain_identity": dom["domain_identity"],
         "domain_chronology": domain_chronology.to_summary(),
     }
-    summary_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
-    return summary_payload
+    summary_path.write_text(json.dumps(disk_payload, indent=2, default=str), encoding="utf-8")
+    return {
+        **disk_payload,
+        "reconstruction": res.get("reconstruction") or recon_disk,
+        "step_transfer_samples": step_samples or [],
+    }
 
 
 def main():
@@ -1145,6 +1162,7 @@ def main():
                 "domain_identity": res.get("domain_identity") or _dom_p["domain_identity"],
                 "domain_chronology": _dom_p["domain_chronology"],
                 "retrovalidation": (res.get("reconstruction") or {}).get("retrovalidation") or {},
+                "step_transfer_samples": res.get("step_transfer_samples") or [],
                 "independent_field_validation": res.get("independent_field_validation") or {},
                 "crop_fusion": res.get("crop_fusion") or {},
             })
@@ -1202,8 +1220,12 @@ def main():
                 "coverage_1sigma": retro.get("coverage_1sigma"),
                 "coverage_2sigma": retro.get("coverage_2sigma"),
                 "skill_vs_persistence": retro.get("skill_vs_persistence"),
+                "mse_skill_score_vs_persistence": retro.get("mse_skill_score_vs_persistence"),
+                "rmse_skill_ratio_vs_persistence": retro.get("rmse_skill_ratio_vs_persistence"),
                 "bma_skill_vs_persistence": retro.get("bma_skill_vs_persistence"),
                 "skill_vs_climatology": retro.get("skill_vs_climatology"),
+                "mse_skill_score_vs_climatology": retro.get("mse_skill_score_vs_climatology"),
+                "rmse_skill_ratio_vs_climatology": retro.get("rmse_skill_ratio_vs_climatology"),
                 "short_1_7d_skill": (mh_by_h.get("short_1_7d") or {}).get("skill_vs_persistence"),
                 "medium_8_16d_skill": (mh_by_h.get("medium_8_16d") or {}).get("skill_vs_persistence"),
                 "extended_17_35d_skill": (mh_by_h.get("extended_17_35d") or {}).get("skill_vs_persistence"),
@@ -1216,7 +1238,9 @@ def main():
                 "independent_field_validation": fval,
                 "exploratory_36_90d_skill": (((retro_full.get("multi_horizon") or {}).get("exploratory_by_horizon") or {}).get("exploratory_36_90d") or {}).get("skill_vs_persistence"),
                 "crop_identity_verified": (res.get("domain_identity") or {}).get("crop_identity_verified"),
+                "crop_declaration_authority": (res.get("domain_identity") or {}).get("crop_declaration_authority"),
                 "tenant_identity_verified": (res.get("domain_identity") or {}).get("tenant_identity_verified"),
+                "tenant_ownership_source": (res.get("domain_identity") or {}).get("tenant_ownership_source"),
                 "eo_crop_top_group": ((res.get("crop_fusion") or {}).get("latest_crop_posterior") or {}).get("top_group"),
                 "scientific_failure_cause": (retro_full.get("scientific_failure_diagnosis") or {}).get("primary_cause"),
                 "ablation_cross_layer_rmse": abl.get("cross_layer_rmse"),
@@ -1224,9 +1248,9 @@ def main():
             })
         from services.agribrain.layer05_asmae.history.benchmark_matrix import evaluate_cross_plot_matrix
         benchmark_matrix = evaluate_cross_plot_matrix(matrix_cohort_items)
-        bm_out = Path(os.getcwd()) / "services" / "agribrain" / "artifacts" / "archive_pilot_reports" / "asmae_world_model_v1_benchmark_matrix.json"
-        bm_out.parent.mkdir(parents=True, exist_ok=True)
-        bm_out.write_text(json.dumps(benchmark_matrix, indent=2, default=str), encoding="utf-8")
+        bm_out_v2 = Path(os.getcwd()) / "services" / "agribrain" / "artifacts" / "archive_pilot_reports" / "asmae_world_model_v2_benchmark_matrix.json"
+        bm_out_v2.parent.mkdir(parents=True, exist_ok=True)
+        bm_out_v2.write_text(json.dumps(benchmark_matrix, indent=2, default=str), encoding="utf-8")
         if args.json_summary_out:
             out_p = Path(args.json_summary_out)
             out_p.parent.mkdir(parents=True, exist_ok=True)

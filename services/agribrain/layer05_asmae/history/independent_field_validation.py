@@ -328,7 +328,7 @@ def _classify_probe_calibration(
     *,
     reading_ts: Optional[datetime] = None,
 ) -> Tuple[bool, str]:
-    """Require affirmative calibration proof (P1-2); vendor name alone is insufficient."""
+    """Require independently verified authority certificate + timestamp (never bare self-asserted flags)."""
     if rec.get("isCalibrated") is False or rec.get("calibrated") is False:
         return False, "explicit_uncalibrated"
     cal_st = str(rec.get("calibrationStatus") or rec.get("calibration_status") or "").strip().lower()
@@ -343,23 +343,43 @@ def _classify_probe_calibration(
                 return False, "calibration_expired"
         except Exception:
             pass
-    has_proof = bool(
+    cert_id = str(
+        rec.get("calibrationCertificateId")
+        or rec.get("calibration_certificate_id")
+        or rec.get("calibrationCurveId")
+        or rec.get("calibration_curve_id")
+        or ""
+    ).strip()
+    authority = str(
+        rec.get("calibrationAuthority")
+        or rec.get("calibration_authority")
+        or rec.get("calibrationVerifiedBy")
+        or rec.get("calibration_verified_by")
+        or ""
+    ).strip()
+    verified_at_raw = rec.get("calibrationVerifiedAt") or rec.get("calibration_verified_at")
+    verified_at_dt: Optional[datetime] = None
+    if verified_at_raw:
+        try:
+            verified_at_dt = _parse_dt(verified_at_raw)
+        except Exception:
+            verified_at_dt = None
+    if verified_at_dt is not None and reading_ts is not None and verified_at_dt > reading_ts:
+        return False, "calibration_verified_after_reading"
+
+    has_verified_cert = bool(cert_id and authority and verified_at_dt is not None)
+    has_unverified_claim = bool(
         rec.get("isCalibrated") is True
         or rec.get("calibrated") is True
         or cal_st in ALLOWED_CALIBRATION_AUTHORITIES
-        or str(
-            rec.get("calibrationCertificateId")
-            or rec.get("calibration_certificate_id")
-            or rec.get("calibrationAuthority")
-            or rec.get("calibration_authority")
-            or rec.get("calibrationCurveId")
-            or rec.get("calibration_curve_id")
-            or ""
-        ).strip()
+        or cert_id
+        or authority
     )
     v_low = str(vendor or "").strip().lower()
-    if has_proof:
-        return True, "calibrated" if (cal_st == "calibrated" or v_low) else "explicit_calibrated"
+    if has_verified_cert:
+        return True, "calibrated" if (cal_st == "calibrated" or v_low) else "verified_certificate_calibrated"
+    if has_unverified_claim:
+        return False, "unverified_self_asserted_calibration"
     if v_low and v_low not in ("unspecified", "unknown", "none", "unverified"):
         return False, CALIBRATION_STATUS_VENDOR_UNVERIFIED
     return False, "unspecified_vendor_unverified_calibration"
@@ -381,27 +401,39 @@ def evaluate_independent_field_evidence(
     soil_context: Optional[Dict[str, Any]] = None,
     max_scene_gap_days: float = 21.0,
     enforce_causal_pre_reading: bool = True,
+    knowledge_cutoff_K: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Cross-check withheld physical evidence strictly causally, by depth, space, calibration, and independent device-days."""
-    parsed_steps: List[Tuple[datetime, Dict[str, Any]]] = []
+    k_limit_dt: Optional[datetime] = _parse_dt(knowledge_cutoff_K) if knowledge_cutoff_K else None
+    parsed_steps: List[Tuple[datetime, Optional[datetime], Dict[str, Any]]] = []
     for st in trajectory:
         if st.get("acquisition_time") and isinstance(st.get("posterior_state_means"), dict):
-            parsed_steps.append((_parse_dt(st["acquisition_time"]), st))
+            acq_d = _parse_dt(st["acquisition_time"])
+            comm_d = _parse_dt(st["committed_at"]) if st.get("committed_at") else None
+            if k_limit_dt is not None and comm_d is not None and comm_d > k_limit_dt:
+                continue
+            parsed_steps.append((acq_d, comm_d, st))
     parsed_steps.sort(key=lambda item: item[0])
 
     theta_sat = float((soil_context or {}).get("theta_sat") or 0.46)
     max_root_cm = float((soil_context or {}).get("rooting_depth_m") or 1.2) * 100.0
+    excluded_late_committed_scene_count = 0
 
     def _causal_asmae_state(
         ts: datetime,
         max_gap_days: float = max_scene_gap_days,
     ) -> Tuple[Optional[Tuple[float, Dict[str, Any]]], Optional[Tuple[float, Dict[str, Any]]]]:
-        """Find strictly causal (step_dt <= ts) match, plus separate post-reading reference."""
+        """Find strictly causal (step_dt <= ts AND committed_at <= min(ts, K)) match, plus post-reading ref."""
+        nonlocal excluded_late_committed_scene_count
+        eff_k = min(ts, k_limit_dt) if k_limit_dt is not None else ts
         best_pre: Optional[Tuple[float, Dict[str, Any]]] = None
         best_post: Optional[Tuple[float, Dict[str, Any]]] = None
-        for dt_s, st in parsed_steps:
+        for dt_s, comm_d, st in parsed_steps:
             diff_d = (ts - dt_s).total_seconds() / 86400.0
             if 0.0 <= diff_d <= max_gap_days:
+                if comm_d is not None and comm_d > eff_k:
+                    excluded_late_committed_scene_count += 1
+                    continue
                 if best_pre is None or diff_d < best_pre[0]:
                     best_pre = (diff_d, st)
             elif -max_gap_days <= diff_d < 0.0:
@@ -426,6 +458,7 @@ def evaluate_independent_field_evidence(
     plot_mean_fallback_count = 0
     uncalibrated_or_outlier_count = 0
     vendor_unverified_cal_count = 0
+    unverified_self_asserted_cal_count = 0
     depth_breakdown: Dict[str, int] = {}
 
     for rec in sensor_readings or []:
@@ -528,6 +561,8 @@ def evaluate_independent_field_evidence(
             uncalibrated_or_outlier_count += 1
             if cal_reason == CALIBRATION_STATUS_VENDOR_UNVERIFIED:
                 vendor_unverified_cal_count += 1
+            elif cal_reason == "unverified_self_asserted_calibration":
+                unverified_self_asserted_cal_count += 1
 
         err = rzw_mu - vwc
         z_val = abs(err) / rzw_sig
@@ -628,6 +663,7 @@ def evaluate_independent_field_evidence(
             "raw_uncollapsed_rmse_vwc": round(float(np.sqrt(np.mean(raw_errs ** 2))), 5),
             "causal_only_enforced": bool(enforce_causal_pre_reading),
             "excluded_post_reading_non_causal": excluded_post_reading_non_causal,
+            "excluded_late_committed_scene_non_causal": excluded_late_committed_scene_count,
             "excluded_surface_depth_count": excluded_surface_depth_count,
             "excluded_deep_depth_count": excluded_deep_depth_count,
             "unspecified_depth_count": unspecified_depth_count,
@@ -644,6 +680,7 @@ def evaluate_independent_field_evidence(
             "plot_mean_fallback_count": plot_mean_fallback_count,
             "uncalibrated_or_outlier_count": uncalibrated_or_outlier_count,
             "vendor_known_unverified_calibration_count": vendor_unverified_cal_count,
+            "unverified_self_asserted_calibration_count": unverified_self_asserted_cal_count,
             "calibrated_only_validation": _agg_subset(cal_indep),
             "uncalibrated_reported_validation": _agg_subset(uncal_indep),
             "skipped_mock_or_simulator": skipped_mock_count,
@@ -663,11 +700,13 @@ def evaluate_independent_field_evidence(
             "n_independent_device_days": 0,
             "causal_only_enforced": bool(enforce_causal_pre_reading),
             "excluded_post_reading_non_causal": excluded_post_reading_non_causal,
+            "excluded_late_committed_scene_non_causal": excluded_late_committed_scene_count,
             "excluded_surface_depth_count": excluded_surface_depth_count,
             "excluded_deep_depth_count": excluded_deep_depth_count,
             "excluded_out_of_plot_count": excluded_out_of_plot_count,
             "excluded_future_surface_non_causal": excluded_future_surface_non_causal,
             "vendor_known_unverified_calibration_count": vendor_unverified_cal_count,
+            "unverified_self_asserted_calibration_count": unverified_self_asserted_cal_count,
             "skipped_mock_or_simulator": skipped_mock_count,
             "post_reading_reference": post_reading_refs,
             "note": (

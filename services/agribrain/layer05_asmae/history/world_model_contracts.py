@@ -1,4 +1,4 @@
-"""Frozen schema contracts for ASMAE World Model V1 (Workstreams W1-W8 + P1-1..P1-4)."""
+"""Frozen schema contracts for ASMAE World Model V2 (W1-W5 + P1-1..P1-4)."""
 
 from __future__ import annotations
 
@@ -6,13 +6,24 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 
-WORLD_MODEL_CONTRACT_VERSION = "asmae_world_model_v1"
+WORLD_MODEL_CONTRACT_VERSION = "asmae_world_model_v2"
 
 CONFIRMED_SCOUTING_STATUSES = frozenset({
     "CONFIRMED",
     "VERIFIED",
     "APPROVED",
     "VALIDATION_CONFIRMED",
+})
+
+CONFIRMED_CROP_AUTHORITIES = frozenset({
+    "FARMER_CONFIRMED",
+    "USER_CONFIRMED",
+    "AGRONOMIST_CONFIRMED",
+    "OFFICIAL_PARCEL_LABEL",
+})
+
+DECLARATION_ONLY_CROP_AUTHORITIES = frozenset({
+    "REGISTRY_DECLARED",
 })
 
 FALLBACK_TENANT_TOKENS = frozenset({
@@ -38,6 +49,7 @@ CALIBRATION_STATUS_VENDOR_UNVERIFIED = "vendor_known_unverified_calibration"
 
 FAILURE_CAUSE_CODES = frozenset({
     "unverified_domain_identity",
+    "unconfirmed_crop_declaration",
     "insufficient_observations",
     "regime_transition_mismatch",
     "wrong_physical_prior",
@@ -74,6 +86,10 @@ class DomainIdentityContract:
     resolved_crop_code: str
     crop_variety: Optional[str] = None
     crop_architecture_class: Optional[str] = None
+    crop_declaration_authority: str = "UNKNOWN"
+    crop_registry_recognized: bool = False
+    crop_declared_at: Optional[str] = None
+    crop_declared_source: str = "unknown"
     soil_identity_verified: bool = False
     soil_texture: str = "loam"
     soil_resolution_source: str = "fallback_unverified"
@@ -82,7 +98,19 @@ class DomainIdentityContract:
     plot_name: Optional[str] = None
 
     def qualifies_for_crop_identity(self) -> bool:
-        return bool(self.crop_identity_verified)
+        return bool(
+            self.crop_identity_verified
+            and self.crop_declaration_authority in CONFIRMED_CROP_AUTHORITIES
+            and not self.synthetic_label_rejected
+        )
+
+    def qualifies_for_production_archive(self) -> bool:
+        return bool(
+            self.tenant_identity_verified
+            and self.qualifies_for_crop_identity()
+            and self.soil_identity_verified
+            and not self.identity_block_reasons
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         return _to_json_safe(asdict(self))
@@ -90,7 +118,7 @@ class DomainIdentityContract:
 
 @dataclass(frozen=True)
 class CropIntervalRecord:
-    """Bitemporal crop planting/harvest interval record."""
+    """Bitemporal crop planting/harvest interval record with authority separation."""
 
     record_id: str
     crop_code: str
@@ -105,6 +133,11 @@ class CropIntervalRecord:
     architecture_class: Optional[str] = None
     estimated_yield: Optional[float] = None
     notes: Optional[str] = None
+    authority: str = "UNKNOWN"
+    confirmed: bool = False
+    registry_recognized: bool = False
+    declared_at: Optional[str] = None
+    confirmation_source: str = "unknown"
 
     def to_dict(self) -> Dict[str, Any]:
         return _to_json_safe(asdict(self))
@@ -173,7 +206,7 @@ class ScoutingRecord:
 
 @dataclass(frozen=True)
 class ScientificFailureDiagnosis:
-    """Structured root-cause scientific diagnosis for non-qualifying plots or horizons (W7)."""
+    """Structured root-cause scientific diagnosis for non-qualifying plots or horizons."""
 
     plot_id: str
     primary_cause: Optional[str]
@@ -188,8 +221,10 @@ class ScientificFailureDiagnosis:
 __all__ = [
     "ALLOWED_CALIBRATION_AUTHORITIES",
     "CALIBRATION_STATUS_VENDOR_UNVERIFIED",
+    "CONFIRMED_CROP_AUTHORITIES",
     "CONFIRMED_SCOUTING_STATUSES",
     "CropIntervalRecord",
+    "DECLARATION_ONLY_CROP_AUTHORITIES",
     "DomainIdentityContract",
     "FAILURE_CAUSE_CODES",
     "FALLBACK_TENANT_TOKENS",

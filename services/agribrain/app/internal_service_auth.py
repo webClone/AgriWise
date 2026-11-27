@@ -304,3 +304,33 @@ async def require_internal_service_request(request: Request) -> PlotNamespace:
         )
 
     return PlotNamespace(tenant_id=tenant_id, farm_id=farm_id, plot_id=plot_id)
+
+
+BENCHMARK_COHORT_SCOPE = "__benchmark_cohort__"
+BENCHMARK_ADMIN_ROLE = "benchmark_admin"
+
+
+def _allowed_benchmark_admin_tenants() -> set[str]:
+    raw = os.getenv("AGRIBRAIN_BENCHMARK_ADMIN_TENANTS", "benchmark_admin,admin_benchmark")
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+async def require_benchmark_admin_request(request: Request) -> PlotNamespace:
+    """Authenticate an internal HMAC caller AND require cryptographically bound benchmark-admin authorization."""
+    ns = await require_internal_service_request(request)
+    role_hdr = (request.headers.get("X-AgriBrain-Benchmark-Role") or "").strip().lower()
+    if role_hdr != BENCHMARK_ADMIN_ROLE:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cross-plot benchmark matrix requires benchmark_admin role authorization",
+        )
+    if (
+        ns.plot_id != BENCHMARK_COHORT_SCOPE
+        or ns.farm_id != BENCHMARK_COHORT_SCOPE
+        or ns.tenant_id not in _allowed_benchmark_admin_tenants()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Plot/tenant-scoped token is not authorized to read cross-tenant benchmark cohort matrix",
+        )
+    return ns

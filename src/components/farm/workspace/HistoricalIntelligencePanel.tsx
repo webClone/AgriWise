@@ -180,10 +180,16 @@ export interface HistoricalIntelligencePayload {
     reconciliation_note?: string;
   };
   world_model_contract_version?: string;
+  crop_chronology_hash?: string | null;
+  weather_lineage_hash?: string | null;
+  cross_layer_prior_version?: string | null;
+  withheld_reprocessed_after_k_count?: number;
   domain_identity?: {
     resolved_crop_code?: string;
     crop_identity_verified?: boolean;
+    crop_declaration_authority?: string | null;
     tenant_identity_verified?: boolean;
+    tenant_ownership_source?: string | null;
     is_isolated_dev_fixture?: boolean;
     synthetic_label_rejected?: boolean;
     crop_resolution_source?: string;
@@ -192,7 +198,9 @@ export interface HistoricalIntelligencePayload {
   } | null;
   crop_context_as_of?: {
     crop?: string | null;
+    declared_crop?: string | null;
     crop_identity_verified?: boolean;
+    crop_declaration_authority?: string | null;
     physical_regime?: string | null;
     unknown_probability?: number | null;
     crop_group_posterior?: Record<string, number> | null;
@@ -704,7 +712,7 @@ export default function HistoricalIntelligencePanel({
               }}
             >
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "4px" }}>
-                <span style={{ fontWeight: 700, color: "#7dd3fc" }}>Crop Identity & Domain Authority (V1)</span>
+                <span style={{ fontWeight: 700, color: "#7dd3fc" }}>Crop Identity & Domain Authority (V2)</span>
                 {wmView.cropBadgeLabel && (
                   <span
                     data-testid="hist-domain-identity-badge"
@@ -726,6 +734,8 @@ export default function HistoricalIntelligencePanel({
               {domId && (
                 <div style={{ fontSize: "9.5px", color: "#94a3b8" }}>
                   Tenant: {wmView.tenantLabel}
+                  {wmView.tenantOwnershipSource ? ` (${wmView.tenantOwnershipSource})` : ""}
+                  {wmView.cropDeclarationAuthority ? ` · Authority: ${wmView.cropDeclarationAuthority}` : ""}
                   {wmView.syntheticRejected ? " · Synthetic training seed rejected" : ""}
                   {domId.soil_texture ? ` · Soil: ${domId.soil_texture}` : ""}
                 </div>
@@ -738,12 +748,28 @@ export default function HistoricalIntelligencePanel({
                   {wmView.unknownMassPct !== null ? ` · Unknown mass: ${wmView.unknownMassPct}%` : ""}
                 </div>
               )}
+              {wmView.preKnownCycleUnknown && (
+                <div style={{ fontSize: "9px", color: "#fcd34d" }}>
+                  Pre-cycle unknown period (no unverified fallow/soil-prep assumption claimed)
+                </div>
+              )}
+              {wmView.withheldReprocessedAfterK > 0 && (
+                <div style={{ fontSize: "9px", color: "#93c5fd" }}>
+                  Withheld reprocessed/future-K products (&gt;K): {wmView.withheldReprocessedAfterK}
+                </div>
+              )}
               {wmView.latestEoGroup && (
                 <div style={{ fontSize: "9px", color: "#94a3b8" }}>
                   Latest Season EO Group:{" "}
                   <span style={{ color: "#cbd5e1" }}>
                     {wmView.latestEoGroup} (uncalibrated group ranking)
                   </span>
+                </div>
+              )}
+              {(wmView.cropChronologyHash || wmView.weatherLineageHash) && (
+                <div style={{ fontSize: "8.5px", color: "#64748b", fontFamily: "monospace" }}>
+                  Lineage: crop={wmView.cropChronologyHash ? wmView.cropChronologyHash.slice(0, 10) : "n/a"} · weather={wmView.weatherLineageHash ? wmView.weatherLineageHash.slice(0, 10) : "n/a"}
+                  {wmView.crossLayerPriorVersion ? ` · prior=${wmView.crossLayerPriorVersion}` : ""}
                 </div>
               )}
               {wmView.primaryFailureCause && (

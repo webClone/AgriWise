@@ -128,25 +128,21 @@ def ledger_rows_for_observations(
 
 def _resolve_calibration_validity(
     calibration_receipt: Optional[Mapping[str, Any]],
+    *,
+    expected_feature_schema_hash: Optional[str] = None,
+    calibration_store: Optional[Any] = None,
 ) -> Tuple[str, Optional[str]]:
-    """Accept 'valid' only when a genuine disjoint external calibration receipt is supplied."""
+    """WM1-P2-12: Validate calibration strictly via server-side trusted artifact store (never self-asserted dicts)."""
     if not isinstance(calibration_receipt, Mapping):
         return "unavailable", None
-    art_hash = str(calibration_receipt.get("calibration_artifact_hash") or "").strip()
-    policy = str(calibration_receipt.get("calibration_partition_policy") or "").strip()
-    verified = calibration_receipt.get("calibration_verified") is True
-    heldout_ok = calibration_receipt.get("heldout_validation_complete") is True
-    ece = calibration_receipt.get("ece")
-    ece_ok = isinstance(ece, (int, float)) and float(ece) <= 0.12
-    if (
-        art_hash
-        and policy == "external_farm_cycle_year_region_disjoint_required"
-        and verified
-        and heldout_ok
-        and ece_ok
-    ):
-        return "valid", art_hash
-    return "unavailable", art_hash or None
+    from .calibration_registry import get_default_trusted_calibration_store
+
+    store = calibration_store or get_default_trusted_calibration_store()
+    validity, art_hash, _ = store.verify_receipt(
+        calibration_receipt,
+        expected_feature_schema_hash=expected_feature_schema_hash,
+    )
+    return validity, art_hash
 
 
 def build_ledger_crop_feature_input(
@@ -163,6 +159,7 @@ def build_ledger_crop_feature_input(
     plot_area_ha: Optional[float] = None,
     calibration_receipt: Optional[Mapping[str, Any]] = None,
     normalization_artifact_hash: Optional[str] = None,
+    calibration_store: Optional[Any] = None,
 ) -> Tuple[
     CropFeatureVector,
     CropModelInputReceiptV1,
@@ -220,7 +217,11 @@ def build_ledger_crop_feature_input(
         else "compatible" if domain_values == {"compatible"}
         else "unverified"
     )
-    cal_validity, _ = _resolve_calibration_validity(calibration_receipt)
+    cal_validity, _ = _resolve_calibration_validity(
+        calibration_receipt,
+        expected_feature_schema_hash=schema.content_hash,
+        calibration_store=calibration_store,
+    )
     norm_hash = str(normalization_artifact_hash or "").strip() or NO_NORMALIZATION_ARTIFACT_HASH
     receipt = build_crop_model_input_receipt(
         ledger=ledger,

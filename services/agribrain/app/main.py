@@ -28,6 +28,7 @@ if str(agribrain_root) not in sys.path:
     sys.path.insert(0, str(agribrain_root))
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request, Header, Query, Path as FastAPIPath, Response, status
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List, Union, Tuple
@@ -38,7 +39,10 @@ import threading as _threading
 import time as _progress_time
 
 from services.agribrain.common.plot_namespace import PlotNamespace, _coerce_namespace
-from services.agribrain.app.internal_service_auth import init_mongo_nonce_indexes
+from services.agribrain.app.internal_service_auth import (
+    init_mongo_nonce_indexes,
+    require_benchmark_admin_request,
+)
 from services.agribrain.app.plot_scope_context import (
     current_authenticated_plot_principal,
     require_b2b05_internal_request as require_internal_service_request,
@@ -798,8 +802,11 @@ def api_v2_historical_intelligence(
     cp_idx = reconstructor.load_checkpoint_index(plot_id, namespace.tenant_id, ns_name)
     cp_sig = f"{cp_idx.get('latest_worldline_posterior_event_id') or ''}:{cp_idx.get('updated_at') or ''}:{len(cp_idx.get('active_chain') or [])}"
     rpt_mtime = int(summary_path.stat().st_mtime_ns) if (summary_data and summary_path.is_file()) else 0
-    from services.agribrain.layer05_asmae.history.historical_state_reconstructor import CALIBRATION_VERSION
-    archive_state_version = f"wl={len(wl_events)}:{wl_head_id[:12]}|cp={cp_sig}|rpt={rpt_mtime}|gh={geometry_hash[:12]}|wm=v1|cal={CALIBRATION_VERSION}"
+    from services.agribrain.layer05_asmae.history.historical_state_reconstructor import (
+        CALIBRATION_VERSION,
+        RECONSTRUCTOR_MODEL_VERSION,
+    )
+    archive_state_version = f"wl={len(wl_events)}:{wl_head_id[:12]}|cp={cp_sig}|rpt={rpt_mtime}|gh={geometry_hash[:12]}|wm=v2|rm={RECONSTRUCTOR_MODEL_VERSION}|cal={CALIBRATION_VERSION}"
     cache_key = (namespace.stable_key(), plot_id, target_T, clean_kc, archive_state_version)
 
     with _HIST_INTEL_RESPONSE_CACHE_LOCK:
@@ -820,6 +827,7 @@ def api_v2_historical_intelligence(
     cached_crop_fusion = summary_data.get("crop_fusion") if isinstance(summary_data, dict) else None
     dom_meta_cache = artifacts_dir / "multiplot_meta" / f"{plot_id}_domain.json"
     dom_chronology_api = None
+    raw_dom_json: Optional[Dict[str, Any]] = None
     dom_identity_api = dict(summary_data.get("domain_identity") or {}) if isinstance(summary_data, dict) else {}
     if dom_meta_cache.is_file():
         try:
@@ -836,8 +844,7 @@ def api_v2_historical_intelligence(
                 crop_observations=raw_dom_json.get("crop_observations"),
                 explicit_tenant_id=namespace.tenant_id,
             )
-            if not dom_identity_api:
-                dom_identity_api = id_obj.to_dict()
+            dom_identity_api = id_obj.to_dict()
         except Exception:
             dom_chronology_api = None
 
@@ -895,6 +902,7 @@ def api_v2_historical_intelligence(
         ablation_scope = "full_archive_to_tail"
         worldline_auth = recon_sum.get("worldline_posterior_event_type") or "ARCHIVE_POSTERIOR_DIAGNOSTIC"
         causal_manifest = summary_data.get("manifest_reconciliation") or {}
+        causal_field_validation = summary_data.get("independent_field_validation") or {}
     else:
         causal_traj_TK = [
             step for step in (q_res.get("trajectory") or [])
@@ -928,6 +936,7 @@ def api_v2_historical_intelligence(
                     "crop_context": q_res.get("crop_context_as_of") or crop_ctx,
                     "soil_context": soil_ctx,
                     "domain_identity": dom_identity_api,
+                    "domain_chronology": dom_chronology_api,
                     "crop_fusion": cached_crop_fusion or {},
                 },
                 evaluate_multi_horizon=False,
@@ -963,6 +972,79 @@ def api_v2_historical_intelligence(
                 f"with valid_time <= {target_T[:10]} and committed_at <= {k_dt.isoformat()}."
             ),
         }
+        if isinstance(raw_dom_json, dict) and causal_traj_TK:
+            from services.agribrain.layer05_asmae.history.independent_field_validation import (
+                evaluate_independent_field_evidence,
+            )
+
+            def _record_visible_at_tk(rec: Dict[str, Any], valid_keys: Tuple[str, ...], known_keys: Tuple[str, ...]) -> bool:
+                v_dt = next((_parse_utc_iso(rec[k]) for k in valid_keys if rec.get(k)), None)
+                k_rec = next((_parse_utc_iso(rec[k]) for k in known_keys if rec.get(k)), None)
+                if v_dt is not None and v_dt > t_dt:
+                    return False
+                eff_known = k_rec or v_dt
+                if eff_known is not None and eff_known > k_dt:
+                    return False
+                return True
+
+            sr_tk = [
+                r for r in (raw_dom_json.get("sensor_readings") or [])
+                if isinstance(r, dict) and _record_visible_at_tk(r, ("timestamp", "date"), ("createdAt", "ingestedAt"))
+            ]
+            sa_tk = [
+                r for r in (raw_dom_json.get("soil_analyses") or [])
+                if isinstance(r, dict) and _record_visible_at_tk(r, ("date", "sampledAt", "createdAt"), ("createdAt", "updatedAt"))
+            ]
+            co_tk = [
+                r for r in (raw_dom_json.get("crop_observations") or [])
+                if isinstance(r, dict) and _record_visible_at_tk(r, ("observedAt", "observed_at", "timestamp", "createdAt"), ("confirmedAt", "createdAt"))
+            ]
+            ct_tk = [
+                r for r in (raw_dom_json.get("crop_tasks") or [])
+                if isinstance(r, dict) and _record_visible_at_tk(r, ("completedAt", "dueDate", "createdAt"), ("createdAt", "updatedAt"))
+            ]
+
+            def _causal_probe_surface_tk(probe_dt: datetime) -> List[Dict[str, Any]]:
+                q_p = reconstructor.query_as_of(
+                    plot_id=plot_id,
+                    geometry_hash=geometry_hash,
+                    valid_time_T=min(probe_dt, t_dt),
+                    knowledge_cutoff_K=min(probe_dt, k_dt),
+                    tenant_id=namespace.tenant_id,
+                    namespace=ns_name,
+                    daily_weather=daily_weather,
+                    crop_context=crop_ctx,
+                    soil_context=soil_ctx,
+                    polygon_geojson=polygon_geojson,
+                    forecast_horizons_days=(),
+                    enforce_weather_publication_lag=True,
+                    crop_fusion=cached_crop_fusion,
+                    domain_chronology=dom_chronology_api,
+                )
+                return list(q_p.get("spatial_surfaces") or [])
+
+            causal_field_validation = evaluate_independent_field_evidence(
+                plot_id=plot_id,
+                trajectory=causal_traj_TK,
+                sensor_readings=sr_tk,
+                soil_analyses=sa_tk,
+                crop_observations=co_tk,
+                crop_tasks=ct_tk,
+                mesia_packets=[],
+                exclude_mock_vendors=True,
+                polygon_geojson=polygon_geojson,
+                spatial_surfaces=q_res.get("spatial_surfaces") or [],
+                causal_spatial_lookup_fn=_causal_probe_surface_tk,
+                soil_context=soil_ctx,
+                knowledge_cutoff_K=k_dt,
+            )
+        else:
+            causal_field_validation = {
+                "status": "withheld_bitemporal_subslice_no_causal_field_records",
+                "zero_circularity_enforced": True,
+                "sensor_vwc_validation": {"n_readings": 0, "n_independent_device_days": 0},
+                "mesia_hydrological_validation": {"native_sigmf_captures_present": False},
+            }
 
     # Filter event memory strictly by both valid_time <= T and knowledge_cutoff <= K without future outcomes
     causal_events: List[Dict[str, Any]] = []
@@ -990,6 +1072,32 @@ def api_v2_historical_intelligence(
             }
         causal_events.append(ev_copy)
 
+    raw_seasonal_timeline = list((cached_crop_fusion or {}).get("seasonal_timeline") or [])
+    filtered_crop_timeline: List[Dict[str, Any]] = []
+    withheld_reprocessed_after_k = int((cached_crop_fusion or {}).get("withheld_reprocessed_after_k_count") or 0)
+    for item in raw_seasonal_timeline:
+        if not isinstance(item, dict):
+            continue
+        start_ok = not item.get("start_time") or _parse_utc_iso(item["start_time"]) <= effective_cutoff_dt
+        end_ok = not (item.get("evidence_end_time") or item.get("end_time")) or (
+            _parse_utc_iso(item.get("evidence_end_time") or item.get("end_time")) <= effective_cutoff_dt
+        )
+        if not start_ok or not end_ok:
+            continue
+        known_ok = (
+            (not item.get("knowledge_cutoff_K") or _parse_utc_iso(item["knowledge_cutoff_K"]) <= k_dt)
+            and (not item.get("known_from") or _parse_utc_iso(item["known_from"]) <= k_dt)
+        )
+        max_avail_raw = item.get("max_product_available_at")
+        avail_ok = not max_avail_raw or _parse_utc_iso(max_avail_raw) <= k_dt
+        if not avail_ok:
+            withheld_reprocessed_after_k += int(item.get("observation_count") or 1)
+            continue
+        if not known_ok:
+            continue
+        withheld_reprocessed_after_k += int(item.get("withheld_reprocessed_after_k_count") or 0)
+        filtered_crop_timeline.append(item)
+
     payload = {
         "available": bool(q_res.get("available")),
         "reason": q_res.get("reason"),
@@ -1001,6 +1109,13 @@ def api_v2_historical_intelligence(
         "as_of_date": target_T[:10],
         "valid_time_T": q_res.get("valid_time_T") or target_T,
         "knowledge_cutoff_K": q_res.get("knowledge_cutoff_K"),
+        "crop_chronology_hash": q_res.get("crop_chronology_hash"),
+        "weather_lineage_hash": q_res.get("weather_lineage_hash"),
+        "observation_lineage_hash": q_res.get("observation_lineage_hash"),
+        "specialist_config_hash": q_res.get("specialist_config_hash"),
+        "input_manifest_hash": q_res.get("input_manifest_hash"),
+        "cross_layer_prior_version": q_res.get("cross_layer_prior_version"),
+        "use_cross_layer_priors": q_res.get("use_cross_layer_priors", True),
         "temporal_query_scope": {
             "mode": "strict_bitemporal_T_and_K",
             "valid_time_T": t_dt.isoformat(),
@@ -1027,7 +1142,7 @@ def api_v2_historical_intelligence(
         "effective_resolution_by_state": q_res.get("effective_resolution_by_state") or {},
         "resolution_summary_by_state": q_res.get("resolution_summary_by_state") or {},
         "weather_provenance_summary": q_res.get("weather_provenance_summary") or {},
-        "independent_field_validation": summary_data.get("independent_field_validation") or {},
+        "independent_field_validation": causal_field_validation,
         "suppressed_spatial_states": q_res.get("suppressed_spatial_states") or {},
         "spatial_surfaces": q_res.get("spatial_surfaces") or [],
         "cross_layer_pre_priors": q_res.get("cross_layer_pre_priors") or {},
@@ -1060,15 +1175,11 @@ def api_v2_historical_intelligence(
         },
         "cross_layer_ablation": causal_ablation,
         "manifest_reconciliation": causal_manifest,
-        "world_model_contract_version": "asmae_world_model_v1",
+        "world_model_contract_version": "asmae_world_model_v2",
         "domain_identity": dom_identity_api or None,
         "crop_context_as_of": q_res.get("crop_context_as_of") or None,
-        "crop_identity_timeline": [
-            item for item in ((cached_crop_fusion or {}).get("seasonal_timeline") or [])
-            if isinstance(item, dict)
-            and (not item.get("start_time") or _parse_utc_iso(item["start_time"]) <= effective_cutoff_dt)
-            and (not item.get("knowledge_cutoff_K") or _parse_utc_iso(item["knowledge_cutoff_K"]) <= k_dt)
-        ],
+        "withheld_reprocessed_after_k_count": withheld_reprocessed_after_k,
+        "crop_identity_timeline": filtered_crop_timeline,
         "causal_integrity_gates": {
             "p1_1_time_matched_spatial": True,
             "p1_2_affirmative_probe_calibration": True,
@@ -1086,14 +1197,88 @@ def api_v2_historical_intelligence(
     return Response(content=raw_bytes, media_type="application/json", headers={"Cache-Control": "no-cache"})
 
 
+_SENSITIVE_BENCHMARK_KEYS = {
+    "tenant_id",
+    "farm_id",
+    "user_id",
+    "owner_id",
+    "email",
+    "path",
+    "artifact_path",
+    "scene_cache_dir",
+    "checkpoint_dir",
+    "checkpoint_root",
+    "worldline_root",
+    "summary_path",
+    "step_transfer_samples",
+}
+
+
+def _scrub_sensitive_benchmark_value(val: Any) -> Any:
+    if isinstance(val, dict):
+        cleaned: Dict[str, Any] = {}
+        for k, v in val.items():
+            kl = str(k).lower()
+            if kl in _SENSITIVE_BENCHMARK_KEYS or kl.endswith("_path") or kl.endswith("_dir"):
+                continue
+            cleaned[str(k)] = _scrub_sensitive_benchmark_value(v)
+        return cleaned
+    if isinstance(val, list):
+        return [_scrub_sensitive_benchmark_value(v) for v in val]
+    if isinstance(val, str):
+        low = val.lower()
+        if (
+            "mongodb://" in low
+            or "mongodb+srv://" in low
+            or low.startswith("c:\\")
+            or low.startswith("c:/")
+            or low.startswith("/home/")
+            or low.startswith("/users/")
+            or low.startswith("/var/")
+        ):
+            return "[redacted]"
+    return val
+
+
+def _redact_benchmark_matrix_projection(raw_matrix: Dict[str, Any]) -> Dict[str, Any]:
+    """Build an approved benchmark-admin cohort projection without PII, tenant IDs, or host paths."""
+    allowed_top = (
+        "matrix_version",
+        "cohort_size",
+        "verified_crop_plot_count",
+        "verified_tenant_plot_count",
+        "scientifically_qualified_model_count",
+        "production_eligible_verified_count",
+        "qualified_verified_crop_count",
+        "metric_definitions",
+        "descriptive_per_plot_summary",
+        "descriptive_crop_group_summary",
+        "trained_transfer_lopo",
+        "trained_transfer_locso",
+        "crop_detection_benchmark",
+    )
+    projected: Dict[str, Any] = {
+        "available": True,
+        "redacted_projection": True,
+        "projection_scope": "benchmark_admin_approved_cohort_view",
+    }
+    for key in allowed_top:
+        if key in raw_matrix:
+            projected[key] = _scrub_sensitive_benchmark_value(raw_matrix[key])
+    return projected
+
+
 @app.get("/v2/asmae/benchmark-matrix")
-def api_v2_asmae_benchmark_matrix():
-    """Expose latest ASMAE World Model V1 multi-crop cross-evaluation benchmark matrix."""
+def api_v2_asmae_benchmark_matrix(
+    admin_ns: PlotNamespace = Depends(require_benchmark_admin_request),
+):
+    """Expose redacted multi-crop cross-evaluation benchmark matrix strictly to benchmark admins."""
+    _ = admin_ns
     bm_path = (
         Path(__file__).resolve().parents[1]
         / "artifacts"
         / "archive_pilot_reports"
-        / "asmae_world_model_v1_benchmark_matrix.json"
+        / "asmae_world_model_v2_benchmark_matrix.json"
     )
     if not bm_path.is_file():
         return JSONResponse(
@@ -1101,7 +1286,10 @@ def api_v2_asmae_benchmark_matrix():
             content={"available": False, "reason": "benchmark_matrix_not_yet_generated"},
         )
     try:
-        return Response(content=bm_path.read_bytes(), media_type="application/json")
+        raw_matrix = json.loads(bm_path.read_text(encoding="utf-8"))
+        if not isinstance(raw_matrix, dict):
+            raise ValueError("Invalid benchmark matrix payload")
+        return JSONResponse(status_code=200, content=_redact_benchmark_matrix_projection(raw_matrix))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

@@ -202,6 +202,8 @@ def test_strict_independent_field_validation_causal_depth_spatial_cal_dedup():
             "vendor": "Sentek Drill & Drop",
             "isCalibrated": True,
             "calibrationCertificateId": "SENTEK-CERT-2026",
+            "calibrationAuthority": "sentek_metrology_lab",
+            "calibrationVerifiedAt": "2026-05-01T00:00:00+00:00",
             "soilMoisture": 0.25,
             "depth_cm": 20.0,
             "lat": 36.505,
@@ -333,7 +335,7 @@ def test_canonical_cli_resolves_distinct_crop_and_soil_contexts_dynamically(tmp_
             },
         },
         "soil_analyses": [{"texture": "Clay", "ec": 2.1, "ph": 7.4}],
-        "crop_cycles": [{"cropType": "Tomato", "variety": "Roma"}],
+        "crop_cycles": [{"cropType": "Tomato", "variety": "Roma", "declaredCropAuthority": "FARMER_CONFIRMED", "declaredCropAt": "2025-04-20T00:00:00+00:00"}],
         "sensor_readings": [],
         "crop_observations": [],
         "crop_tasks": [

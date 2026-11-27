@@ -78,9 +78,10 @@ from services.agribrain.world_model.canonical_worldline import (
 
 logger = logging.getLogger(__name__)
 
-RECONSTRUCTOR_MODEL_VERSION = "asmae_hist_cross_layer_v3"
-CALIBRATION_VERSION = "asmae_causal_spatial_cal_v8"
-POSTERIOR_CHECKPOINT_SCHEMA = "asmae_posterior_checkpoint_v2"
+RECONSTRUCTOR_MODEL_VERSION = "asmae_hist_cross_layer_v4"
+CALIBRATION_VERSION = "asmae_causal_spatial_cal_v9"
+POSTERIOR_CHECKPOINT_SCHEMA = "asmae_posterior_checkpoint_v3"
+CROSS_LAYER_PRIOR_VERSION = "cross_layer_bridge_v3"
 
 _CAL_DECAY_BY_CHANNEL: Dict[str, float] = {
     "sar_vv": 0.96,
@@ -1163,6 +1164,13 @@ class PosteriorCheckpoint:
     spatial_artifact: Optional[str] = None
     has_spatial_observations: bool = False
     specialist_chrono_state: Dict[str, Any] = field(default_factory=dict)
+    crop_chronology_hash: str = ""
+    weather_lineage_hash: str = ""
+    observation_lineage_hash: str = ""
+    specialist_config_hash: str = ""
+    input_manifest_hash: str = ""
+    cross_layer_prior_version: str = ""
+    use_cross_layer_priors: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -1182,6 +1190,13 @@ class PosteriorCheckpoint:
             "model_version": self.model_version,
             "state_schema_version": self.state_schema_version,
             "calibration_version": self.calibration_version,
+            "crop_chronology_hash": self.crop_chronology_hash,
+            "weather_lineage_hash": self.weather_lineage_hash,
+            "observation_lineage_hash": self.observation_lineage_hash,
+            "specialist_config_hash": self.specialist_config_hash,
+            "input_manifest_hash": self.input_manifest_hash,
+            "cross_layer_prior_version": self.cross_layer_prior_version,
+            "use_cross_layer_priors": bool(self.use_cross_layer_priors),
             "assimilated_observation_count": len(self.assimilated_observation_ids),
             "last_obs_event_id": self.last_obs_event_id,
             "parent_checkpoint_id": self.parent_checkpoint_id,
@@ -1193,6 +1208,193 @@ class PosteriorCheckpoint:
             "state_stds": dict(self.state_stds),
             "state_covariance": self.state_covariance,
         }
+
+
+def _compute_causal_input_lineage_hashes(
+    *,
+    cutoff_dt: datetime,
+    knowledge_cutoff_dt: datetime,
+    domain_chronology: Optional[Any] = None,
+    crop_fusion: Optional[Dict[str, Any]] = None,
+    crop_context: Optional[Dict[str, Any]] = None,
+    soil_context: Optional[Dict[str, Any]] = None,
+    daily_weather: Optional[Dict[str, Dict[str, Any]]] = None,
+    management_events: Optional[Sequence[Any]] = None,
+    enforce_weather_publication_lag: bool = True,
+    prefix_events: Optional[Sequence[Mapping[str, Any]]] = None,
+    n_ensemble: int = 25,
+    n_zone_rows: int = 2,
+    n_zone_cols: int = 2,
+    checkpoint_stride: int = 20,
+    use_cross_layer_priors: bool = True,
+) -> Dict[str, str]:
+    """Compute full causal input-manifest fingerprint across observations, processing versions, weather, crop, soil, mgmt & params."""
+    cutoff_utc = cutoff_dt.astimezone(timezone.utc)
+    k_utc = knowledge_cutoff_dt.astimezone(timezone.utc)
+    eff_day = min(cutoff_utc, k_utc).date().isoformat()
+
+    intervals_norm: List[Dict[str, Any]] = []
+    if domain_chronology is not None:
+        for iv in getattr(domain_chronology, "crop_intervals", ()) or ():
+            vf_raw = iv.get("valid_from") if isinstance(iv, dict) else getattr(iv, "valid_from", None)
+            kf_raw = iv.get("known_from") if isinstance(iv, dict) else getattr(iv, "known_from", None)
+            try:
+                if vf_raw and _parse_utc_iso(vf_raw) > cutoff_utc:
+                    continue
+                if kf_raw and _parse_utc_iso(kf_raw) > k_utc:
+                    continue
+            except Exception:
+                pass
+            intervals_norm.append({
+                "interval_id": iv.get("interval_id") if isinstance(iv, dict) else getattr(iv, "interval_id", ""),
+                "crop_type": iv.get("crop_type") if isinstance(iv, dict) else getattr(iv, "crop_type", ""),
+                "valid_from": str(vf_raw or ""),
+                "valid_to": str(iv.get("valid_to") if isinstance(iv, dict) else getattr(iv, "valid_to", "")),
+                "known_from": str(kf_raw or ""),
+                "authority": iv.get("authority") if isinstance(iv, dict) else getattr(iv, "authority", ""),
+                "verification_status": (
+                    iv.get("verification_status") if isinstance(iv, dict) else getattr(iv, "verification_status", "")
+                ),
+                "synthetic": bool(iv.get("synthetic") if isinstance(iv, dict) else getattr(iv, "synthetic", False)),
+            })
+
+    fusion_norm: List[Dict[str, Any]] = []
+    if isinstance(crop_fusion, dict):
+        raw_fusion_items = (
+            crop_fusion.get("seasonal_timeline")
+            or crop_fusion.get("timeline")
+            or []
+        )
+        for item in raw_fusion_items:
+            if not isinstance(item, dict):
+                continue
+            item_t_raw = item.get("start_time") or item.get("acquisition_time") or item.get("date")
+            item_k_raw = (
+                item.get("max_product_available_at")
+                or item.get("product_available_at")
+                or item.get("knowledge_cutoff_K")
+            )
+            try:
+                if item_t_raw:
+                    item_t_str = str(item_t_raw)
+                    item_t_dt = _parse_utc_iso(f"{item_t_str}T23:59:59+00:00" if len(item_t_str) == 10 else item_t_str)
+                    if item_t_dt > cutoff_utc:
+                        continue
+                if item_k_raw and _parse_utc_iso(item_k_raw) > k_utc:
+                    continue
+            except Exception:
+                pass
+            fusion_norm.append({
+                "season_id": item.get("season_id"),
+                "date": str(item.get("start_time") or item.get("date") or item.get("acquisition_time") or "")[:10],
+                "end_date": str(item.get("end_time") or "")[:10],
+                "crop_authority": item.get("crop_declaration_authority") or item.get("authority"),
+                "verified_crop_code": item.get("verified_crop_code_as_of_tk"),
+                "physical_regime": item.get("physical_regime"),
+                "dominant_crop_group": item.get("top_group") or item.get("dominant_crop_group"),
+                "unknown_probability": item.get("unknown_probability"),
+                "posterior": item.get("crop_group_posterior") or item.get("posterior"),
+            })
+
+    mgmt_norm = []
+    for ev in management_events or []:
+        if isinstance(ev, dict):
+            ev_day = str(ev.get("effective_start") or ev.get("timestamp") or ev.get("date") or "")[:10]
+            known_ev = ev.get("known_from") or ev.get("recorded_at") or ev.get("ingested_at")
+            if known_ev:
+                try:
+                    if _parse_utc_iso(known_ev) > k_utc:
+                        continue
+                except Exception:
+                    pass
+            if ev_day and ev_day > eff_day:
+                continue
+            mgmt_norm.append(ev)
+        else:
+            mgmt_norm.append(str(ev))
+
+    crop_payload = {
+        "has_domain_chronology": domain_chronology is not None,
+        "crop_intervals": intervals_norm,
+        "crop_fusion_contract": crop_fusion.get("contract_version") if isinstance(crop_fusion, dict) else None,
+        "crop_fusion_timeline": fusion_norm,
+        "fallback_crop_context": dict(crop_context or {}) if domain_chronology is None and crop_fusion is None else {},
+        "soil_context": dict(soil_context or {}),
+        "management_events": mgmt_norm,
+    }
+    crop_hash = hashlib.sha256(
+        json.dumps(crop_payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+    filtered_w = filter_causal_daily_weather_at_cutoff(
+        daily_weather,
+        cutoff_utc,
+        knowledge_cutoff_dt=k_utc,
+        enforce_publication_lag=enforce_weather_publication_lag,
+    )
+    weather_payload = {
+        "enforce_weather_publication_lag": bool(enforce_weather_publication_lag),
+        "weather": filtered_w,
+    }
+    weather_hash = hashlib.sha256(
+        json.dumps(weather_payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+    obs_lineage_items: List[Dict[str, Any]] = []
+    for ev in prefix_events or ():
+        pl = (ev.get("payload") or {}).get("observation_qualified") or {}
+        obs_lineage_items.append({
+            "event_id": str(ev.get("event_id") or ""),
+            "scene_id": str(pl.get("scene_id") or ""),
+            "source": str(pl.get("source") or ""),
+            "acquisition_time": str(ev.get("observation_or_valid_time") or ev.get("effective_at") or ""),
+            "committed_at": str(ev.get("committed_at") or ""),
+            "source_content_hash": str(pl.get("source_content_hash") or ""),
+            "processing_baseline": pl.get("processing_baseline"),
+            "processing_timestamp": pl.get("processing_timestamp"),
+            "product_available_at": pl.get("product_available_at"),
+            "cloud_score": pl.get("cloud_score"),
+            "valid_pixel_fraction": pl.get("valid_pixel_fraction"),
+            "metrics": pl.get("metrics"),
+        })
+    obs_lineage_hash = hashlib.sha256(
+        json.dumps(obs_lineage_items, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+    specialist_cfg_payload = {
+        "model_version": RECONSTRUCTOR_MODEL_VERSION,
+        "state_schema_version": STATE_SCHEMA_VERSION,
+        "calibration_version": CALIBRATION_VERSION,
+        "cross_layer_prior_version": CROSS_LAYER_PRIOR_VERSION,
+        "use_cross_layer_priors": bool(use_cross_layer_priors),
+        "n_ensemble": int(n_ensemble),
+        "n_zone_rows": int(n_zone_rows),
+        "n_zone_cols": int(n_zone_cols),
+        "checkpoint_stride": int(checkpoint_stride),
+    }
+    specialist_cfg_hash = hashlib.sha256(
+        json.dumps(specialist_cfg_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+    manifest_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "crop_chronology_hash": crop_hash,
+                "weather_lineage_hash": weather_hash,
+                "observation_lineage_hash": obs_lineage_hash,
+                "specialist_config_hash": specialist_cfg_hash,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "crop_chronology_hash": crop_hash,
+        "weather_lineage_hash": weather_hash,
+        "observation_lineage_hash": obs_lineage_hash,
+        "specialist_config_hash": specialist_cfg_hash,
+        "input_manifest_hash": manifest_hash,
+    }
 
 
 class HistoricalStateReconstructor:
@@ -1339,6 +1541,13 @@ class HistoricalStateReconstructor:
         cutoff_valid_time: str,
         assimilated_observation_ids: Sequence[str],
         parent_checkpoint_id: Optional[str],
+        crop_chronology_hash: str = "",
+        weather_lineage_hash: str = "",
+        observation_lineage_hash: str = "",
+        specialist_config_hash: str = "",
+        input_manifest_hash: str = "",
+        cross_layer_prior_version: str = CROSS_LAYER_PRIOR_VERSION,
+        use_cross_layer_priors: bool = True,
     ) -> str:
         raw = json.dumps(
             {
@@ -1347,6 +1556,13 @@ class HistoricalStateReconstructor:
                 "model_version": RECONSTRUCTOR_MODEL_VERSION,
                 "state_schema_version": STATE_SCHEMA_VERSION,
                 "calibration_version": CALIBRATION_VERSION,
+                "cross_layer_prior_version": cross_layer_prior_version,
+                "use_cross_layer_priors": bool(use_cross_layer_priors),
+                "crop_chronology_hash": crop_chronology_hash,
+                "weather_lineage_hash": weather_lineage_hash,
+                "observation_lineage_hash": observation_lineage_hash,
+                "specialist_config_hash": specialist_config_hash,
+                "input_manifest_hash": input_manifest_hash,
                 "cutoff_valid_time": cutoff_valid_time,
                 "assimilated_observation_ids": list(assimilated_observation_ids),
                 "parent_checkpoint_id": parent_checkpoint_id,
@@ -1808,25 +2024,77 @@ class HistoricalStateReconstructor:
         index_data = self.load_checkpoint_index(plot_id, tenant_id, namespace)
         active_cp_ids: List[str] = list(index_data.get("active_chain") or [])
         prior_worldline_posterior_id = index_data.get("latest_worldline_posterior_event_id")
+        k_dt_obj = _parse_utc_iso(cutoff_K)
 
         loaded_chain: List[PosteriorCheckpoint] = []
-        for cp_id in active_cp_ids:
+        invalidated_cp_ids: List[str] = []
+        for idx_cp, cp_id in enumerate(active_cp_ids):
             cp = self.load_checkpoint(plot_id, cp_id, tenant_id, namespace)
+            if cp is None:
+                invalidated_cp_ids.extend(active_cp_ids[idx_cp:])
+                break
+            cp_obs_len = len(cp.assimilated_observation_ids)
+            if cp_obs_len > len(eligible_events) or _parse_utc_iso(cp.knowledge_cutoff_time) > k_dt_obj:
+                invalidated_cp_ids.extend(active_cp_ids[idx_cp:])
+                break
+            cp_hashes = _compute_causal_input_lineage_hashes(
+                cutoff_dt=_parse_utc_iso(cp.cutoff_valid_time),
+                knowledge_cutoff_dt=k_dt_obj,
+                domain_chronology=domain_chronology,
+                crop_fusion=crop_fusion,
+                crop_context=crop_ctx,
+                soil_context=soil_ctx,
+                daily_weather=weather_series,
+                management_events=mgmt_events,
+                enforce_weather_publication_lag=enforce_weather_publication_lag,
+                prefix_events=eligible_events[:cp_obs_len],
+                n_ensemble=self.n_ensemble,
+                n_zone_rows=self.n_zone_rows,
+                n_zone_cols=self.n_zone_cols,
+                checkpoint_stride=self.checkpoint_stride,
+                use_cross_layer_priors=use_cross_layer_priors,
+            )
             if (
-                cp is not None
-                and cp.geometry_hash == geometry_hash
+                cp.geometry_hash == geometry_hash
                 and cp.model_version == RECONSTRUCTOR_MODEL_VERSION
                 and cp.state_schema_version == STATE_SCHEMA_VERSION
                 and cp.calibration_version == CALIBRATION_VERSION
+                and cp.cross_layer_prior_version == CROSS_LAYER_PRIOR_VERSION
+                and bool(cp.use_cross_layer_priors) == bool(use_cross_layer_priors)
+                and cp.crop_chronology_hash == cp_hashes["crop_chronology_hash"]
+                and cp.weather_lineage_hash == cp_hashes["weather_lineage_hash"]
+                and cp.input_manifest_hash == cp_hashes["input_manifest_hash"]
             ):
                 loaded_chain.append(cp)
+            else:
+                invalidated_cp_ids.extend(active_cp_ids[idx_cp:])
+                break
 
         # Determine whether to resume cleanly from tail checkpoint, anchor before late arrivals, or run cold
-        mode = "cold_full_reconstruction"
+        prev_tail_cp: Optional[PosteriorCheckpoint] = (
+            self.load_checkpoint(plot_id, active_cp_ids[-1], tenant_id, namespace)
+            if active_cp_ids
+            else None
+        )
+        mode = "causal_lineage_replay" if invalidated_cp_ids else "cold_full_reconstruction"
         anchor_cp: Optional[PosteriorCheckpoint] = None
         preserved_prefix_cps: List[PosteriorCheckpoint] = []
         late_arrival_ids: List[str] = []
-        superseded_cp_ids: List[str] = []
+        superseded_cp_ids: List[str] = list(invalidated_cp_ids)
+
+        if prev_tail_cp is not None:
+            prev_tail_set = set(prev_tail_cp.assimilated_observation_ids)
+            prev_tail_cutoff_dt = _parse_utc_iso(prev_tail_cp.cutoff_valid_time)
+            late_from_prev = [
+                str(ev["event_id"])
+                for ev in eligible_events
+                if str(ev["event_id"]) not in prev_tail_set
+                and _parse_utc_iso(ev.get("observation_or_valid_time") or ev.get("effective_at"))
+                <= prev_tail_cutoff_dt
+            ]
+            if late_from_prev:
+                late_arrival_ids = late_from_prev
+                mode = "late_arrival_replay"
 
         if loaded_chain:
             tail_cp = loaded_chain[-1]
@@ -1834,11 +2102,13 @@ class HistoricalStateReconstructor:
             if len(tail_ids) <= len(ordered_obs_ids) and ordered_obs_ids[: len(tail_ids)] == tail_ids:
                 if len(tail_ids) == len(ordered_obs_ids):
                     # Everything already assimilated; still ensure steps available from replay/live needs
-                    mode = "up_to_date"
+                    if not late_arrival_ids:
+                        mode = "causal_lineage_replay" if invalidated_cp_ids else "up_to_date"
                     anchor_cp = tail_cp
                     preserved_prefix_cps = list(loaded_chain)
                 else:
-                    mode = "incremental_continuation"
+                    if not late_arrival_ids:
+                        mode = "causal_lineage_replay" if invalidated_cp_ids else "incremental_continuation"
                     anchor_cp = tail_cp
                     preserved_prefix_cps = list(loaded_chain)
             else:
@@ -1868,7 +2138,6 @@ class HistoricalStateReconstructor:
                         superseded_cp_ids.append(cp.checkpoint_id)
 
         canonical_grid = build_canonical_parcel_grid(polygon_geojson) if polygon_geojson else None
-        k_dt_obj = _parse_utc_iso(cutoff_K)
         first_obs_dt = _parse_utc_iso(eligible_events[0].get("observation_or_valid_time") or eligible_events[0].get("effective_at"))
         rng = make_rng("asmae_hist_recon", plot_id, geometry_hash, STATE_SCHEMA_VERSION)
         if anchor_cp is not None:
@@ -1883,8 +2152,18 @@ class HistoricalStateReconstructor:
             has_spatial_obs = bool(anchor_cp.has_spatial_observations)
             chrono_state = CrossLayerChronoState.from_dict(anchor_cp.specialist_chrono_state)
             if not chrono_state.layer_theta_profile:
+                anchor_crop_ctx = crop_ctx
+                if crop_fusion is not None or domain_chronology is not None:
+                    from .historical_crop_fusion import crop_context_as_of
+                    anchor_crop_ctx = crop_context_as_of(
+                        crop_fusion,
+                        valid_time_T=_parse_utc_iso(anchor_cp.cutoff_valid_time),
+                        knowledge_cutoff_K=k_dt_obj,
+                        domain_chronology=domain_chronology,
+                        base_soil_context=soil_ctx,
+                    )
                 chrono_state = self.cross_layer_bridge.initialize_chrono_state(
-                    crop_context=crop_ctx, soil_context=soil_ctx
+                    crop_context=anchor_crop_ctx, soil_context=soil_ctx
                 )
             if canonical_grid is None and isinstance(anchor_cp.canonical_grid, dict):
                 canonical_grid = dict(anchor_cp.canonical_grid)
@@ -1896,8 +2175,30 @@ class HistoricalStateReconstructor:
                 )
         else:
             start_idx = 0
+            init_crop_ctx = crop_ctx
+            if crop_fusion is not None or domain_chronology is not None:
+                from .historical_crop_fusion import crop_context_as_of
+                init_crop_ctx = crop_context_as_of(
+                    crop_fusion,
+                    valid_time_T=first_obs_dt,
+                    knowledge_cutoff_K=k_dt_obj,
+                    domain_chronology=domain_chronology,
+                    base_soil_context=soil_ctx,
+                )
+            init_weather = filter_causal_daily_weather_at_cutoff(
+                weather_series,
+                first_obs_dt,
+                knowledge_cutoff_dt=k_dt_obj,
+                enforce_publication_lag=enforce_weather_publication_lag,
+            )
+            init_day_limit = min(first_obs_dt, k_dt_obj).date().isoformat()
+            init_mgmt = [
+                ev for ev in mgmt_events
+                if not isinstance(ev, dict)
+                or str(ev.get("effective_start") or ev.get("timestamp") or ev.get("date") or "")[:10] <= init_day_limit
+            ]
             chrono_state = self.cross_layer_bridge.initialize_chrono_state(
-                crop_context=crop_ctx, soil_context=soil_ctx
+                crop_context=init_crop_ctx, soil_context=soil_ctx
             )
             init_priors: Dict[str, Any] = {}
             if use_cross_layer_priors:
@@ -1905,16 +2206,16 @@ class HistoricalStateReconstructor:
                     chrono_state,
                     start_time=first_obs_dt - timedelta(days=5),
                     end_time=first_obs_dt,
-                    weather_daily_series=weather_series,
-                    crop_context=crop_ctx,
+                    weather_daily_series=init_weather,
+                    crop_context=init_crop_ctx,
                     soil_context=soil_ctx,
-                    management_events=mgmt_events,
+                    management_events=init_mgmt,
                 )
                 init_bundle = self.cross_layer_bridge.evaluate_step_priors(
                     state=chrono_state,
                     timestamp=first_obs_dt,
                     knowledge_cutoff=k_dt_obj,
-                    crop_context=crop_ctx,
+                    crop_context=init_crop_ctx,
                     soil_context=soil_ctx,
                 )
                 init_priors = init_bundle.get("priors") or {}
@@ -1922,7 +2223,7 @@ class HistoricalStateReconstructor:
                 node_ids=self.node_ids,
                 n_ensemble=self.n_ensemble,
                 priors=init_priors,
-                crop_context=crop_ctx,
+                crop_context=init_crop_ctx,
                 rng=rng,
                 scenes=[],
                 initial_posterior=None,
@@ -2004,6 +2305,12 @@ class HistoricalStateReconstructor:
                 knowledge_cutoff_dt=k_dt_obj,
                 enforce_publication_lag=enforce_weather_publication_lag,
             )
+            step_day_limit = min(obs_time, k_dt_obj).date().isoformat()
+            step_mgmt = [
+                ev for ev in mgmt_events
+                if not isinstance(ev, dict)
+                or str(ev.get("effective_start") or ev.get("timestamp") or ev.get("date") or "")[:10] <= step_day_limit
+            ]
             step_crop_ctx = crop_ctx
             if crop_fusion is not None or domain_chronology is not None:
                 from .historical_crop_fusion import crop_context_as_of
@@ -2024,7 +2331,7 @@ class HistoricalStateReconstructor:
                     weather_daily_series=step_weather,
                     crop_context=step_crop_ctx,
                     soil_context=soil_ctx,
-                    management_events=mgmt_events,
+                    management_events=step_mgmt,
                 )
                 step_pre_bundle = self.cross_layer_bridge.evaluate_step_priors(
                     state=chrono_state,
@@ -2047,7 +2354,7 @@ class HistoricalStateReconstructor:
                     scenes=[],
                     weather_daily_series=step_weather,
                     soil_context=soil_ctx,
-                    management_events=mgmt_events,
+                    management_events=step_mgmt,
                 )
             prev_scene_time = obs_time
 
@@ -2161,7 +2468,7 @@ class HistoricalStateReconstructor:
                     posterior_means=post_means,
                     posterior_stds=post_stds,
                     state_support_ledger=support_step_ledger,
-                    crop_context=crop_ctx,
+                    crop_context=step_crop_ctx,
                     obs_channels=obs_channels,
                     gap_days=elapsed_days,
                 )
@@ -2230,12 +2537,36 @@ class HistoricalStateReconstructor:
                 boundary_reason = "observation_stride_boundary"
 
             if boundary_reason is not None:
+                cp_hashes = _compute_causal_input_lineage_hashes(
+                    cutoff_dt=obs_time,
+                    knowledge_cutoff_dt=k_dt_obj,
+                    domain_chronology=domain_chronology,
+                    crop_fusion=crop_fusion,
+                    crop_context=crop_ctx,
+                    soil_context=soil_ctx,
+                    daily_weather=weather_series,
+                    management_events=mgmt_events,
+                    enforce_weather_publication_lag=enforce_weather_publication_lag,
+                    prefix_events=eligible_events[: (global_i + 1)],
+                    n_ensemble=self.n_ensemble,
+                    n_zone_rows=self.n_zone_rows,
+                    n_zone_cols=self.n_zone_cols,
+                    checkpoint_stride=self.checkpoint_stride,
+                    use_cross_layer_priors=use_cross_layer_priors,
+                )
                 cp_id = self._checkpoint_identity(
                     plot_id=plot_id,
                     geometry_hash=geometry_hash,
                     cutoff_valid_time=obs_time.isoformat(),
                     assimilated_observation_ids=assimilated_ids,
                     parent_checkpoint_id=parent_cp_id,
+                    crop_chronology_hash=cp_hashes["crop_chronology_hash"],
+                    weather_lineage_hash=cp_hashes["weather_lineage_hash"],
+                    observation_lineage_hash=cp_hashes["observation_lineage_hash"],
+                    specialist_config_hash=cp_hashes["specialist_config_hash"],
+                    input_manifest_hash=cp_hashes["input_manifest_hash"],
+                    cross_layer_prior_version=CROSS_LAYER_PRIOR_VERSION,
+                    use_cross_layer_priors=bool(use_cross_layer_priors),
                 )
                 grid_meta = (
                     {k: v for k, v in canonical_grid.items() if k != "inside_mask"}
@@ -2279,6 +2610,13 @@ class HistoricalStateReconstructor:
                     canonical_grid=grid_meta,
                     has_spatial_observations=has_spatial_obs,
                     specialist_chrono_state=chrono_state.to_dict(),
+                    crop_chronology_hash=cp_hashes["crop_chronology_hash"],
+                    weather_lineage_hash=cp_hashes["weather_lineage_hash"],
+                    observation_lineage_hash=cp_hashes["observation_lineage_hash"],
+                    specialist_config_hash=cp_hashes["specialist_config_hash"],
+                    input_manifest_hash=cp_hashes["input_manifest_hash"],
+                    cross_layer_prior_version=CROSS_LAYER_PRIOR_VERSION,
+                    use_cross_layer_priors=bool(use_cross_layer_priors),
                 )
                 sp_arrays = (
                     {
@@ -2316,11 +2654,61 @@ class HistoricalStateReconstructor:
             "long_observation_gaps": gap_events[:50],
         }
 
+        tail_obs_dt = _parse_utc_iso(tail_checkpoint.cutoff_valid_time)
+        tail_crop_ctx = crop_ctx
+        if crop_fusion is not None or domain_chronology is not None:
+            from .historical_crop_fusion import crop_context_as_of
+            tail_crop_ctx = crop_context_as_of(
+                crop_fusion,
+                valid_time_T=tail_obs_dt,
+                knowledge_cutoff_K=k_dt_obj,
+                domain_chronology=domain_chronology,
+                base_soil_context=soil_ctx,
+            )
+        tail_hashes = _compute_causal_input_lineage_hashes(
+            cutoff_dt=tail_obs_dt,
+            knowledge_cutoff_dt=k_dt_obj,
+            domain_chronology=domain_chronology,
+            crop_fusion=crop_fusion,
+            crop_context=crop_ctx,
+            soil_context=soil_ctx,
+            daily_weather=weather_series,
+            management_events=mgmt_events,
+            enforce_weather_publication_lag=enforce_weather_publication_lag,
+            prefix_events=eligible_events,
+            n_ensemble=self.n_ensemble,
+            n_zone_rows=self.n_zone_rows,
+            n_zone_cols=self.n_zone_cols,
+            checkpoint_stride=self.checkpoint_stride,
+            use_cross_layer_priors=use_cross_layer_priors,
+        )
+
+        def _as_issued_query_at(issue_dt: datetime) -> Dict[str, Any]:
+            return self.query_as_of(
+                plot_id=plot_id,
+                geometry_hash=geometry_hash,
+                valid_time_T=issue_dt,
+                knowledge_cutoff_K=issue_dt,
+                tenant_id=tenant_id,
+                namespace=namespace,
+                daily_weather=weather_series,
+                crop_context=crop_ctx,
+                soil_context=soil_ctx,
+                management_events=mgmt_events,
+                polygon_geojson=polygon_geojson,
+                forecast_horizons_days=(),
+                enforce_weather_publication_lag=enforce_weather_publication_lag,
+                crop_fusion=crop_fusion,
+                domain_chronology=domain_chronology,
+                use_cross_layer_priors=use_cross_layer_priors,
+            )
+
+        dom_identity = getattr(domain_chronology, "identity", None) if domain_chronology is not None else None
         context_summary = {
             "plot_id": plot_id,
             "geometry_hash": geometry_hash,
             "daily_weather": weather_series,
-            "crop_context": crop_ctx,
+            "crop_context": tail_crop_ctx,
             "soil_context": soil_ctx,
             "management_events": mgmt_events,
             "state_support_ledger": support_ledger,
@@ -2328,6 +2716,14 @@ class HistoricalStateReconstructor:
             "checkpoints_chain": final_chain,
             "node_ids": list(self.node_ids),
             "canonical_grid": canonical_grid,
+            "domain_identity": (
+                dom_identity.to_dict()
+                if dom_identity is not None and hasattr(dom_identity, "to_dict")
+                else None
+            ),
+            "domain_chronology": domain_chronology,
+            "crop_fusion": crop_fusion,
+            "as_issued_query_fn": _as_issued_query_at,
         }
 
         event_memory_result: Dict[str, Any] = {}
@@ -2340,11 +2736,22 @@ class HistoricalStateReconstructor:
 
         qual_info = retro_result.get("qualification") if isinstance(retro_result, dict) else None
         qual_passed = bool(retrovalidation_fn is not None and isinstance(qual_info, dict) and qual_info.get("passed") is True)
-        dom_identity = getattr(domain_chronology, "identity", None) if domain_chronology is not None else None
-        dom_blocks = []
+        dom_blocks: List[str] = []
         if dom_identity is not None:
+            if not bool(getattr(dom_identity, "tenant_identity_verified", False)):
+                dom_blocks.append("unverified_tenant_identity")
+            if not bool(getattr(dom_identity, "crop_identity_verified", False)):
+                dom_blocks.append("unverified_crop_identity")
+            if bool(getattr(dom_identity, "synthetic_crop_labels_present", False)) and not bool(getattr(dom_identity, "crop_identity_verified", False)):
+                dom_blocks.append("synthetic_crop_label_rejected")
             for b_reason in getattr(dom_identity, "identity_block_reasons", ()) or ():
-                if b_reason in {"unverified_crop_identity", "unverified_tenant_identity", "synthetic_crop_label_rejected"}:
+                if b_reason in {
+                    "unverified_crop_identity",
+                    "unverified_tenant_identity",
+                    "synthetic_crop_label_rejected",
+                    "unconfirmed_crop_declaration",
+                    "unknown_crop_identity",
+                } and str(b_reason) not in dom_blocks:
                     dom_blocks.append(str(b_reason))
         if dom_blocks:
             qual_passed = False
@@ -2365,11 +2772,13 @@ class HistoricalStateReconstructor:
 
         emitted_event_type = "ARCHIVE_POSTERIOR_VALIDATED" if qual_passed else "ARCHIVE_POSTERIOR_DIAGNOSTIC"
 
-        # Update checkpoint index append-only (retain historical chains before late arrival!)
+        # Update checkpoint index append-only (retain historical chains before late arrival or lineage change!)
         historical_chains = list(index_data.get("historical_chains") or [])
-        if mode == "late_arrival_replay" and active_cp_ids:
+        if (mode in {"late_arrival_replay", "causal_lineage_replay"} or superseded_cp_ids) and active_cp_ids:
             historical_chains.append({
                 "superseded_at": now_utc,
+                "reason": mode,
+                "superseded_checkpoint_ids": list(superseded_cp_ids),
                 "late_arrival_event_ids": list(late_arrival_ids),
                 "prior_active_chain": list(active_cp_ids),
                 "prior_worldline_posterior_event_id": prior_worldline_posterior_id,
@@ -2423,6 +2832,13 @@ class HistoricalStateReconstructor:
                 ],
                 "checkpoint_id": tail_checkpoint.checkpoint_id,
                 "checkpoint_chain_length": len(final_chain),
+                "crop_chronology_hash": tail_hashes["crop_chronology_hash"],
+                "weather_lineage_hash": tail_hashes["weather_lineage_hash"],
+                "observation_lineage_hash": tail_hashes["observation_lineage_hash"],
+                "specialist_config_hash": tail_hashes["specialist_config_hash"],
+                "input_manifest_hash": tail_hashes["input_manifest_hash"],
+                "cross_layer_prior_version": CROSS_LAYER_PRIOR_VERSION,
+                "use_cross_layer_priors": bool(use_cross_layer_priors),
                 "reconstruction_mode": mode,
                 "late_arrival_event_ids": list(late_arrival_ids),
                 "supersedes_event_id": prior_worldline_posterior_id if late_arrival_ids else None,
@@ -2505,6 +2921,12 @@ class HistoricalStateReconstructor:
             "model_version": RECONSTRUCTOR_MODEL_VERSION,
             "state_schema_version": STATE_SCHEMA_VERSION,
             "calibration_version": CALIBRATION_VERSION,
+            "cross_layer_prior_version": CROSS_LAYER_PRIOR_VERSION,
+            "crop_chronology_hash": tail_hashes["crop_chronology_hash"],
+            "weather_lineage_hash": tail_hashes["weather_lineage_hash"],
+            "observation_lineage_hash": tail_hashes["observation_lineage_hash"],
+            "specialist_config_hash": tail_hashes["specialist_config_hash"],
+            "input_manifest_hash": tail_hashes["input_manifest_hash"],
             "use_cross_layer_priors": bool(use_cross_layer_priors),
             "observation_count": len(ordered_obs_ids),
             "newly_assimilated_count": len(pending_events),
@@ -2562,6 +2984,7 @@ class HistoricalStateReconstructor:
         enforce_weather_publication_lag: bool = True,
         crop_fusion: Optional[Dict[str, Any]] = None,
         domain_chronology: Optional[Any] = None,
+        use_cross_layer_priors: bool = True,
     ) -> Dict[str, Any]:
         """Read-only causal time-travel query at (valid_time_T, knowledge_cutoff_K)."""
         t_dt = _parse_utc_iso(valid_time_T)
@@ -2570,6 +2993,10 @@ class HistoricalStateReconstructor:
             if knowledge_cutoff_K is not None
             else datetime.now(timezone.utc)
         )
+        raw_daily_weather = dict(daily_weather or {})
+        base_crop_ctx = dict(crop_context or {"crop_type": "unknown", "crop_coefficient": 0.80})
+        soil_ctx = dict(soil_context or {})
+        mgmt_all = list(management_events or [])
         eligible_events = self.load_qualified_observations(
             plot_id=plot_id,
             valid_time_T=t_dt.isoformat(),
@@ -2612,13 +3039,42 @@ class HistoricalStateReconstructor:
         active_cps: List[PosteriorCheckpoint] = []
         for cp_id in index_data.get("active_chain") or []:
             cp = self.load_checkpoint(plot_id, cp_id, tenant_id, namespace)
+            if cp is None:
+                break
+            cp_obs_len = len(cp.assimilated_observation_ids)
+            if cp_obs_len > len(eligible_events) or _parse_utc_iso(cp.knowledge_cutoff_time) > k_dt:
+                break
+            cp_hashes = _compute_causal_input_lineage_hashes(
+                cutoff_dt=_parse_utc_iso(cp.cutoff_valid_time),
+                knowledge_cutoff_dt=k_dt,
+                domain_chronology=domain_chronology,
+                crop_fusion=crop_fusion,
+                crop_context=base_crop_ctx if crop_fusion is None and domain_chronology is None else None,
+                soil_context=soil_ctx,
+                daily_weather=raw_daily_weather,
+                management_events=mgmt_all,
+                enforce_weather_publication_lag=enforce_weather_publication_lag,
+                prefix_events=eligible_events[:cp_obs_len],
+                n_ensemble=self.n_ensemble,
+                n_zone_rows=self.n_zone_rows,
+                n_zone_cols=self.n_zone_cols,
+                checkpoint_stride=self.checkpoint_stride,
+                use_cross_layer_priors=use_cross_layer_priors,
+            )
             if (
-                cp is not None
-                and cp.geometry_hash == geometry_hash
+                cp.geometry_hash == geometry_hash
                 and cp.model_version == RECONSTRUCTOR_MODEL_VERSION
+                and cp.state_schema_version == STATE_SCHEMA_VERSION
                 and cp.calibration_version == CALIBRATION_VERSION
+                and cp.cross_layer_prior_version == CROSS_LAYER_PRIOR_VERSION
+                and bool(cp.use_cross_layer_priors) == bool(use_cross_layer_priors)
+                and cp.crop_chronology_hash == cp_hashes["crop_chronology_hash"]
+                and cp.weather_lineage_hash == cp_hashes["weather_lineage_hash"]
+                and cp.input_manifest_hash == cp_hashes["input_manifest_hash"]
             ):
                 active_cps.append(cp)
+            else:
+                break
 
         # Pick nearest stored checkpoint whose assimilated prefix matches eligible_events[:n]
         anchor_cp: Optional[PosteriorCheckpoint] = None
@@ -2632,7 +3088,7 @@ class HistoricalStateReconstructor:
         effective_day_limit = effective_cutoff_dt.date().isoformat()
         q_lag_stats: Dict[str, Any] = {}
         weather_series = filter_causal_daily_weather_at_cutoff(
-            daily_weather,
+            raw_daily_weather,
             effective_cutoff_dt,
             knowledge_cutoff_dt=k_dt,
             enforce_publication_lag=enforce_weather_publication_lag,
@@ -2645,15 +3101,20 @@ class HistoricalStateReconstructor:
                 valid_time_T=t_dt,
                 knowledge_cutoff_K=k_dt,
                 domain_chronology=domain_chronology,
-                base_soil_context=soil_context,
+                base_soil_context=soil_ctx,
             )
         else:
-            crop_ctx = dict(crop_context or {"crop_type": "unknown", "crop_coefficient": 0.80})
-        soil_ctx = dict(soil_context or {})
+            crop_ctx = dict(base_crop_ctx)
         mgmt_events = [
-            ev for ev in (management_events or [])
+            ev for ev in mgmt_all
             if not isinstance(ev, dict)
-            or str(ev.get("effective_start") or ev.get("timestamp") or ev.get("date") or "")[:10] <= effective_day_limit
+            or (
+                str(ev.get("effective_start") or ev.get("timestamp") or ev.get("date") or "")[:10] <= effective_day_limit
+                and (
+                    not (ev.get("known_from") or ev.get("recorded_at") or ev.get("ingested_at"))
+                    or _parse_utc_iso(ev.get("known_from") or ev.get("recorded_at") or ev.get("ingested_at")) <= k_dt
+                )
+            )
         ]
 
         first_q_dt = _parse_utc_iso(eligible_events[0].get("observation_or_valid_time") or eligible_events[0].get("effective_at"))
@@ -2668,7 +3129,17 @@ class HistoricalStateReconstructor:
             has_spatial_obs = bool(anchor_cp.has_spatial_observations)
             q_chrono = CrossLayerChronoState.from_dict(anchor_cp.specialist_chrono_state)
             if not q_chrono.layer_theta_profile:
-                q_chrono = self.cross_layer_bridge.initialize_chrono_state(crop_context=crop_ctx, soil_context=soil_ctx)
+                anchor_q_crop = crop_ctx
+                if crop_fusion is not None or domain_chronology is not None:
+                    from .historical_crop_fusion import crop_context_as_of
+                    anchor_q_crop = crop_context_as_of(
+                        crop_fusion,
+                        valid_time_T=_parse_utc_iso(anchor_cp.cutoff_valid_time),
+                        knowledge_cutoff_K=k_dt,
+                        domain_chronology=domain_chronology,
+                        base_soil_context=soil_ctx,
+                    )
+                q_chrono = self.cross_layer_bridge.initialize_chrono_state(crop_context=anchor_q_crop, soil_context=soil_ctx)
             if canonical_grid is None and isinstance(anchor_cp.canonical_grid, dict):
                 canonical_grid = dict(anchor_cp.canonical_grid)
                 canonical_grid["inside_mask"] = _polygon_mask(
@@ -2679,19 +3150,44 @@ class HistoricalStateReconstructor:
                 )
         else:
             start_idx = 0
-            q_chrono = self.cross_layer_bridge.initialize_chrono_state(crop_context=crop_ctx, soil_context=soil_ctx)
-            self.cross_layer_bridge.advance_chrono_state(
-                q_chrono, start_time=first_q_dt - timedelta(days=5), end_time=first_q_dt,
-                weather_daily_series=weather_series, crop_context=crop_ctx, soil_context=soil_ctx, management_events=mgmt_events,
+            init_q_crop_ctx = base_crop_ctx
+            if crop_fusion is not None or domain_chronology is not None:
+                from .historical_crop_fusion import crop_context_as_of
+                init_q_crop_ctx = crop_context_as_of(
+                    crop_fusion,
+                    valid_time_T=first_q_dt,
+                    knowledge_cutoff_K=k_dt,
+                    domain_chronology=domain_chronology,
+                    base_soil_context=soil_ctx,
+                )
+            init_q_weather = filter_causal_daily_weather_at_cutoff(
+                raw_daily_weather,
+                first_q_dt,
+                knowledge_cutoff_dt=k_dt,
+                enforce_publication_lag=enforce_weather_publication_lag,
             )
-            init_b = self.cross_layer_bridge.evaluate_step_priors(
-                state=q_chrono, timestamp=first_q_dt, knowledge_cutoff=k_dt, crop_context=crop_ctx, soil_context=soil_ctx,
-            )
+            init_q_day = min(first_q_dt, k_dt).date().isoformat()
+            init_q_mgmt = [
+                ev for ev in mgmt_events
+                if not isinstance(ev, dict)
+                or str(ev.get("effective_start") or ev.get("timestamp") or ev.get("date") or "")[:10] <= init_q_day
+            ]
+            q_chrono = self.cross_layer_bridge.initialize_chrono_state(crop_context=init_q_crop_ctx, soil_context=soil_ctx)
+            init_priors_q: Dict[str, Any] = {}
+            if use_cross_layer_priors:
+                self.cross_layer_bridge.advance_chrono_state(
+                    q_chrono, start_time=first_q_dt - timedelta(days=5), end_time=first_q_dt,
+                    weather_daily_series=init_q_weather, crop_context=init_q_crop_ctx, soil_context=soil_ctx, management_events=init_q_mgmt,
+                )
+                init_b = self.cross_layer_bridge.evaluate_step_priors(
+                    state=q_chrono, timestamp=first_q_dt, knowledge_cutoff=k_dt, crop_context=init_q_crop_ctx, soil_context=soil_ctx,
+                )
+                init_priors_q = init_b.get("priors") or {}
             ensemble, _ = initialize_ensemble(
                 node_ids=self.node_ids,
                 n_ensemble=self.n_ensemble,
-                priors=init_b.get("priors") or {},
-                crop_context=crop_ctx,
+                priors=init_priors_q,
+                crop_context=init_q_crop_ctx,
                 rng=rng,
                 scenes=[],
                 initial_posterior=None,
@@ -2727,12 +3223,18 @@ class HistoricalStateReconstructor:
             payload = (ev.get("payload") or {}).get("observation_qualified") or {}
             obs_time = _parse_utc_iso(ev.get("observation_or_valid_time") or ev.get("effective_at"))
             step_weather_q = filter_causal_daily_weather_at_cutoff(
-                weather_series,
+                raw_daily_weather,
                 obs_time,
                 knowledge_cutoff_dt=k_dt,
                 enforce_publication_lag=enforce_weather_publication_lag,
             )
-            q_step_crop = crop_ctx
+            step_day_q = min(obs_time, k_dt).date().isoformat()
+            step_mgmt_q = [
+                ev_m for ev_m in mgmt_events
+                if not isinstance(ev_m, dict)
+                or str(ev_m.get("effective_start") or ev_m.get("timestamp") or ev_m.get("date") or "")[:10] <= step_day_q
+            ]
+            q_step_crop = base_crop_ctx
             if crop_fusion is not None or domain_chronology is not None:
                 from .historical_crop_fusion import crop_context_as_of
                 q_step_crop = crop_context_as_of(
@@ -2742,19 +3244,22 @@ class HistoricalStateReconstructor:
                     domain_chronology=domain_chronology,
                     base_soil_context=soil_ctx,
                 )
-            self.cross_layer_bridge.advance_chrono_state(
-                q_chrono,
-                start_time=prev_scene_time or (obs_time - timedelta(days=5)),
-                end_time=obs_time,
-                weather_daily_series=step_weather_q,
-                crop_context=q_step_crop,
-                soil_context=soil_ctx,
-                management_events=mgmt_events,
-            )
-            q_step_pre = self.cross_layer_bridge.evaluate_step_priors(
-                state=q_chrono, timestamp=obs_time, knowledge_cutoff=k_dt, crop_context=q_step_crop, soil_context=soil_ctx,
-            )
-            q_step_priors = q_step_pre.get("priors") or {}
+            q_step_pre: Optional[Dict[str, Any]] = None
+            q_step_priors: Dict[str, Any] = {}
+            if use_cross_layer_priors:
+                self.cross_layer_bridge.advance_chrono_state(
+                    q_chrono,
+                    start_time=prev_scene_time or (obs_time - timedelta(days=5)),
+                    end_time=obs_time,
+                    weather_daily_series=step_weather_q,
+                    crop_context=q_step_crop,
+                    soil_context=soil_ctx,
+                    management_events=step_mgmt_q,
+                )
+                q_step_pre = self.cross_layer_bridge.evaluate_step_priors(
+                    state=q_chrono, timestamp=obs_time, knowledge_cutoff=k_dt, crop_context=q_step_crop, soil_context=soil_ctx,
+                )
+                q_step_priors = q_step_pre.get("priors") or {}
             elapsed_days = 0.0
             if prev_scene_time is not None and obs_time > prev_scene_time:
                 elapsed_days = (obs_time - prev_scene_time).total_seconds() / 86400.0
@@ -2763,12 +3268,12 @@ class HistoricalStateReconstructor:
                     previous_time=prev_scene_time,
                     current_time=obs_time,
                     priors=q_step_priors,
-                    crop_context=crop_ctx,
+                    crop_context=q_step_crop,
                     rng=rng,
                     scenes=[],
                     weather_daily_series=step_weather_q,
                     soil_context=soil_ctx,
-                    management_events=mgmt_events,
+                    management_events=step_mgmt_q,
                 )
             prev_scene_time = obs_time
             obs_channels, obs_grids = _load_scene_raster_observations(
@@ -2839,15 +3344,16 @@ class HistoricalStateReconstructor:
                     post_raw_pred=float(post_raw) if (post_raw is not None and math.isfinite(float(post_raw))) else raw_pred,
                     var_scale_used=pred_rec.get("var_scale_applied"),
                 )
-            if isinstance(obs_channels.get("ndvi"), (int, float)):
-                exp_v = float((q_step_priors.get("layer2") or {}).get("expected_vigor", 0.55) or 0.55)
-                q_chrono.recent_ndvi_window.append((obs_time.isoformat()[:10], float(obs_channels["ndvi"]), exp_v))
-                if len(q_chrono.recent_ndvi_window) > 10:
-                    q_chrono.recent_ndvi_window = q_chrono.recent_ndvi_window[-10:]
-            if isinstance(obs_channels.get("ndmi"), (int, float)):
-                q_chrono.recent_ndmi_window.append(float(obs_channels["ndmi"]))
-                if len(q_chrono.recent_ndmi_window) > 8:
-                    q_chrono.recent_ndmi_window = q_chrono.recent_ndmi_window[-8:]
+            if use_cross_layer_priors:
+                if isinstance(obs_channels.get("ndvi"), (int, float)):
+                    exp_v = float((q_step_priors.get("layer2") or {}).get("expected_vigor", 0.55) or 0.55)
+                    q_chrono.recent_ndvi_window.append((obs_time.isoformat()[:10], float(obs_channels["ndvi"]), exp_v))
+                    if len(q_chrono.recent_ndvi_window) > 10:
+                        q_chrono.recent_ndvi_window = q_chrono.recent_ndvi_window[-10:]
+                if isinstance(obs_channels.get("ndmi"), (int, float)):
+                    q_chrono.recent_ndmi_window.append(float(obs_channels["ndmi"]))
+                    if len(q_chrono.recent_ndmi_window) > 8:
+                        q_chrono.recent_ndmi_window = q_chrono.recent_ndmi_window[-8:]
             if canonical_grid is not None and spatial_delta is not None and spatial_var is not None and spatial_obs_count is not None:
                 has_spatial_obs = self._update_spatial_anomaly_field(
                     spatial_delta=spatial_delta,
@@ -2877,19 +3383,22 @@ class HistoricalStateReconstructor:
             })
 
         # Advance specialist hydrological/phenological model to exact valid_time_T
-        self.cross_layer_bridge.advance_chrono_state(
-            q_chrono,
-            start_time=prev_scene_time or t_dt,
-            end_time=t_dt,
-            weather_daily_series=weather_series,
-            crop_context=crop_ctx,
-            soil_context=soil_ctx,
-            management_events=mgmt_events,
-        )
-        q_pre_T = self.cross_layer_bridge.evaluate_step_priors(
-            state=q_chrono, timestamp=t_dt, knowledge_cutoff=k_dt, crop_context=crop_ctx, soil_context=soil_ctx,
-        )
-        q_priors_T = q_pre_T.get("priors") or {}
+        q_pre_T: Dict[str, Any] = {}
+        q_priors_T: Dict[str, Any] = {}
+        if use_cross_layer_priors:
+            self.cross_layer_bridge.advance_chrono_state(
+                q_chrono,
+                start_time=prev_scene_time or t_dt,
+                end_time=t_dt,
+                weather_daily_series=weather_series,
+                crop_context=crop_ctx,
+                soil_context=soil_ctx,
+                management_events=mgmt_events,
+            )
+            q_pre_T = self.cross_layer_bridge.evaluate_step_priors(
+                state=q_chrono, timestamp=t_dt, knowledge_cutoff=k_dt, crop_context=crop_ctx, soil_context=soil_ctx,
+            )
+            q_priors_T = q_pre_T.get("priors") or {}
 
         # Propagate strictly forward from last observation up to valid_time_T if T > prev_scene_time
         state_age_days = 0.0
@@ -2965,16 +3474,20 @@ class HistoricalStateReconstructor:
                 ).get("suppress_surface")
             )
         }
-        q_refined_T = self.cross_layer_bridge.refine_after_asmae(
-            pre_bundle=q_pre_T,
-            posterior_means=means_T,
-            posterior_stds=stds_T,
-            state_support_ledger=ledger_T,
-            crop_context=crop_ctx,
-            gap_days=state_age_days,
+        q_refined_T = (
+            self.cross_layer_bridge.refine_after_asmae(
+                pre_bundle=q_pre_T,
+                posterior_means=means_T,
+                posterior_stds=stds_T,
+                state_support_ledger=ledger_T,
+                crop_context=crop_ctx,
+                gap_days=state_age_days,
+            )
+            if use_cross_layer_priors and q_pre_T
+            else {}
         )
 
-        # Causal multi-horizon forward forecast issued at T using strict D-1 issuance weather + causal DOY climatology
+        # Causal multi-horizon forward forecast issued at T using strict D-1 issuance weather + dynamic crop horizon context (known <= min(T, K))
         sorted_horizons = sorted({int(h) for h in forecast_horizons_days if int(h) > 0})
         max_h = max(sorted_horizons) if sorted_horizons else 28
         causal_fc_weather = build_prospective_weather_series(
@@ -2983,18 +3496,29 @@ class HistoricalStateReconstructor:
             knowledge_cutoff_dt=k_dt,
             enforce_publication_lag=enforce_weather_publication_lag,
         )
+        fc_known_cutoff = min(t_dt, k_dt)
         causal_forecasts: List[Dict[str, Any]] = []
         fc_ens = copy.deepcopy(ensemble)
         fc_rng = make_rng("asmae_causal_fc", plot_id, geometry_hash, t_dt.isoformat())
         cur_fc_dt = t_dt
         for h_days in sorted_horizons:
             target_fc_dt = t_dt + timedelta(days=h_days)
+            fc_step_crop = crop_ctx
+            if crop_fusion is not None or domain_chronology is not None:
+                from .historical_crop_fusion import crop_context_as_of
+                fc_step_crop = crop_context_as_of(
+                    crop_fusion,
+                    valid_time_T=target_fc_dt,
+                    knowledge_cutoff_K=fc_known_cutoff,
+                    domain_chronology=domain_chronology,
+                    base_soil_context=soil_ctx,
+                )
             fc_ens, _ = _forecast_elapsed_interval(
                 ensemble=fc_ens,
                 previous_time=cur_fc_dt,
                 current_time=target_fc_dt,
                 priors=q_priors_T,
-                crop_context=crop_ctx,
+                crop_context=fc_step_crop,
                 rng=fc_rng,
                 scenes=[],
                 weather_daily_series=causal_fc_weather,
@@ -3016,6 +3540,11 @@ class HistoricalStateReconstructor:
             causal_forecasts.append({
                 "horizon_days": h_days,
                 "target_valid_time": target_fc_dt.isoformat(),
+                "crop_context": {
+                    "crop": fc_step_crop.get("crop"),
+                    "physical_regime": fc_step_crop.get("physical_regime"),
+                    "crop_identity_verified": bool(fc_step_crop.get("crop_identity_verified")),
+                },
                 "predicted_states": {k: fc_means[k] for k in ("vigor", "lai", "canopy_water", "root_zone_water", "stress_memory")},
                 "predicted_state_stds": {k: fc_stds[k] for k in ("vigor", "lai", "canopy_water", "root_zone_water", "stress_memory")},
                 "predicted_channels": {
@@ -3028,10 +3557,38 @@ class HistoricalStateReconstructor:
                 },
             })
 
+        q_hashes_T = _compute_causal_input_lineage_hashes(
+            cutoff_dt=t_dt,
+            knowledge_cutoff_dt=k_dt,
+            domain_chronology=domain_chronology,
+            crop_fusion=crop_fusion,
+            crop_context=base_crop_ctx if crop_fusion is None and domain_chronology is None else None,
+            soil_context=soil_ctx,
+            daily_weather=raw_daily_weather,
+            management_events=mgmt_all,
+            enforce_weather_publication_lag=enforce_weather_publication_lag,
+            prefix_events=eligible_events,
+            n_ensemble=self.n_ensemble,
+            n_zone_rows=self.n_zone_rows,
+            n_zone_cols=self.n_zone_cols,
+            checkpoint_stride=self.checkpoint_stride,
+            use_cross_layer_priors=use_cross_layer_priors,
+        )
+
         return {
             "available": True,
+            "world_model_contract_version": "asmae_world_model_v2",
             "plot_id": plot_id,
             "geometry_hash": geometry_hash,
+            "model_version": RECONSTRUCTOR_MODEL_VERSION,
+            "calibration_version": CALIBRATION_VERSION,
+            "cross_layer_prior_version": CROSS_LAYER_PRIOR_VERSION,
+            "use_cross_layer_priors": bool(use_cross_layer_priors),
+            "crop_chronology_hash": q_hashes_T["crop_chronology_hash"],
+            "weather_lineage_hash": q_hashes_T["weather_lineage_hash"],
+            "observation_lineage_hash": q_hashes_T["observation_lineage_hash"],
+            "specialist_config_hash": q_hashes_T["specialist_config_hash"],
+            "input_manifest_hash": q_hashes_T["input_manifest_hash"],
             "publication_authority": "DIAGNOSTIC_ONLY",
             "claims_numerical_authority": False,
             "valid_time_T": t_dt.isoformat(),
@@ -3045,6 +3602,7 @@ class HistoricalStateReconstructor:
             "state_means": means_T,
             "state_stds": stds_T,
             "state_covariance": cov_T,
+            "channel_calibration": copy.deepcopy(channel_cal),
             "state_support_ledger": ledger_T,
             "canonical_grid": {k: v for k, v in canonical_grid.items() if k != "inside_mask"} if canonical_grid else None,
             "has_spatial_observations": bool(has_spatial_obs),
@@ -3068,7 +3626,11 @@ class HistoricalStateReconstructor:
             },
             "crop_context_as_of": {
                 "crop": crop_ctx.get("crop"),
+                "declared_crop": crop_ctx.get("declared_crop"),
                 "crop_identity_verified": bool(crop_ctx.get("crop_identity_verified")),
+                "crop_declaration_authority": crop_ctx.get("crop_declaration_authority"),
+                "crop_authority_tier": crop_ctx.get("crop_authority_tier"),
+                "identity_block_reasons": list(crop_ctx.get("identity_block_reasons") or []),
                 "physical_regime": crop_ctx.get("physical_regime"),
                 "unknown_probability": crop_ctx.get("unknown_probability"),
                 "crop_group_posterior": crop_ctx.get("crop_group_posterior"),

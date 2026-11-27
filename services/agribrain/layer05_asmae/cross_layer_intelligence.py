@@ -407,7 +407,7 @@ class CrossLayerSpecialistBridge:
         crop_context: Optional[Dict[str, Any]] = None,
         soil_context: Optional[Dict[str, Any]] = None,
     ) -> CrossLayerChronoState:
-        crop = _safe_crop_profile((crop_context or {}).get("crop_type") or (crop_context or {}).get("crop") or "citrus")
+        crop = _safe_crop_profile((crop_context or {}).get("crop_type") or (crop_context or {}).get("crop") or "unknown")
         soil_type = str((soil_context or {}).get("soil_type") or "loam").lower()
         base_soil = SoilProfileDatabase.get_canonical_soil_profile(soil_type=soil_type, initial_saturation_fraction=0.65)
         root_depth = _finite(
@@ -444,7 +444,7 @@ class CrossLayerSpecialistBridge:
         lat: float = 36.5,
     ) -> CrossLayerChronoState:
         """Advance multi-layer hydrological soil column + GDD + Dual-Kc strictly up to end_time."""
-        crop_name = str((crop_context or {}).get("crop_type") or (crop_context or {}).get("crop") or "citrus").lower()
+        crop_name = str((crop_context or {}).get("crop_type") or (crop_context or {}).get("crop") or "unknown").lower()
         crop = _safe_crop_profile(crop_name)
         t_base = float(getattr(crop, "gdd_base_temp", 10.0) or 10.0)
         t_opt_max = float(getattr(crop, "optimal_temp_max", 35.0) or 35.0)
@@ -743,7 +743,7 @@ class CrossLayerSpecialistBridge:
         """Execute Layers 2-7 specialist engines + Layer 8 safety constraints BEFORE ASMAE update."""
         crop_cfg = dict(crop_context or {})
         soil_cfg = dict(soil_context or {})
-        crop_name = str(crop_cfg.get("crop_type") or crop_cfg.get("crop") or "citrus").lower()
+        crop_name = str(crop_cfg.get("crop_type") or crop_cfg.get("crop") or "unknown").lower()
         crop = _safe_crop_profile(crop_name)
         architecture = str(getattr(crop, "architecture", "perennial"))
         ts_iso = timestamp.isoformat()
@@ -1170,7 +1170,7 @@ class CrossLayerSpecialistBridge:
         `observation_role="refined_specialist_output_non_assimilable"` and NEVER become
         new independent observations in ASMAE.
         """
-        crop_name = str((crop_context or {}).get("crop_type") or (crop_context or {}).get("crop") or "citrus").lower()
+        crop_name = str((crop_context or {}).get("crop_type") or (crop_context or {}).get("crop") or "unknown").lower()
         crop = _safe_crop_profile(crop_name)
         pre = pre_bundle.get("priors") or {}
         l2_pre = pre.get("layer2") or {}
@@ -1250,6 +1250,7 @@ class CrossLayerSpecialistBridge:
         phys_regime = str((crop_context or {}).get("physical_regime") or "")
         is_regime_transition = phys_regime in {
             "PRE_PLANTING_FALLOW_OR_PREP",
+            "PRE_KNOWN_CYCLE_UNKNOWN",
             "EARLY_ESTABLISHMENT",
             "POST_HARVEST_RESIDUE_OR_FALLOW",
         }

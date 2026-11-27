@@ -134,8 +134,23 @@ class TestAsmaeWorldModelV1AndCropFusion(unittest.TestCase):
         self.assertFalse(ok_exp)
         self.assertEqual(reason_exp, "calibration_expired")
 
+        ok_bare_flag, reason_bare = _classify_probe_calibration(
+            {"vendor": "Sentek Drill & Drop", "isCalibrated": True},
+            "Sentek Drill & Drop",
+            0.25,
+            0.45,
+            reading_ts=ts_now,
+        )
+        self.assertFalse(ok_bare_flag)
+        self.assertEqual(reason_bare, "unverified_self_asserted_calibration")
+
         ok_cert, reason_cert = _classify_probe_calibration(
-            {"vendor": "Sentek Drill & Drop", "calibrationCertificateId": "CERT-2026-88"},
+            {
+                "vendor": "Sentek Drill & Drop",
+                "calibrationCertificateId": "CERT-2026-88",
+                "calibrationAuthority": "mitidja_metrology_lab",
+                "calibrationVerifiedAt": "2026-05-01T00:00:00+00:00",
+            },
             "Sentek Drill & Drop",
             0.25,
             0.45,
@@ -156,11 +171,25 @@ class TestAsmaeWorldModelV1AndCropFusion(unittest.TestCase):
         self.assertFalse(rec.is_confirmed)
         self.assertEqual(rec.confirmation_status, "UNCONFIRMED_SCOUTING")
 
+        raw_unverified_claim = {
+            "_id": "obs_2_nocfg",
+            "type": "disease",
+            "title": "Confirmed Without Verifier",
+            "confirmed": True,
+            "observedAt": "2026-10-10T09:00:00+00:00",
+            "createdAt": "2026-11-15T12:00:00+00:00",
+        }
+        rec_uc = evaluate_scouting_record(raw_unverified_claim)
+        self.assertFalse(rec_uc.is_confirmed)
+        self.assertEqual(rec_uc.confirmation_status, "UNCONFIRMED_MISSING_CONFIRMER_OR_TIMESTAMP")
+
         raw_confirmed = {
             "_id": "obs_2",
             "type": "disease",
             "title": "Confirmed Rust",
             "confirmed": True,
+            "confirmedBy": "agronomist_mitidja_01",
+            "confirmedAt": "2026-11-15T12:00:00+00:00",
             "observedAt": "2026-10-10T09:00:00+00:00",
             "createdAt": "2026-11-15T12:00:00+00:00",
         }
@@ -270,7 +299,27 @@ class TestAsmaeWorldModelV1AndCropFusion(unittest.TestCase):
         self.assertIn("unverified_tenant_identity", ident.identity_block_reasons)
 
     def test_decisive_multi_season_crop_rotation_and_late_farmer_confirmation(self) -> None:
-        # Season 1 (2022) unverified/annual; Season 2 (2024) confirmed late at known_from=2025-01-10
+        # Unconfirmed CropCycle without declaredCropAuthority must stay REGISTRY_DECLARED (WM1-P1-02)
+        _, unconf_chron = build_domain_chronology(
+            plot_id="rot_plot_unconf",
+            plot_doc={"tenantId": "tenant_real_01", "soilType": "LOAM"},
+            crop_cycles=[{
+                "_id": "cc_2024_u",
+                "cropCode": "tomato",
+                "status": "HARVESTED",
+                "plantDate": "2024-03-01T00:00:00+00:00",
+                "expectedHarvest": "2024-08-01T00:00:00+00:00",
+                "createdAt": "2025-01-10T00:00:00+00:00",
+            }],
+        )
+        unconf_s2 = unconf_chron.as_of(
+            datetime(2024, 6, 15, tzinfo=timezone.utc),
+            knowledge_cutoff_K=datetime(2025, 2, 1, tzinfo=timezone.utc),
+        )
+        self.assertFalse(unconf_s2["crop_verified_as_of_k"])
+        self.assertEqual(unconf_s2["crop_authority"], "REGISTRY_DECLARED")
+
+        # Season 1 (2022) unknown pre-cycle; Season 2 (2024) confirmed late at declaredCropAt=2025-01-10
         ident, chron = build_domain_chronology(
             plot_id="rot_plot_1",
             plot_doc={"tenantId": "tenant_real_01", "soilType": "LOAM"},
@@ -282,6 +331,8 @@ class TestAsmaeWorldModelV1AndCropFusion(unittest.TestCase):
                     "status": "HARVESTED",
                     "plantDate": "2024-03-01T00:00:00+00:00",
                     "expectedHarvest": "2024-08-01T00:00:00+00:00",
+                    "declaredCropAuthority": "FARMER_CONFIRMED",
+                    "declaredCropAt": "2025-01-10T00:00:00+00:00",
                     "createdAt": "2025-01-10T00:00:00+00:00",
                 }
             ],
@@ -306,9 +357,9 @@ class TestAsmaeWorldModelV1AndCropFusion(unittest.TestCase):
             datetime(2022, 5, 1, tzinfo=timezone.utc),
             knowledge_cutoff_K=datetime(2025, 2, 1, tzinfo=timezone.utc),
         )
-        # 2022 was BEFORE 2024 tomato planting -> pre-planting fallow/prep, not retroactively overwritten by 2024 crop!
+        # 2022 was BEFORE 2024 tomato planting without soil-prep confirmation -> PRE_KNOWN_CYCLE_UNKNOWN (WM1-P2-11)
         self.assertFalse(dom_after_k_s1["crop_verified_as_of_k"])
-        self.assertEqual(dom_after_k_s1["physical_regime"], "PRE_PLANTING_FALLOW_OR_PREP")
+        self.assertEqual(dom_after_k_s1["physical_regime"], "PRE_KNOWN_CYCLE_UNKNOWN")
 
     def test_deep_audit_layer2_mixture_uncertainty_and_publication_authority(self) -> None:
         # 1. Low known mass (21% cereal, 79% unknown) must preserve nonzero unknown uncertainty variance
@@ -364,6 +415,8 @@ class TestAsmaeWorldModelV1AndCropFusion(unittest.TestCase):
                 "_id": "cc_cmara",
                 "cropCode": "orange",
                 "status": "PLANTED",
+                "declaredCropAuthority": "FARMER_CONFIRMED",
+                "declaredCropAt": "2026-05-21T00:00:00+00:00",
                 "plantDate": "2026-05-21T00:00:00+00:00",
                 "createdAt": "2026-05-21T00:00:00+00:00",
             }],
@@ -407,7 +460,7 @@ class TestAsmaeWorldModelV1AndCropFusion(unittest.TestCase):
                 "crop_fusion": {},
             }
         ])
-        self.assertEqual(matrix["matrix_version"], "asmae_world_model_v1_benchmark_matrix")
+        self.assertEqual(matrix["matrix_version"], "asmae_world_model_v2_benchmark_matrix")
         self.assertEqual(matrix["verified_crop_plot_count"], 1)
         self.assertEqual(matrix["verified_tenant_plot_count"], 0)
         self.assertEqual(matrix["per_plot_benchmark"][0]["n_eval_points"], 30)
@@ -571,13 +624,15 @@ class TestAsmaeWorldModelV1AndCropFusion(unittest.TestCase):
         self.assertTrue(post["ml_handoff_status"]["ml_input_handoff_attached"])
         self.assertFalse(post["species_probability_published"])
 
-        # 4. External disjoint calibration_receipt validates input calibration gate
+        # 4. Self-asserted unsigned calibration_receipt MUST be rejected (WM1-P2-12);
+        # only a cryptographically signed TrustedCalibrationArtifactStore entry passes
+        from services.agribrain.layer2_veg_int.features.calibration_registry import TrustedCalibrationArtifactStore
         from services.agribrain.scientific_contracts.crop_model_input import build_crop_model_input_receipt
 
-        _, cal_receipt, _ = build_ledger_crop_feature_input(
+        _, forged_cal_receipt, _ = build_ledger_crop_feature_input(
             ledger=ledger,
-            crop_cycle_hypothesis_id="cycle-cal",
-            run_id="r_ml_cal",
+            crop_cycle_hypothesis_id="cycle-cal-forged",
+            run_id="r_ml_cal_forged",
             calibration_receipt={
                 "calibration_artifact_hash": "c" * 64,
                 "calibration_partition_policy": "external_farm_cycle_year_region_disjoint_required",
@@ -586,6 +641,31 @@ class TestAsmaeWorldModelV1AndCropFusion(unittest.TestCase):
                 "ece": 0.03,
             },
             normalization_artifact_hash="b" * 64,
+        )
+        self.assertEqual(forged_cal_receipt.calibration_validity, "unavailable")
+        self.assertIn("probability_calibration_not_validated", forged_cal_receipt.publication_blockers)
+
+        cal_store = TrustedCalibrationArtifactStore(signing_secret="test-wm2-cal-secret")
+        signed_rec = cal_store.issue_and_register(
+            calibration_artifact_hash="c" * 64,
+            feature_schema_hash=schema.content_hash,
+            ece=0.03,
+        )
+        _, cal_receipt, _ = build_ledger_crop_feature_input(
+            ledger=ledger,
+            crop_cycle_hypothesis_id="cycle-cal",
+            run_id="r_ml_cal",
+            calibration_receipt={
+                "calibration_artifact_hash": signed_rec.calibration_artifact_hash,
+                "feature_schema_hash": signed_rec.feature_schema_hash,
+                "calibration_partition_policy": signed_rec.calibration_partition_policy,
+                "calibration_verified": True,
+                "heldout_validation_complete": True,
+                "ece": 0.03,
+                "signature_hmac": signed_rec.signature_hmac,
+            },
+            normalization_artifact_hash="b" * 64,
+            calibration_store=cal_store,
         )
         self.assertNotEqual(cal_receipt.calibration_validity, "unavailable")
         self.assertNotIn("probability_calibration_not_validated", cal_receipt.publication_blockers)

@@ -172,7 +172,9 @@ class HistoricalStateIntelligenceService:
                     emit_worldline_posterior=False,
                     use_cross_layer_priors=False,
                     event_memory_fn=None,
-                    retrovalidation_fn=lambda traj, ctx: self.retrovalidator.evaluate(traj, ctx),
+                    retrovalidation_fn=lambda traj, ctx: self.retrovalidator.evaluate(
+                        traj, {**ctx, "as_issued_query_fn": None}
+                    ),
                 )
             ablation_res = self.retrovalidator.compare_cross_layer_ablation(
                 recon_res.get("retrovalidation") or {},
@@ -189,10 +191,10 @@ class HistoricalStateIntelligenceService:
                     else ({sk: sv for sk, sv in v.items() if sk != "raw_posterior"} if k == "latest_crop_posterior" and isinstance(v, dict) else v)
                 )
                 for k, v in crop_fusion.items()
-                if k != "full_segmentation_receipt"
+                if k not in {"full_segmentation_receipt", "_causal_prefix_cache"}
             }
         return {
-            "world_model_contract_version": "asmae_world_model_v1",
+            "world_model_contract_version": "asmae_world_model_v2",
             "status": recon_res.get("status"),
             "plot_id": plot_id,
             "geometry_hash": geometry_hash,

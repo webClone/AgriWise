@@ -770,6 +770,7 @@ def infer_crop_posterior(
                     plot_area_ha=area,
                     calibration_receipt=operational.get("crop_calibration_receipt"),
                     normalization_artifact_hash=operational.get("crop_normalization_artifact_hash"),
+                    calibration_store=operational.get("calibration_store"),
                 )
             )
             rows = ledger_rows_for_observations(

@@ -88,6 +88,16 @@ def _skill_score(model_errs: List[float], ref_errs: List[float]) -> Optional[flo
     return round(1.0 - (mse_model / mse_ref), 6)
 
 
+def _rmse_skill_ratio(model_errs: List[float], ref_errs: List[float]) -> Optional[float]:
+    if not model_errs or len(model_errs) != len(ref_errs):
+        return None
+    rmse_model = float(np.sqrt(np.mean(np.asarray(model_errs, dtype=np.float64) ** 2)))
+    rmse_ref = float(np.sqrt(np.mean(np.asarray(ref_errs, dtype=np.float64) ** 2)))
+    if rmse_ref <= 1e-10:
+        return None
+    return round(1.0 - (rmse_model / rmse_ref), 6)
+
+
 class HistoricalRetrovalidator:
     """Computes strictly causal retrovalidation, BMA expert comparisons, calibration & seasonal skill."""
 
@@ -233,6 +243,9 @@ class HistoricalRetrovalidator:
                         "crps": _gaussian_crps(y_obs, y_asmae_cal, sigma_cal),
                         "crps_raw": _gaussian_crps(y_obs, y_asmae_raw, sigma_raw),
                         "expert_preds": expert_preds,
+                        "rzw": round(rzw, 6),
+                        "vigor": round(vigor, 6),
+                        "w_rain": round(w_rain, 6),
                     })
 
                 innov = y_obs - y_asmae_raw
@@ -333,8 +346,20 @@ class HistoricalRetrovalidator:
 
         dom_identity = ctx.get("domain_identity") if isinstance(ctx.get("domain_identity"), dict) else {}
         if dom_identity:
+            if not bool(dom_identity.get("tenant_identity_verified", False)):
+                block_reasons.append("unverified_tenant_identity")
+            if not bool(dom_identity.get("crop_identity_verified", False)):
+                block_reasons.append("unverified_crop_identity")
+            if bool(dom_identity.get("synthetic_crop_labels_present", False)) and not bool(dom_identity.get("crop_identity_verified", False)):
+                block_reasons.append("synthetic_crop_label_rejected")
             for b_reason in dom_identity.get("identity_block_reasons") or []:
-                if b_reason in {"unverified_crop_identity", "unverified_tenant_identity", "synthetic_crop_label_rejected"}:
+                if b_reason in {
+                    "unverified_crop_identity",
+                    "unverified_tenant_identity",
+                    "synthetic_crop_label_rejected",
+                    "unconfirmed_crop_declaration",
+                    "unknown_crop_identity",
+                } and str(b_reason) not in block_reasons:
                     block_reasons.append(str(b_reason))
         if n_ev < 12:
             block_reasons.append(f"insufficient_evaluation_samples:{n_ev}<12")
@@ -388,6 +413,24 @@ class HistoricalRetrovalidator:
             ctx=ctx,
             sorted_traj=sorted_traj,
         )
+        step_transfer_samples = [
+            {
+                "channel": r["channel"],
+                "sensor": r.get("sensor"),
+                "year": r["year"],
+                "acquisition_time": r["acquisition_time"],
+                "y_obs": r["y_obs"],
+                "y_asmae_raw": r["y_asmae_raw"],
+                "y_asmae_cal": r["y_asmae"],
+                "y_pers": r["y_pers"],
+                "y_clim": r["y_clim"],
+                "y_trend": r["y_trend"],
+                "rzw": r.get("rzw", 0.25),
+                "vigor": r.get("vigor", 0.50),
+                "w_rain": r.get("w_rain", 0.0),
+            }
+            for r in eval_rows
+        ]
         return {
             "status": "evaluated",
             "summary": summary,
@@ -399,6 +442,11 @@ class HistoricalRetrovalidator:
             "multi_horizon": multi_horizon,
             "qualification": qualification,
             "scientific_failure_diagnosis": failure_diag,
+            "step_transfer_samples": step_transfer_samples,
+            "metric_definitions": {
+                "mse_skill_score": "1 - (MSE_model / MSE_ref); identically stored under skill_vs_* keys and mse_skill_score_vs_* keys.",
+                "rmse_skill_ratio": "1 - (RMSE_model / RMSE_ref); linear RMSE reduction ratio stored under rmse_skill_ratio_vs_* keys.",
+            },
         }
 
     def _evaluate_multi_horizon_forecasts(
@@ -423,8 +471,10 @@ class HistoricalRetrovalidator:
         burnin_years = [yr for yr in all_years if yr not in heldout_set]
 
         daily_weather: Dict[str, Dict[str, Any]] = dict(ctx.get("daily_weather") or {})
-        crop_ctx = dict(ctx.get("crop_context") or {"crop_type": "citrus", "crop_coefficient": 0.75})
+        crop_ctx = dict(ctx.get("crop_context") or {"crop_type": "unknown", "crop_coefficient": 0.80})
         soil_ctx = dict(ctx.get("soil_context") or {})
+        domain_chronology = ctx.get("domain_chronology")
+        crop_fusion = ctx.get("crop_fusion") if isinstance(ctx.get("crop_fusion"), Mapping) else None
 
         # Index all real observations strictly by date/time across trajectory
         parsed_steps: List[Tuple[datetime, Dict[str, Any]]] = [
@@ -453,20 +503,51 @@ class HistoricalRetrovalidator:
             build_prospective_weather_series,
         )
 
-        # Issue causal forecasts at up to ~40 evenly spaced issue points in held-out seasons
+        # Issue causal forecasts at evenly spaced issue points in held-out seasons;
+        # when as_issued_query_fn is supplied, rebuild EVERY issuance state strictly at K = t_issue!
+        as_issued_query_fn = ctx.get("as_issued_query_fn")
+        use_as_issued_k = callable(as_issued_query_fn)
+        max_issue_pts = 12 if use_as_issued_k else 40
         heldout_indices = [idx for idx, (dt, _) in enumerate(parsed_steps) if dt.year in heldout_set]
-        stride = max(1, len(heldout_indices) // 40) if heldout_indices else 1
+        stride = max(1, len(heldout_indices) // max_issue_pts) if heldout_indices else 1
         issue_indices = heldout_indices[::stride]
         hindcast_bin_rows: Dict[str, List[Dict[str, Any]]] = {b[0]: [] for b in bins}
+        diag_archive_bin_rows: Dict[str, List[Dict[str, Any]]] = {b[0]: [] for b in bins}
+        as_issued_rebuilt_count = 0
 
         for idx in issue_indices:
             t_issue, step_i = parsed_steps[idx]
-            post_m = step_i.get("posterior_state_means") or {}
-            post_s = step_i.get("posterior_state_stds") or {}
+            issued_obs_points = all_obs_points
+            using_strict_issued = False
+            if use_as_issued_k:
+                issued_state = as_issued_query_fn(t_issue)
+                if isinstance(issued_state, dict) and issued_state.get("available"):
+                    using_strict_issued = True
+                    as_issued_rebuilt_count += 1
+                    post_m = issued_state.get("state_means") or {}
+                    post_s = issued_state.get("state_stds") or {}
+                    cal_snap = issued_state.get("channel_calibration") or {}
+                    step_priors = issued_state.get("cross_layer_pre_priors") or {}
+                    issued_obs_points = [
+                        (_parse_dt(s_iss["acquisition_time"]), str(ch_i), float(pr_i["y_obs"]))
+                        for s_iss in (issued_state.get("trajectory") or [])
+                        if s_iss.get("acquisition_time")
+                        for ch_i, pr_i in (s_iss.get("prior_predictions") or {}).items()
+                    ]
+                else:
+                    # Worldline was batch-backfilled AFTER t_issue: run strictly quarantined diagnostic reference ONLY!
+                    post_m = step_i.get("posterior_state_means") or {}
+                    post_s = step_i.get("posterior_state_stds") or {}
+                    cal_snap = step_i.get("channel_calibration_snapshot") or {}
+                    step_priors = step_i.get("cross_layer_priors") or {}
+            else:
+                using_strict_issued = False
+                post_m = step_i.get("posterior_state_means") or {}
+                post_s = step_i.get("posterior_state_stds") or {}
+                cal_snap = step_i.get("channel_calibration_snapshot") or {}
+                step_priors = step_i.get("cross_layer_priors") or {}
             if not post_m:
                 continue
-            cal_snap = step_i.get("channel_calibration_snapshot") or {}
-            step_priors = step_i.get("cross_layer_priors") or {}
 
             # Find all target observations landing in (0.5d, 35.0d] strictly after t_issue
             targets: List[Tuple[int, datetime, Dict[str, Any]]] = []
@@ -491,6 +572,7 @@ class HistoricalRetrovalidator:
             )
 
             def _run_horizon_rollout(weather_map: Dict[str, Dict[str, Any]], out_bins: Dict[str, List[Dict[str, Any]]], record_years: bool) -> None:
+                from services.agribrain.layer05_asmae.history.historical_crop_fusion import crop_context_as_of
                 vec_mean = [float(post_m.get(n, 0.25)) for n in STATE_NAMES]
                 vec_std = [max(1e-4, float(post_s.get(n, 0.05))) for n in STATE_NAMES]
                 rng = make_rng(
@@ -508,13 +590,24 @@ class HistoricalRetrovalidator:
                 cur_dt = t_issue
                 for _, t_tgt, step_j in targets:
                     lead = (t_tgt - t_issue).total_seconds() / 86400.0
+                    tgt_crop_ctx = (
+                        crop_context_as_of(
+                            crop_fusion,
+                            valid_time_T=t_tgt,
+                            knowledge_cutoff_K=t_issue,
+                            domain_chronology=domain_chronology,
+                            base_soil_context=soil_ctx,
+                        )
+                        if (crop_fusion is not None or domain_chronology is not None)
+                        else crop_ctx
+                    )
                     if t_tgt > cur_dt:
                         ens_fc, _ = _forecast_elapsed_interval(
                             ensemble=ens_fc,
                             previous_time=cur_dt,
                             current_time=t_tgt,
                             priors=step_priors,
-                            crop_context=crop_ctx,
+                            crop_context=tgt_crop_ctx,
                             rng=rng,
                             scenes=[],
                             weather_daily_series=weather_map,
@@ -557,8 +650,8 @@ class HistoricalRetrovalidator:
                         y_cal = cal["cal_pred_mean"]
                         sig_fc = cal["cal_sigma"]
 
-                        # Fair Persistence & Causal Climatology strictly from obs <= t_issue!
-                        prior_ch = [(d_o, v_o) for d_o, c_o, v_o in all_obs_points if c_o == ch and d_o <= t_issue]
+                        # Fair Persistence & Causal Climatology strictly from obs <= t_issue (and committed_at <= t_issue when rebuilt)!
+                        prior_ch = [(d_o, v_o) for d_o, c_o, v_o in issued_obs_points if c_o == ch and d_o <= t_issue]
                         if not prior_ch:
                             continue
                         y_pers = prior_ch[-1][1]
@@ -586,8 +679,11 @@ class HistoricalRetrovalidator:
                         if record_years and t_tgt.year in year_rows:
                             year_rows[t_tgt.year].append(row)
 
-            # Primary: strictly prospective unknown-future-weather evaluation
-            _run_horizon_rollout(prosp_weather, bin_rows, record_years=True)
+            # Primary when strictly rebuilt at K=t_issue OR standalone evaluate(); else quarantined backfill diagnostic
+            if (not use_as_issued_k) or using_strict_issued:
+                _run_horizon_rollout(prosp_weather, bin_rows, record_years=True)
+            else:
+                _run_horizon_rollout(prosp_weather, diag_archive_bin_rows, record_years=False)
             # Secondary reference: realized-weather hindcast (strictly quarantined from qualification!)
             _run_horizon_rollout(daily_weather, hindcast_bin_rows, record_years=False)
 
@@ -610,8 +706,18 @@ class HistoricalRetrovalidator:
                 "persistence_rmse": reg_p["rmse"],
                 "climatology_rmse": reg_c["rmse"],
                 "skill_vs_persistence": _skill_score([a - b for a, b in zip(y_j, yt)], [p - b for p, b in zip(y_p, yt)]),
+                "mse_skill_score_vs_persistence": _skill_score([a - b for a, b in zip(y_j, yt)], [p - b for p, b in zip(y_p, yt)]),
+                "rmse_skill_ratio_vs_persistence": _rmse_skill_ratio([a - b for a, b in zip(y_j, yt)], [p - b for p, b in zip(y_p, yt)]),
                 "asmae_only_skill_vs_persistence": _skill_score([a - b for a, b in zip(y_cal, yt)], [p - b for p, b in zip(y_p, yt)]),
                 "skill_vs_climatology": _skill_score(
+                    [r["y_joint_bma"] - r["y_obs"] for r in c_rows],
+                    [r["y_clim"] - r["y_obs"] for r in c_rows],
+                ),
+                "mse_skill_score_vs_climatology": _skill_score(
+                    [r["y_joint_bma"] - r["y_obs"] for r in c_rows],
+                    [r["y_clim"] - r["y_obs"] for r in c_rows],
+                ),
+                "rmse_skill_ratio_vs_climatology": _rmse_skill_ratio(
                     [r["y_joint_bma"] - r["y_obs"] for r in c_rows],
                     [r["y_clim"] - r["y_obs"] for r in c_rows],
                 ),
@@ -620,9 +726,25 @@ class HistoricalRetrovalidator:
                 "mean_crps": round(float(np.mean([r["crps"] for r in rows])), 6),
             }
 
+        strict_ok = (not use_as_issued_k) or (as_issued_rebuilt_count > 0)
         return {
-            "status": "evaluated",
-            "protocol": "strict_prospective_unknown_future_weather",
+            "status": (
+                "evaluated"
+                if strict_ok
+                else "withheld_worldline_backfilled_after_issuance"
+            ),
+            "protocol": (
+                "strict_as_issued_k_eq_t_issue_prospective"
+                if (use_as_issued_k and as_issued_rebuilt_count > 0)
+                else (
+                    "withheld_no_pre_backfill_worldline_events_at_t_issue"
+                    if use_as_issued_k
+                    else "prospective_weather_only_archive_state_diagnostic"
+                )
+            ),
+            "uses_issuance_time_knowledge_cutoff_K": bool(use_as_issued_k and as_issued_rebuilt_count > 0),
+            "as_issued_state_rebuilt_with_k_eq_t_issue": bool(use_as_issued_k and as_issued_rebuilt_count > 0),
+            "as_issued_issue_points_evaluated": as_issued_rebuilt_count,
             "uses_realized_future_weather": False,
             "uses_issuance_day_complete_daily_weather": False,
             "weather_cutoff_rule": "strict_previous_complete_day_before_issue",
@@ -643,6 +765,11 @@ class HistoricalRetrovalidator:
                 for b_name, _, _ in exploratory_bins
             },
             "by_heldout_year": {str(yr): _score_mh(rows) for yr, rows in sorted(year_rows.items())},
+            "diagnostic_backfill_horizon_reference": {
+                "epistemic_scope": "diagnostic_archive_backfill_prospective_weather_and_crop_only",
+                "used_for_qualification": False,
+                "by_horizon": {b_name: _score_mh(diag_archive_bin_rows[b_name]) for b_name, _, _ in primary_bins},
+            },
             "hindcast_realized_weather_reference": {
                 "epistemic_scope": "retrospective_hindcast_realized_weather",
                 "used_for_qualification": False,
@@ -672,7 +799,7 @@ class HistoricalRetrovalidator:
             if not domain_identity.get("crop_identity_verified", True):
                 causes.append("unverified_domain_identity")
                 recs.append("Populate a verified non-synthetic CropCycle record or collect field crop confirmation.")
-            elif not domain_identity.get("tenant_identity_verified", True) and "unverified_tenant_identity" in (domain_identity.get("identity_block_reasons") or []):
+            elif not domain_identity.get("tenant_identity_verified", True):
                 causes.append("unverified_domain_identity")
                 recs.append("Bind plot/farm to a verified production tenant_id outside dev fallback fixtures.")
 
@@ -699,7 +826,7 @@ class HistoricalRetrovalidator:
             if isinstance(s, Mapping)
         }
         has_regime_shift = bool(
-            regimes & {"PRE_PLANTING_FALLOW_OR_PREP", "EARLY_ESTABLISHMENT", "POST_HARVEST_RESIDUE_OR_FALLOW"}
+            regimes & {"PRE_KNOWN_CYCLE_UNKNOWN", "PRE_PLANTING_FALLOW_OR_PREP", "EARLY_ESTABLISHMENT", "POST_HARVEST_RESIDUE_OR_FALLOW"}
         )
         if has_regime_shift and ((sk_clim is not None and float(sk_clim) < 0.05) or (mh_skills and min(mh_skills) < -0.05)):
             causes.append("regime_transition_mismatch")
@@ -794,6 +921,18 @@ class HistoricalRetrovalidator:
             [r["y_bma"] - r["y_obs"] for r in pers_rows],
             [r["y_pers"] - r["y_obs"] for r in pers_rows],
         )
+        rmse_ratio_pers = _rmse_skill_ratio(
+            [r["y_asmae"] - r["y_obs"] for r in pers_rows],
+            [r["y_pers"] - r["y_obs"] for r in pers_rows],
+        )
+        rmse_ratio_clim = _rmse_skill_ratio(
+            [r["y_asmae"] - r["y_obs"] for r in clim_rows],
+            [r["y_clim"] - r["y_obs"] for r in clim_rows],
+        )
+        bma_rmse_ratio_pers = _rmse_skill_ratio(
+            [r["y_bma"] - r["y_obs"] for r in pers_rows],
+            [r["y_pers"] - r["y_obs"] for r in pers_rows],
+        )
 
         cov_1s = sum(1 for r in rows if r["abs_z"] <= 1.0) / len(rows)
         cov_2s = sum(1 for r in rows if r["abs_z"] <= 2.0) / len(rows)
@@ -814,6 +953,12 @@ class HistoricalRetrovalidator:
             "skill_vs_persistence": skill_pers,
             "skill_vs_climatology": skill_clim,
             "bma_skill_vs_persistence": bma_skill_pers,
+            "mse_skill_score_vs_persistence": skill_pers,
+            "mse_skill_score_vs_climatology": skill_clim,
+            "bma_mse_skill_score_vs_persistence": bma_skill_pers,
+            "rmse_skill_ratio_vs_persistence": rmse_ratio_pers,
+            "rmse_skill_ratio_vs_climatology": rmse_ratio_clim,
+            "bma_rmse_skill_ratio_vs_persistence": bma_rmse_ratio_pers,
             "coverage_1sigma": round(cov_1s, 4),
             "coverage_2sigma": round(cov_2s, 4),
             "mean_pit": round(float(np.mean(pits)), 4),
