@@ -874,7 +874,7 @@ class HistoricalRetrovalidator:
         cross_layer_retro: Dict[str, Any],
         s1_s2_only_retro: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Compare Combined L2-8 Cross-Layer ASMAE against S1/S2-only ASMAE ablation."""
+        """Compare Combined L2-8 Cross-Layer ASMAE against S1/S2-only ASMAE ablation under explicit protocol parity."""
         cl_sum = cross_layer_retro.get("summary") or {}
         s_sum = s1_s2_only_retro.get("summary") or {}
         cl_rmse = cl_sum.get("rmse")
@@ -883,7 +883,51 @@ class HistoricalRetrovalidator:
         s_crps = s_sum.get("mean_crps")
         delta_rmse = round(float(cl_rmse) - float(s_rmse), 6) if isinstance(cl_rmse, (int, float)) and isinstance(s_rmse, (int, float)) else None
         skill_gain = round(1.0 - (float(cl_rmse) ** 2) / max(1e-10, float(s_rmse) ** 2), 6) if isinstance(cl_rmse, (int, float)) and isinstance(s_rmse, (int, float)) else None
+
+        cl_mh = cross_layer_retro.get("multi_horizon") or {}
+        s_mh = s1_s2_only_retro.get("multi_horizon") or {}
+        cl_as_issued = cl_mh.get("as_issued_state_rebuilt_with_k_eq_t_issue")
+        s_as_issued = s_mh.get("as_issued_state_rebuilt_with_k_eq_t_issue")
+        cl_by_h = dict(cl_mh.get("by_horizon") or {})
+        s_by_h = dict(s_mh.get("by_horizon") or {})
+
+        # When cross_layer withheld prospective horizons (nov 2026 backfill) while S1/S2 skipped as_issued check,
+        # never present backfill horizons as equivalent to prospective ones; match both cleanly on backfill reference.
+        protocol_equiv = (cl_as_issued == s_as_issued) and (
+            bool((cl_by_h.get("short_1_7d") or {}).get("n", 0))
+            == bool((s_by_h.get("short_1_7d") or {}).get("n", 0))
+        )
+        cl_backfill_h = dict(((cl_mh.get("diagnostic_backfill_horizon_reference") or {}).get("by_horizon")) or {})
+        if not protocol_equiv and not cl_by_h.get("short_1_7d", {}).get("n") and cl_backfill_h:
+            matched_backfill = {
+                "protocol_equivalent": True,
+                "epistemic_scope": "diagnostic_archive_backfill_comparison_only",
+                "cross_layer_by_horizon": cl_backfill_h,
+                "s1_s2_only_by_horizon": s_by_h,
+            }
+            s_by_h_reported = {
+                h: {"n": 0, "status": "withheld_aligned_to_cross_layer_prospective_protocol"}
+                for h in ("short_1_7d", "medium_8_16d", "extended_17_35d")
+            }
+            status_str = "stepwise_matched_and_backfill_horizon_matched_prospective_withheld"
+        else:
+            matched_backfill = (
+                {
+                    "protocol_equivalent": True,
+                    "epistemic_scope": "diagnostic_archive_backfill_comparison_only",
+                    "cross_layer_by_horizon": cl_backfill_h,
+                    "s1_s2_only_by_horizon": dict(((s_mh.get("diagnostic_backfill_horizon_reference") or {}).get("by_horizon")) or {}),
+                }
+                if cl_backfill_h
+                else {}
+            )
+            s_by_h_reported = s_by_h
+            status_str = "protocol_matched"
+
         return {
+            "stepwise_protocol_equivalent": True,
+            "multi_horizon_protocol_equivalent": protocol_equiv,
+            "multi_horizon_comparison_status": status_str,
             "cross_layer_rmse": cl_rmse,
             "s1_s2_only_rmse": s_rmse,
             "delta_rmse_cross_minus_s1s2": delta_rmse,
@@ -892,8 +936,9 @@ class HistoricalRetrovalidator:
             "s1_s2_only_crps": s_crps,
             "cross_layer_coverage_1sigma": cl_sum.get("coverage_1sigma"),
             "s1_s2_only_coverage_1sigma": s_sum.get("coverage_1sigma"),
-            "cross_layer_multi_horizon": (cross_layer_retro.get("multi_horizon") or {}).get("by_horizon", {}),
-            "s1_s2_only_multi_horizon": (s1_s2_only_retro.get("multi_horizon") or {}).get("by_horizon", {}),
+            "cross_layer_multi_horizon": cl_by_h,
+            "s1_s2_only_multi_horizon": s_by_h_reported,
+            "diagnostic_backfill_horizon_comparison": matched_backfill,
         }
 
     def _score_subset(self, label: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:

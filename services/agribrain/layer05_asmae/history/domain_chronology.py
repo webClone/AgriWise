@@ -388,12 +388,21 @@ def build_domain_chronology(
     crop_tasks: Optional[Iterable[Mapping[str, Any]]] = None,
     crop_observations: Optional[Iterable[Mapping[str, Any]]] = None,
     explicit_tenant_id: Optional[str] = None,
+    tenant_provenance: Optional[str] = None,
+    tenant_verified_at: Optional[str] = None,
 ) -> Tuple[DomainIdentityContract, DomainChronology]:
     """Construct verified DomainIdentityContract + bitemporal DomainChronology without silent privilege elevation."""
     p_doc = dict(plot_doc or {})
     f_doc = dict(farm_doc or {})
 
-    # WM1-P1-01: Resolve tenant verification strictly from DB Plot/Farm ownership (Farm.userId matches Prisma/Mongo)
+    # WM1-P1-01 & V2.1-P2: Separate fresh authenticated DB ownership from cached domain-registry metadata
+    prov_norm = str(tenant_provenance or "live_db").strip().lower()
+    is_cached_domain_only = prov_norm in {
+        "local_domain_metadata_cache",
+        "cached",
+        "cached_domain_registry",
+        "offline_cache",
+    }
     db_tenant = str(p_doc.get("tenantId") or f_doc.get("tenantId") or "").strip() or None
     farm_user_id = str(f_doc.get("userId") or "").strip() or None
     plot_farm_ref = str(p_doc.get("farmId") or "").strip()
@@ -402,24 +411,44 @@ def build_domain_chronology(
 
     if db_tenant and db_tenant.lower() not in FALLBACK_TENANT_TOKENS:
         tenant_id = db_tenant
-        tenant_verified = True
         is_isolated_dev_fixture = False
-        tenant_source = "plot_or_farm_doc_tenant_id"
+        if is_cached_domain_only:
+            tenant_verified = False
+            tenant_fresh_db_verified = False
+            tenant_authority_tier = "CACHED_REGISTRY_IDENTITY_ONLY"
+            tenant_source = "cached_plot_or_farm_doc_tenant_id_offline_cache"
+        else:
+            tenant_verified = True
+            tenant_fresh_db_verified = True
+            tenant_authority_tier = "LIVE_DB_OWNERSHIP_VERIFIED"
+            tenant_source = "plot_or_farm_doc_tenant_id"
     elif farm_user_id and farm_matches_plot and farm_user_id.lower() not in FALLBACK_TENANT_TOKENS:
         tenant_id = farm_user_id
-        tenant_verified = True
         is_isolated_dev_fixture = False
-        tenant_source = "farm_doc_user_id"
+        if is_cached_domain_only:
+            tenant_verified = False
+            tenant_fresh_db_verified = False
+            tenant_authority_tier = "CACHED_REGISTRY_IDENTITY_ONLY"
+            tenant_source = "cached_farm_doc_user_id_offline_cache"
+        else:
+            tenant_verified = True
+            tenant_fresh_db_verified = True
+            tenant_authority_tier = "LIVE_DB_OWNERSHIP_VERIFIED"
+            tenant_source = "farm_doc_user_id"
     elif explicit_tenant_id and str(explicit_tenant_id).strip().lower() not in FALLBACK_TENANT_TOKENS:
         tenant_id = str(explicit_tenant_id).strip()
         # Isolated/explicit partition string without DB ownership proof is neither dev fixture nor verified!
         tenant_verified = False
+        tenant_fresh_db_verified = False
         is_isolated_dev_fixture = False
+        tenant_authority_tier = "UNVERIFIED_TENANT_IDENTITY"
         tenant_source = "explicit_pilot_partition_db_tenant_missing"
     else:
         tenant_id = "default_tenant"
         tenant_verified = False
+        tenant_fresh_db_verified = False
         is_isolated_dev_fixture = True
+        tenant_authority_tier = "ISOLATED_DEV_FIXTURE"
         tenant_source = "fallback_default_tenant"
 
     farm_id = plot_farm_ref or farm_doc_id or None
@@ -635,6 +664,8 @@ def build_domain_chronology(
         block_reasons.append("synthetic_crop_label_rejected")
     if not tenant_verified:
         block_reasons.append("unverified_tenant_identity")
+    if tenant_authority_tier == "CACHED_REGISTRY_IDENTITY_ONLY":
+        block_reasons.append("cached_tenant_ownership_not_fresh_db_verified")
     if not soil_verified:
         block_reasons.append("unverified_soil_identity")
 
@@ -661,6 +692,9 @@ def build_domain_chronology(
         identity_block_reasons=tuple(block_reasons),
         diagnostic_fallback_crop=None,
         plot_name=plot_name,
+        tenant_identity_fresh_db_verified=tenant_fresh_db_verified,
+        tenant_authority_tier=tenant_authority_tier,
+        tenant_verified_at=(str(tenant_verified_at) if tenant_verified_at else None),
     )
     chronology = DomainChronology(
         identity=identity,

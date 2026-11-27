@@ -802,11 +802,23 @@ def api_v2_historical_intelligence(
     cp_idx = reconstructor.load_checkpoint_index(plot_id, namespace.tenant_id, ns_name)
     cp_sig = f"{cp_idx.get('latest_worldline_posterior_event_id') or ''}:{cp_idx.get('updated_at') or ''}:{len(cp_idx.get('active_chain') or [])}"
     rpt_mtime = int(summary_path.stat().st_mtime_ns) if (summary_data and summary_path.is_file()) else 0
+    dom_meta_cache = artifacts_dir / "multiplot_meta" / f"{plot_id}_domain.json"
+    dom_mtime = int(dom_meta_cache.stat().st_mtime_ns) if dom_meta_cache.is_file() else 0
+    ledger_root = artifacts_dir / "prospective_forecast_ledger"
+    from services.agribrain.layer05_asmae.history.prospective_forecast_ledger import ProspectiveForecastLedger
+
+    prospective_ledger = ProspectiveForecastLedger(ledger_root)
+    iss_path = prospective_ledger._issuance_path(plot_id=plot_id, tenant_id=namespace.tenant_id)
+    scr_path = prospective_ledger._scores_path(plot_id=plot_id, tenant_id=namespace.tenant_id)
+    ledger_sig = f"{int(iss_path.stat().st_mtime_ns) if iss_path.is_file() else 0}:{int(scr_path.stat().st_mtime_ns) if scr_path.is_file() else 0}"
     from services.agribrain.layer05_asmae.history.historical_state_reconstructor import (
         CALIBRATION_VERSION,
         RECONSTRUCTOR_MODEL_VERSION,
     )
-    archive_state_version = f"wl={len(wl_events)}:{wl_head_id[:12]}|cp={cp_sig}|rpt={rpt_mtime}|gh={geometry_hash[:12]}|wm=v2|rm={RECONSTRUCTOR_MODEL_VERSION}|cal={CALIBRATION_VERSION}"
+    archive_state_version = (
+        f"wl={len(wl_events)}:{wl_head_id[:12]}|cp={cp_sig}|rpt={rpt_mtime}|dom={dom_mtime}|ldgr={ledger_sig}"
+        f"|gh={geometry_hash[:12]}|wm=v2.1|rm={RECONSTRUCTOR_MODEL_VERSION}|cal={CALIBRATION_VERSION}"
+    )
     cache_key = (namespace.stable_key(), plot_id, target_T, clean_kc, archive_state_version)
 
     with _HIST_INTEL_RESPONSE_CACHE_LOCK:
@@ -825,7 +837,6 @@ def api_v2_historical_intelligence(
     crop_ctx = dict(summary_data.get("crop_context") or {"crop_type": "unknown", "crop_coefficient": 0.80})
     soil_ctx = dict(summary_data.get("soil_context") or {})
     cached_crop_fusion = summary_data.get("crop_fusion") if isinstance(summary_data, dict) else None
-    dom_meta_cache = artifacts_dir / "multiplot_meta" / f"{plot_id}_domain.json"
     dom_chronology_api = None
     raw_dom_json: Optional[Dict[str, Any]] = None
     dom_identity_api = dict(summary_data.get("domain_identity") or {}) if isinstance(summary_data, dict) else {}
@@ -843,6 +854,8 @@ def api_v2_historical_intelligence(
                 crop_tasks=raw_dom_json.get("crop_tasks"),
                 crop_observations=raw_dom_json.get("crop_observations"),
                 explicit_tenant_id=namespace.tenant_id,
+                tenant_provenance="local_domain_metadata_cache",
+                tenant_verified_at=raw_dom_json.get("tenant_verified_at"),
             )
             dom_identity_api = id_obj.to_dict()
         except Exception:
@@ -1180,6 +1193,7 @@ def api_v2_historical_intelligence(
         "crop_context_as_of": q_res.get("crop_context_as_of") or None,
         "withheld_reprocessed_after_k_count": withheld_reprocessed_after_k,
         "crop_identity_timeline": filtered_crop_timeline,
+        "prospective_forecast_ledger": prospective_ledger.summarize(plot_id=plot_id, tenant_id=namespace.tenant_id),
         "causal_integrity_gates": {
             "p1_1_time_matched_spatial": True,
             "p1_2_affirmative_probe_calibration": True,
@@ -1247,6 +1261,8 @@ def _redact_benchmark_matrix_projection(raw_matrix: Dict[str, Any]) -> Dict[str,
         "cohort_size",
         "verified_crop_plot_count",
         "verified_tenant_plot_count",
+        "live_db_verified_tenant_plot_count",
+        "cached_registry_tenant_plot_count",
         "scientifically_qualified_model_count",
         "production_eligible_verified_count",
         "qualified_verified_crop_count",
@@ -1256,6 +1272,7 @@ def _redact_benchmark_matrix_projection(raw_matrix: Dict[str, Any]) -> Dict[str,
         "trained_transfer_lopo",
         "trained_transfer_locso",
         "crop_detection_benchmark",
+        "prospective_forecast_ledger",
     )
     projected: Dict[str, Any] = {
         "available": True,

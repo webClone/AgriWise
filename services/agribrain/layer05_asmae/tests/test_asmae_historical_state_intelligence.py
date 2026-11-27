@@ -765,7 +765,10 @@ def test_fastapi_historical_intelligence_endpoint_auth_and_tenant_isolation():
         assert d18["assimilated_observation_count"] == 40
         assert d18["spatial_estimation_mode"] == "inferred_state_anomaly_field"
         import re as _re
-        assert _re.match(r"^wl=\d+:[^|]+\|cp=[^|]+\|rpt=\d+\|gh=", d18["archive_state_version"])
+        assert _re.match(
+            r"^wl=\d+:[^|]+\|cp=[^|]+\|rpt=\d+(?:\|dom=\d+\|ldgr=[^|]+)?\|gh=",
+            d18["archive_state_version"],
+        )
         assert d18["temporal_query_scope"]["is_full_tail_epoch"] is False
         assert d18["cross_layer_ablation"] == {}
         assert d18["retrovalidation_summary"]["summary"]["n_evaluated_points"] < 90

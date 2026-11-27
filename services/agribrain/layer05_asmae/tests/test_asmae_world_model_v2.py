@@ -886,3 +886,488 @@ def test_wm2_batch_b_as_issued_k_eq_t_issue_and_p2_late_scene_plot_mean(tmp_path
     )
     assert fv["sensor_vwc_validation"]["n_readings"] == 0
     assert fv["sensor_vwc_validation"]["excluded_late_committed_scene_non_causal"] >= 1
+
+
+def test_wm21_p1_crop_interval_and_soil_revision_invalidate_warm_checkpoints(tmp_path):
+    """V2.1 P1 adversarial stale-checkpoint reproduction: mutating crop_code, confirmed flag,
+    or soil texture with identical interval dates invalidates warm checkpoints and equals cold run."""
+    from services.agribrain.layer05_asmae.history.archive_bootstrap_service import ArchiveBootstrapService
+    from services.agribrain.layer05_asmae.history.domain_chronology import build_domain_chronology
+    from services.agribrain.layer05_asmae.history.historical_state_reconstructor import (
+        HistoricalStateReconstructor,
+        _compute_causal_input_lineage_hashes,
+    )
+    from services.agribrain.world_model.canonical_worldline import CanonicalWorldlineService
+
+    plot_id = "stale_cp_repro"
+    geom_hash = "sha256:geom_stale_cp"
+    scenes = _rotation_scenes([2023, 2024])[:6]
+    wl = CanonicalWorldlineService(root=tmp_path / "wl_cp_mut", require_durable_anchor=False)
+    _commit_scenes(wl, plot_id, geom_hash, scenes, tenant_id="t_cp")
+
+    weather = _weather_series(2023, 2024)
+    common_farm = {"_id": "farm_1", "userId": "t_cp"}
+    _, dom_wheat = build_domain_chronology(
+        plot_id=plot_id,
+        plot_doc={"farmId": "farm_1", "soilType": "loam"},
+        farm_doc=common_farm,
+        crop_cycles=[{
+            "_id": "cc_same_id",
+            "cropCode": "wheat",
+            "variety": "Durum",
+            "plantDate": "2023-02-01T00:00:00Z",
+            "harvestDate": "2024-08-01T00:00:00Z",
+            "createdAt": "2023-01-15T00:00:00Z",
+            "declaredCropAt": "2023-02-01T00:00:00Z",
+            "declaredCropAuthority": "FARMER_CONFIRMED",
+        }],
+        soil_analyses=[{"_id": "sa_1", "texture": "loam", "ph": 6.8, "date": "2023-01-20T00:00:00Z"}],
+    )
+    _, dom_tomato = build_domain_chronology(
+        plot_id=plot_id,
+        plot_doc={"farmId": "farm_1", "soilType": "loam"},
+        farm_doc=common_farm,
+        crop_cycles=[{
+            "_id": "cc_same_id",
+            "cropCode": "tomato",
+            "variety": "Roma",
+            "plantDate": "2023-02-01T00:00:00Z",
+            "harvestDate": "2024-08-01T00:00:00Z",
+            "createdAt": "2023-01-15T00:00:00Z",
+            "declaredCropAt": "2023-02-01T00:00:00Z",
+            "declaredCropAuthority": "FARMER_CONFIRMED",
+        }],
+        soil_analyses=[{"_id": "sa_1", "texture": "loam", "ph": 6.8, "date": "2023-01-20T00:00:00Z"}],
+    )
+    _, dom_clay_soil = build_domain_chronology(
+        plot_id=plot_id,
+        plot_doc={"farmId": "farm_1", "soilType": "clay"},
+        farm_doc=common_farm,
+        crop_cycles=[{
+            "_id": "cc_same_id",
+            "cropCode": "wheat",
+            "variety": "Durum",
+            "plantDate": "2023-02-01T00:00:00Z",
+            "harvestDate": "2024-08-01T00:00:00Z",
+            "createdAt": "2023-01-15T00:00:00Z",
+            "declaredCropAt": "2023-02-01T00:00:00Z",
+            "declaredCropAuthority": "FARMER_CONFIRMED",
+        }],
+        soil_analyses=[{"_id": "sa_1", "texture": "clay", "ph": 7.6, "date": "2023-01-20T00:00:00Z"}],
+    )
+
+    t_eval = datetime(2024, 6, 15, tzinfo=timezone.utc)
+    k_eval = datetime(2026, 12, 1, tzinfo=timezone.utc)
+    h_wheat = _compute_causal_input_lineage_hashes(cutoff_dt=t_eval, knowledge_cutoff_dt=k_eval, domain_chronology=dom_wheat, soil_context={"soil_type": "loam"}, daily_weather=weather)
+    h_tomato = _compute_causal_input_lineage_hashes(cutoff_dt=t_eval, knowledge_cutoff_dt=k_eval, domain_chronology=dom_tomato, soil_context={"soil_type": "loam"}, daily_weather=weather)
+    h_clay = _compute_causal_input_lineage_hashes(cutoff_dt=t_eval, knowledge_cutoff_dt=k_eval, domain_chronology=dom_clay_soil, soil_context={"soil_type": "clay"}, daily_weather=weather)
+
+    assert h_wheat["crop_chronology_hash"] != h_tomato["crop_chronology_hash"]
+    assert h_wheat["input_manifest_hash"] != h_tomato["input_manifest_hash"]
+    assert h_wheat["crop_chronology_hash"] != h_clay["crop_chronology_hash"]
+    assert h_wheat["input_manifest_hash"] != h_clay["input_manifest_hash"]
+
+    warm_cp_dir = tmp_path / "cp_warm"
+    cold_cp_dir = tmp_path / "cp_cold"
+    rec_warm = HistoricalStateReconstructor(worldline=wl, checkpoint_root=warm_cp_dir, n_ensemble=8, checkpoint_stride=3)
+    rec_warm.reconstruct(
+        plot_id=plot_id,
+        geometry_hash=geom_hash,
+        tenant_id="t_cp",
+        daily_weather=weather,
+        domain_chronology=dom_wheat,
+        soil_context={"soil_type": "loam"},
+        emit_worldline_posterior=False,
+    )
+    q_tomato_warm = rec_warm.query_as_of(
+        plot_id=plot_id,
+        geometry_hash=geom_hash,
+        valid_time_T="2024-06-15",
+        tenant_id="t_cp",
+        daily_weather=weather,
+        domain_chronology=dom_tomato,
+        soil_context={"soil_type": "loam"},
+        forecast_horizons_days=(),
+    )
+    assert q_tomato_warm["resumed_from_checkpoint_id"] is None
+
+    rec_cold = HistoricalStateReconstructor(worldline=wl, checkpoint_root=cold_cp_dir, n_ensemble=8, checkpoint_stride=3)
+    q_tomato_cold = rec_cold.query_as_of(
+        plot_id=plot_id,
+        geometry_hash=geom_hash,
+        valid_time_T="2024-06-15",
+        tenant_id="t_cp",
+        daily_weather=weather,
+        domain_chronology=dom_tomato,
+        soil_context={"soil_type": "loam"},
+        forecast_horizons_days=(),
+    )
+    assert q_tomato_warm["input_manifest_hash"] == q_tomato_cold["input_manifest_hash"]
+    assert q_tomato_warm["crop_chronology_hash"] == q_tomato_cold["crop_chronology_hash"]
+    assert q_tomato_warm["state_means"] == q_tomato_cold["state_means"]
+
+
+def test_wm21_p2_crop_posterior_memoization_key_binds_spectral_soil_and_cycle():
+    """V2.1 P2: crop_context_as_of memoization must invalidate on spectral, soil, or cycle mutations."""
+    from services.agribrain.layer05_asmae.history.domain_chronology import build_domain_chronology
+    from services.agribrain.layer05_asmae.history.historical_crop_fusion import crop_context_as_of
+
+    canon_obs = [{
+        "observation_id": "obs_s2_same",
+        "sensing_time": "2024-04-10T10:30:00+00:00",
+        "ndvi": 0.78,
+        "evi": 0.55,
+        "ndwi": 0.12,
+        "ndmi": 0.25,
+        "contract_version": "canonical_crop_observation_v2",
+        "version_history": [{
+            "processing_baseline": "05.10",
+            "product_available_at": "2024-04-11T00:00:00+00:00",
+            "content_hash": "hash_high_ndvi",
+            "ndvi": 0.78,
+        }],
+    }]
+    fusion = {
+        "plot_id": "memo_plot",
+        "tenant_id": "memo_t",
+        "seasonal_timeline": [{
+            "season_id": "s1",
+            "start_time": "2024-01-01T00:00:00+00:00",
+            "end_time": "2024-08-01T00:00:00+00:00",
+            "evidence_end_time": "2024-08-01T00:00:00+00:00",
+            "max_product_available_at": "2024-08-02T00:00:00+00:00",
+        }],
+        "canonical_observations": canon_obs,
+        "_causal_prefix_cache": {},
+    }
+    _, dom_a = build_domain_chronology(
+        plot_id="memo_plot",
+        crop_cycles=[{"_id": "c1", "cropCode": "wheat", "plantDate": "2024-01-01T00:00:00Z", "harvestDate": "2024-08-01T00:00:00Z"}],
+    )
+    t_q = datetime(2024, 5, 1, tzinfo=timezone.utc)
+    r1 = crop_context_as_of(fusion, valid_time_T=t_q, knowledge_cutoff_K=t_q, domain_chronology=dom_a, base_soil_context={"soil_type": "loam"})
+    assert len(fusion["_causal_prefix_cache"]) == 1
+
+    # Same inputs hit cache
+    r1_cached = crop_context_as_of(fusion, valid_time_T=t_q, knowledge_cutoff_K=t_q, domain_chronology=dom_a, base_soil_context={"soil_type": "loam"})
+    assert len(fusion["_causal_prefix_cache"]) == 1
+    assert r1_cached == r1
+
+    # Mutate observation content without changing observation_id or baseline -> must create distinct cache entry
+    canon_obs[0]["ndvi"] = 0.14
+    canon_obs[0]["version_history"][0]["content_hash"] = "hash_low_ndvi"
+    canon_obs[0]["version_history"][0]["ndvi"] = 0.14
+    crop_context_as_of(fusion, valid_time_T=t_q, knowledge_cutoff_K=t_q, domain_chronology=dom_a, base_soil_context={"soil_type": "loam"})
+    assert len(fusion["_causal_prefix_cache"]) == 2
+
+    # Mutate soil context -> must create distinct cache entry
+    crop_context_as_of(fusion, valid_time_T=t_q, knowledge_cutoff_K=t_q, domain_chronology=dom_a, base_soil_context={"soil_type": "clay"})
+    assert len(fusion["_causal_prefix_cache"]) == 3
+
+    # Mutate crop cycle record id/variety while keeping declared crop / authority -> must create distinct cache entry
+    _, dom_b = build_domain_chronology(
+        plot_id="memo_plot",
+        crop_cycles=[{"_id": "c1", "cropCode": "wheat", "variety": "UpdatedCultivar", "plantDate": "2024-01-01T00:00:00Z", "harvestDate": "2024-08-01T00:00:00Z"}],
+    )
+    crop_context_as_of(fusion, valid_time_T=t_q, knowledge_cutoff_K=t_q, domain_chronology=dom_b, base_soil_context={"soil_type": "clay"})
+    assert len(fusion["_causal_prefix_cache"]) == 4
+
+
+def test_wm21_p2_calibration_registry_production_hardening_and_persistence(tmp_path, monkeypatch):
+    """V2.1 P2: Calibration registry fails closed without provisioned secret in prod and persists revocations."""
+    from services.agribrain.layer2_veg_int.features.calibration_registry import (
+        CalibrationEvaluationRecord,
+        TrustedCalibrationArtifactStore,
+    )
+
+    monkeypatch.delenv("AGRIBRAIN_CALIBRATION_TRUST_SECRET", raising=False)
+    monkeypatch.setenv("NODE_ENV", "production")
+
+    prod_store = TrustedCalibrationArtifactStore()
+    with pytest.raises(RuntimeError):
+        prod_store.issue_and_register(calibration_artifact_hash="a" * 64, feature_schema_hash="b" * 64)
+    status_missing, _, reason_missing = prod_store.verify_receipt(
+        {"calibration_artifact_hash": "a" * 64, "signature_hmac": "0" * 64}
+    )
+    assert status_missing == "unavailable"
+    assert reason_missing == "production_calibration_trust_secret_missing"
+
+    # Dev store issuing with dev ephemeral secret cannot pass require_production_trust=True
+    monkeypatch.setenv("NODE_ENV", "development")
+    dev_store = TrustedCalibrationArtifactStore(registry_path=tmp_path / "dev_cal_reg.json")
+    dev_rec = dev_store.issue_and_register(
+        calibration_artifact_hash="c" * 64,
+        feature_schema_hash="d" * 64,
+        calibration_evaluation_digest="e" * 64,
+    )
+    st_dev_in_prod, _, rsn_dev_in_prod = dev_store.verify_receipt(
+        {"calibration_artifact_hash": "c" * 64, "feature_schema_hash": "d" * 64, "signature_hmac": dev_rec.signature_hmac},
+        require_production_trust=True,
+    )
+    assert st_dev_in_prod == "unavailable"
+    assert rsn_dev_in_prod == "dev_ephemeral_calibration_secret_forbidden_in_production"
+
+    # Provisioned durable registry persists across process reload and enforces durable revocation
+    monkeypatch.setenv("NODE_ENV", "production")
+    monkeypatch.setenv("AGRIBRAIN_CALIBRATION_TRUST_SECRET", "prod-test-secret-key-minimum-length-32")
+    reg_file = tmp_path / "prod_cal_registry.json"
+    eval_rec = CalibrationEvaluationRecord(
+        evaluation_digest="1" * 64,
+        evaluator_version="v3_loocv",
+        dataset_scope="external_confirmed_disjoint",
+        evaluated_season_count=12,
+        confirmed_label_seasons_count=12,
+        ece=0.04,
+        multiclass_brier_score=0.22,
+        multiclass_log_loss=0.41,
+    )
+    s_writer = TrustedCalibrationArtifactStore(registry_path=reg_file, require_production_trust=True)
+    issued = s_writer.issue_and_register(
+        calibration_artifact_hash="2" * 64,
+        feature_schema_hash="3" * 64,
+        calibration_evaluation_digest="1" * 64,
+        evaluation_record=eval_rec,
+    )
+    s_reloaded = TrustedCalibrationArtifactStore(registry_path=reg_file, require_production_trust=True)
+    assert s_reloaded.status_summary()["production_trust_ready"] is True
+    ok_st, _, _ = s_reloaded.verify_receipt(
+        {"calibration_artifact_hash": "2" * 64, "feature_schema_hash": "3" * 64, "signature_hmac": issued.signature_hmac}
+    )
+    assert ok_st == "valid"
+
+    s_writer.revoke("2" * 64, reason="drift_detected")
+    rev_st, _, rev_rsn = s_reloaded.verify_receipt(
+        {"calibration_artifact_hash": "2" * 64, "feature_schema_hash": "3" * 64, "signature_hmac": issued.signature_hmac}
+    )
+    assert rev_st == "unavailable"
+    assert "revoked" in rev_rsn
+
+
+def test_wm21_p2_cached_tenant_provenance_and_ablation_parity():
+    """V2.1 P2: Cached offline domain metadata cannot grant live production ownership; ablation flags non-equivalent protocols."""
+    from services.agribrain.layer05_asmae.history.domain_chronology import build_domain_chronology
+    from services.agribrain.layer05_asmae.history.historical_retrovalidation import HistoricalRetrovalidator
+
+    ident_cached, _ = build_domain_chronology(
+        plot_id="p_cached",
+        plot_doc={"farmId": "f1", "soilType": "loam"},
+        farm_doc={"_id": "f1", "userId": "u_real_1"},
+        crop_cycles=[{
+            "cropCode": "citrus",
+            "declaredCropAuthority": "FARMER_CONFIRMED",
+            "plantDate": "2020-01-01T00:00:00Z",
+        }],
+        tenant_provenance="local_domain_metadata_cache",
+        tenant_verified_at="2026-11-26T10:00:00+00:00",
+    )
+    assert ident_cached.tenant_authority_tier == "CACHED_REGISTRY_IDENTITY_ONLY"
+    assert ident_cached.tenant_identity_fresh_db_verified is False
+    assert ident_cached.qualifies_for_production_archive() is False
+    assert "cached_tenant_ownership_not_fresh_db_verified" in ident_cached.identity_block_reasons
+
+    ident_live, _ = build_domain_chronology(
+        plot_id="p_live",
+        plot_doc={"farmId": "f1", "soilType": "loam"},
+        farm_doc={"_id": "f1", "userId": "u_real_1"},
+        crop_cycles=[{
+            "cropCode": "citrus",
+            "declaredCropAuthority": "FARMER_CONFIRMED",
+            "plantDate": "2020-01-01T00:00:00Z",
+        }],
+        tenant_provenance="live_db",
+        tenant_verified_at="2026-11-27T12:00:00+00:00",
+    )
+    assert ident_live.tenant_authority_tier == "LIVE_DB_OWNERSHIP_VERIFIED"
+    assert ident_live.tenant_identity_fresh_db_verified is True
+    assert ident_live.qualifies_for_production_archive() is True
+
+    abl = HistoricalRetrovalidator.compare_cross_layer_ablation(
+        {
+            "summary": {"rmse": 0.072, "mean_crps": 0.035, "coverage_1sigma": 0.71},
+            "multi_horizon": {
+                "as_issued_state_rebuilt_with_k_eq_t_issue": False,
+                "by_horizon": {"short_1_7d": {"n": 0}, "medium_8_16d": {"n": 0}, "extended_17_35d": {"n": 0}},
+                "diagnostic_backfill_horizon_reference": {"by_horizon": {"short_1_7d": {"n": 36, "skill_vs_persistence": -0.1}}},
+            },
+        },
+        {
+            "summary": {"rmse": 0.072, "mean_crps": 0.036, "coverage_1sigma": 0.70},
+            "multi_horizon": {
+                "as_issued_state_rebuilt_with_k_eq_t_issue": None,
+                "by_horizon": {"short_1_7d": {"n": 266, "skill_vs_persistence": 0.07}},
+            },
+        },
+    )
+    assert abl["multi_horizon_protocol_equivalent"] is False
+    assert abl["s1_s2_only_multi_horizon"]["short_1_7d"]["n"] == 0
+    assert abl["diagnostic_backfill_horizon_comparison"]["protocol_equivalent"] is True
+
+
+def test_wm3_prospective_forecast_ledger_and_loocv_crop_calibrator(tmp_path):
+    """V3 Foundation: Append-only hash-chained prospective forecast ledger & LOOCV crop-group calibration gate."""
+    from services.agribrain.layer05_asmae.history.historical_crop_fusion import evaluate_cross_validated_crop_calibration
+    from services.agribrain.layer05_asmae.history.prospective_forecast_ledger import (
+        CausalIssuanceViolation,
+        ImmutableIssuanceError,
+        ImmutableScoreError,
+        IntegrityTamperError,
+        ProspectiveForecastLedger,
+        RetroactiveOutcomeViolation,
+    )
+
+    ledger = ProspectiveForecastLedger(tmp_path / "prosp_ledger")
+
+    # Rejects retroactive target before issued_at or K > issued_at
+    with pytest.raises(CausalIssuanceViolation):
+        ledger.record_forecast_issuance(
+            forecast_id="bad_retro",
+            plot_id="p1",
+            tenant_id="t1",
+            farm_id="f1",
+            geometry_hash="gh1",
+            issued_at="2026-11-27T12:00:00+00:00",
+            knowledge_cutoff_time="2026-11-27T12:00:00+00:00",
+            target_valid_time="2026-11-20T12:00:00+00:00",
+            horizon_days=7,
+            model_version="v5",
+            calibration_version="cal_v10",
+            state_schema_version="s13",
+            input_manifest_hash="m" * 64,
+            observation_lineage_hash="o" * 64,
+            crop_chronology_hash="c" * 64,
+            weather_lineage_hash="w" * 64,
+            specialist_config_hash="sp" * 32,
+            complete_model_state={"state_means": {"vigor": 0.6}},
+            crop_posterior={"crop": "citrus"},
+            weather_forecast={"t_max": 22.0},
+            channel_calibration={"ndvi": {"slope": 1.0, "bias": 0.0}},
+            specialist_outputs={"water_stress": 0.1},
+            bma_weights={"asmae_causal_calibrated": 1.0},
+            predicted_channels={"ndvi": {"mean": 0.62, "sigma": 0.06, "y_pers": 0.58}},
+        )
+
+    iss = ledger.record_forecast_issuance(
+        forecast_id="fc_001",
+        plot_id="p1",
+        tenant_id="t1",
+        farm_id="f1",
+        geometry_hash="gh1",
+        issued_at="2026-11-27T12:00:00+00:00",
+        knowledge_cutoff_time="2026-11-27T12:00:00+00:00",
+        target_valid_time="2026-12-04T12:00:00+00:00",
+        target_window_start="2026-12-02T00:00:00+00:00",
+        target_window_end="2026-12-06T23:59:59+00:00",
+        horizon_days=7,
+        model_version="v5",
+        calibration_version="cal_v10",
+        state_schema_version="s13",
+        input_manifest_hash="m" * 64,
+        observation_lineage_hash="o" * 64,
+        crop_chronology_hash="c" * 64,
+        weather_lineage_hash="w" * 64,
+        specialist_config_hash="sp" * 32,
+        complete_model_state={"state_means": {"vigor": 0.6}},
+        crop_posterior={"crop": "citrus"},
+        weather_forecast={"t_max": 22.0},
+        channel_calibration={"ndvi": {"slope": 1.0, "bias": 0.0}},
+        specialist_outputs={"water_stress": 0.1},
+        bma_weights={"asmae_causal_calibrated": 1.0},
+        predicted_channels={"ndvi": {"mean": 0.62, "sigma": 0.06, "y_pers": 0.58}},
+    )
+    assert len(iss.record_sha256) == 64
+
+    with pytest.raises(ImmutableIssuanceError):
+        ledger.record_forecast_issuance(
+            forecast_id="fc_001",
+            plot_id="p1",
+            tenant_id="t1",
+            farm_id="f1",
+            geometry_hash="gh1",
+            issued_at="2026-11-27T12:00:00+00:00",
+            knowledge_cutoff_time="2026-11-27T12:00:00+00:00",
+            target_valid_time="2026-12-04T12:00:00+00:00",
+            target_window_start="2026-12-02T00:00:00+00:00",
+            target_window_end="2026-12-06T23:59:59+00:00",
+            horizon_days=7,
+            model_version="v5",
+            calibration_version="cal_v10",
+            state_schema_version="s13",
+            input_manifest_hash="m" * 64,
+            observation_lineage_hash="o" * 64,
+            crop_chronology_hash="c" * 64,
+            weather_lineage_hash="w" * 64,
+            specialist_config_hash="sp" * 32,
+            complete_model_state={"state_means": {"vigor": 0.6}},
+            crop_posterior={"crop": "citrus"},
+            weather_forecast={"t_max": 22.0},
+            channel_calibration={"ndvi": {"slope": 1.0, "bias": 0.0}},
+            specialist_outputs={"water_stress": 0.1},
+            bma_weights={"asmae_causal_calibrated": 1.0},
+            predicted_channels={"ndvi": {"mean": 0.62, "sigma": 0.06, "y_pers": 0.58}},
+        )
+
+    # Rejects pre-issuance committed observation (retroactive leakage)
+    with pytest.raises(RetroactiveOutcomeViolation):
+        ledger.attach_realized_observation(
+            forecast_id="fc_001",
+            plot_id="p1",
+            tenant_id="t1",
+            channel="ndvi",
+            observed_at="2026-12-04T10:30:00+00:00",
+            obs_committed_at="2026-11-26T00:00:00+00:00",
+            observation_content_hash="obs_hash_1",
+            y_obs=0.61,
+        )
+
+    rec = ledger.attach_realized_observation(
+        forecast_id="fc_001",
+        plot_id="p1",
+        tenant_id="t1",
+        channel="ndvi",
+        observed_at="2026-12-04T10:30:00+00:00",
+        obs_committed_at="2026-12-04T18:00:00+00:00",
+        observation_content_hash="obs_hash_1",
+        y_obs=0.61,
+    )
+    assert rec.within_1sigma is True
+    with pytest.raises(ImmutableScoreError):
+        ledger.attach_realized_observation(
+            forecast_id="fc_001",
+            plot_id="p1",
+            tenant_id="t1",
+            channel="ndvi",
+            observed_at="2026-12-04T10:30:00+00:00",
+            obs_committed_at="2026-12-04T18:00:00+00:00",
+            observation_content_hash="obs_hash_1",
+            y_obs=0.61,
+        )
+
+    summary = ledger.summarize(plot_id="p1", tenant_id="t1")
+    assert summary["chain_integrity_valid"] is True
+    assert summary["scored_forecast_count"] == 1
+    assert summary["pending_issuance_count"] == 0
+    assert summary["aggregate_prospective_metrics"]["mse_skill_vs_persistence"] > 0.8
+
+    # Tampering issuance breaks verification
+    iss_path = ledger._issuance_path(plot_id="p1", tenant_id="t1")
+    orig_txt = iss_path.read_text(encoding="utf-8")
+    iss_path.write_text(orig_txt.replace('"vigor":0.6', '"vigor":0.99'), encoding="utf-8")
+    with pytest.raises(IntegrityTamperError):
+        ledger.verify_chain_integrity(plot_id="p1", tenant_id="t1")
+
+    # V3 LOOCV crop-group calibration stays withheld without confirmed labels
+    unconf_cal = evaluate_cross_validated_crop_calibration([
+        {"plot_id": "p1", "label_confirmed": False, "true_crop_group": "orchard", "raw_broad_group_probs": {"orchard": 0.9, "cereal": 0.05, "vegetable": 0.03, "legume_fodder": 0.01, "unknown": 0.01}},
+        {"plot_id": "p2", "label_confirmed": False, "true_crop_group": "cereal", "raw_broad_group_probs": {"cereal": 0.9, "orchard": 0.05, "vegetable": 0.03, "legume_fodder": 0.01, "unknown": 0.01}},
+    ])
+    assert unconf_cal["status"] == "withheld_insufficient_confirmed_labels"
+    assert unconf_cal["calibrated_production_eligible"] is False
+
+    conf_seasons = [
+        {"plot_id": f"p{i}", "label_confirmed": True, "true_crop_group": "orchard" if i % 2 == 0 else "cereal", "raw_broad_group_probs": {"orchard": 0.92 if i % 2 == 0 else 0.03, "cereal": 0.03 if i % 2 == 0 else 0.92, "vegetable": 0.02, "legume_fodder": 0.02, "unknown": 0.01}}
+        for i in range(6)
+    ]
+    conf_cal = evaluate_cross_validated_crop_calibration(conf_seasons)
+    assert conf_cal["status"] == "calibrated_verified_out_of_fold"
+    assert conf_cal["calibrated_production_eligible"] is True
+

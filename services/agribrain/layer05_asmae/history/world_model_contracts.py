@@ -96,6 +96,9 @@ class DomainIdentityContract:
     identity_block_reasons: Tuple[str, ...] = ()
     diagnostic_fallback_crop: Optional[str] = None
     plot_name: Optional[str] = None
+    tenant_identity_fresh_db_verified: bool = False
+    tenant_authority_tier: str = "UNVERIFIED_TENANT_IDENTITY"
+    tenant_verified_at: Optional[str] = None
 
     def qualifies_for_crop_identity(self) -> bool:
         return bool(
@@ -107,6 +110,9 @@ class DomainIdentityContract:
     def qualifies_for_production_archive(self) -> bool:
         return bool(
             self.tenant_identity_verified
+            and self.tenant_identity_fresh_db_verified
+            and self.tenant_authority_tier == "LIVE_DB_OWNERSHIP_VERIFIED"
+            and not self.is_isolated_dev_fixture
             and self.qualifies_for_crop_identity()
             and self.soil_identity_verified
             and not self.identity_block_reasons

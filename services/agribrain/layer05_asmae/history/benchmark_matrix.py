@@ -4,12 +4,16 @@ transfer learning, counterfactual ablation arms, and Layer 2 crop-detection eval
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
 from .historical_crop_fusion import evaluate_crop_detection_benchmark
+from .prospective_forecast_ledger import summarize_cohort_prospective_ledger
 
 _EXPERT_NAMES: Tuple[str, ...] = (
     "optical_physiology",
@@ -105,7 +109,12 @@ def _collect_samples(items: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]
     return out
 
 
-def _fit_transfer_model(train_samples: Sequence[Mapping[str, Any]], *, bma_temperature: float = 0.08) -> Dict[str, Any]:
+def _fit_transfer_model(
+    train_samples: Sequence[Mapping[str, Any]],
+    *,
+    bma_temperature: float = 0.08,
+    prior_strength: float = 8.0,
+) -> Dict[str, Any]:
     """Fit ridge-shrunk per-channel affine calibration & BMA weights strictly on training folds."""
     by_channel: Dict[str, List[Tuple[float, float]]] = {}
     for s in train_samples:
@@ -116,7 +125,7 @@ def _fit_transfer_model(train_samples: Sequence[Mapping[str, Any]], *, bma_tempe
             by_channel.setdefault(ch, []).append((xr, yo))
 
     channel_cal: Dict[str, Dict[str, float]] = {}
-    prior_strength = 8.0
+    eff_prior = max(1.0, float(prior_strength))
     for ch, pairs in by_channel.items():
         xs = np.asarray([p[0] for p in pairs], dtype=np.float64)
         ys = np.asarray([p[1] for p in pairs], dtype=np.float64)
@@ -124,10 +133,10 @@ def _fit_transfer_model(train_samples: Sequence[Mapping[str, Any]], *, bma_tempe
         x_mean = float(np.mean(xs))
         y_mean = float(np.mean(ys))
         var_prior = 0.04
-        sxx = float(np.sum((xs - x_mean) ** 2)) + prior_strength * var_prior
-        sxy = float(np.sum((xs - x_mean) * (ys - y_mean))) + prior_strength * var_prior * 1.0
+        sxx = float(np.sum((xs - x_mean) ** 2)) + eff_prior * var_prior
+        sxy = float(np.sum((xs - x_mean) * (ys - y_mean))) + eff_prior * var_prior * 1.0
         slope = max(0.55, min(1.45, sxy / max(1e-8, sxx)))
-        bias = max(-0.35, min(0.35, (n * (y_mean - slope * x_mean)) / (n + prior_strength)))
+        bias = max(-0.35, min(0.35, (n * (y_mean - slope * x_mean)) / (n + eff_prior)))
         channel_cal[ch] = {
             "slope": round(float(slope), 6),
             "bias": round(float(bias), 6),
@@ -153,10 +162,20 @@ def _fit_transfer_model(train_samples: Sequence[Mapping[str, Any]], *, bma_tempe
     w_sum = sum(raw_weights.values()) or 1.0
     bma_weights = {exp: round(val / w_sum, 6) for exp, val in raw_weights.items()}
 
-    return {
+    frozen_spec = {
+        "model_family": "asmae_frozen_channel_bma_transfer_v3",
+        "prior_strength": eff_prior,
+        "bma_temperature": float(bma_temperature),
         "train_sample_count": len(train_samples),
-        "channel_calibration": channel_cal,
+        "channel_calibration": {k: channel_cal[k] for k in sorted(channel_cal)},
         "bma_weights": bma_weights,
+    }
+    artifact_hash = hashlib.sha256(
+        json.dumps(frozen_spec, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+    return {
+        **frozen_spec,
+        "frozen_model_artifact_hash": artifact_hash,
     }
 
 
@@ -243,13 +262,23 @@ def _evaluate_transfer_folds(
             "train_sample_count": len(train_samples),
             "n_heldout_samples": len(held_samples),
         }
-    model = _fit_transfer_model(train_samples)
+    model = _fit_transfer_model(train_samples, prior_strength=8.0)
     eval_res = _predict_transfer_zero_shot(model, held_samples)
+    shrunk_model = _fit_transfer_model(train_samples, prior_strength=48.0)
+    shrunk_res = _predict_transfer_zero_shot(shrunk_model, held_samples)
     return {
         **fold_meta,
         "train_sample_count": model["train_sample_count"],
+        "frozen_model_artifact_hash": model["frozen_model_artifact_hash"],
         "learned_bma_weights": model["bma_weights"],
         "learned_channel_calibration": model["channel_calibration"],
+        "identity_anchored_shrunk_transfer": {
+            "prior_strength": 48.0,
+            "frozen_model_artifact_hash": shrunk_model["frozen_model_artifact_hash"],
+            "heldout_zero_shot_bma_rmse": shrunk_res.get("heldout_zero_shot_bma_rmse"),
+            "heldout_zero_shot_bma_mse_skill_vs_persistence": shrunk_res.get("heldout_zero_shot_bma_mse_skill_vs_persistence"),
+            "heldout_zero_shot_bma_mse_skill_vs_climatology": shrunk_res.get("heldout_zero_shot_bma_mse_skill_vs_climatology"),
+        },
         **eval_res,
     }
 
@@ -364,17 +393,25 @@ def _aggregate_transfer_summary(folds: Sequence[Mapping[str, Any]]) -> Dict[str,
         for f in eval_folds
         if isinstance(f.get("heldout_zero_shot_bma_mse_skill_vs_climatology"), (int, float))
     ]
+    shrunk_pers = [
+        float((f.get("identity_anchored_shrunk_transfer") or {}).get("heldout_zero_shot_bma_mse_skill_vs_persistence"))
+        for f in eval_folds
+        if isinstance((f.get("identity_anchored_shrunk_transfer") or {}).get("heldout_zero_shot_bma_mse_skill_vs_persistence"), (int, float))
+    ]
     return {
         "evaluated_fold_count": len(eval_folds),
         "total_heldout_samples": sum(int(f.get("n_heldout_samples") or 0) for f in eval_folds),
         "mean_heldout_zero_shot_bma_rmse": round(float(np.mean(bma_rmses)), 6) if bma_rmses else None,
         "mean_heldout_zero_shot_bma_mse_skill_vs_persistence": round(float(np.mean(bma_pers_skills)), 6) if bma_pers_skills else None,
         "mean_heldout_zero_shot_bma_mse_skill_vs_climatology": round(float(np.mean(bma_clim_skills)), 6) if bma_clim_skills else None,
+        "mean_identity_shrunk_zero_shot_bma_mse_skill_vs_persistence": round(float(np.mean(shrunk_pers)), 6) if shrunk_pers else None,
     }
 
 
 def evaluate_cross_plot_matrix(
     cohort_items: Sequence[Mapping[str, Any]],
+    *,
+    prospective_ledger_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Compute descriptive per-plot/crop summaries, true out-of-sample LOPO/LOCSO transfer, and L2 crop detection."""
     rows: List[Dict[str, Any]] = []
@@ -403,7 +440,10 @@ def evaluate_cross_plot_matrix(
             "crop_declaration_authority": dom.get("crop_declaration_authority") or "UNKNOWN_UNDECLARED",
             "crop_identity_verified": bool(dom.get("crop_identity_verified", False)),
             "tenant_identity_verified": bool(dom.get("tenant_identity_verified", False)),
+            "tenant_identity_fresh_db_verified": bool(dom.get("tenant_identity_fresh_db_verified", False)),
+            "tenant_authority_tier": dom.get("tenant_authority_tier") or "UNVERIFIED_TENANT_IDENTITY",
             "tenant_ownership_source": dom.get("tenant_resolution_source") or dom.get("tenant_ownership_source") or "unverified",
+            "tenant_verified_at": dom.get("tenant_verified_at"),
             "is_isolated_dev_fixture": bool(dom.get("is_isolated_dev_fixture", False)),
             "synthetic_label_rejected": bool(dom.get("synthetic_label_rejected", False)),
             "eo_top_crop_group": latest_crop_post.get("top_group") or "unknown",
@@ -517,18 +557,42 @@ def evaluate_cross_plot_matrix(
     crop_bench = evaluate_crop_detection_benchmark(cohort_items)
 
     scientifically_qualified_count = sum(1 for r in rows if r["qualification_passed"])
+    live_db_verified_tenant_count = sum(1 for r in rows if r["tenant_identity_fresh_db_verified"])
+    cached_registry_tenant_count = sum(
+        1 for r in rows if r["tenant_authority_tier"] == "CACHED_REGISTRY_IDENTITY_ONLY"
+    )
     production_eligible_verified_count = sum(
         1 for r in rows
-        if r["qualification_passed"] and r["tenant_identity_verified"] and r["crop_identity_verified"]
+        if r["qualification_passed"]
+        and r["tenant_identity_verified"]
+        and r["tenant_identity_fresh_db_verified"]
+        and r["crop_identity_verified"]
+    )
+    prospective_summary = (
+        summarize_cohort_prospective_ledger(
+            Path(prospective_ledger_root),
+            [
+                {
+                    "plot_id": str(item.get("plot_id") or ""),
+                    "tenant_id": str((item.get("domain_identity") or {}).get("tenant_id") or item.get("tenant_id") or "default_tenant"),
+                }
+                for item in cohort_items
+            ],
+        )
+        if prospective_ledger_root is not None
+        else None
     )
     return {
         "matrix_version": "asmae_world_model_v2_benchmark_matrix",
         "cohort_size": len(rows),
         "verified_crop_plot_count": len(verified_crop_rows),
         "verified_tenant_plot_count": sum(1 for r in rows if r["tenant_identity_verified"]),
+        "live_db_verified_tenant_plot_count": live_db_verified_tenant_count,
+        "cached_registry_tenant_plot_count": cached_registry_tenant_count,
         "scientifically_qualified_model_count": scientifically_qualified_count,
         "production_eligible_verified_count": production_eligible_verified_count,
         "qualified_verified_crop_count": sum(1 for r in verified_crop_rows if r["qualification_passed"]),
+        "prospective_forecast_ledger": prospective_summary,
         "metric_definitions": {
             "mse_skill_score": "1 - (MSE_model / MSE_ref); 0 = equals baseline, >0 = lower MSE than baseline.",
             "rmse_skill_ratio": "1 - (RMSE_model / RMSE_ref); linear RMSE fractional reduction vs baseline.",

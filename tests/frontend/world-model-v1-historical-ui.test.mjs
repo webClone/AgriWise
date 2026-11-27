@@ -84,4 +84,29 @@ test("World Model V1 UI summary preserves unverified crop identity, synthetic re
   assert.equal(v2RegView.preKnownCycleUnknown, true);
   assert.equal(v2RegView.withheldReprocessedAfterK, 3);
   assert.equal(v2RegView.cropChronologyHash, "abcdef0123456789");
+
+  const v21CachedTenant = summarizeWorldModelV1View({
+    observation_lineage_hash: "1122334455667788",
+    input_manifest_hash: "8877665544332211",
+    domain_identity: {
+      resolved_crop_code: "citrus",
+      crop_identity_verified: false,
+      crop_declaration_authority: "REGISTRY_DECLARED",
+      tenant_identity_verified: false,
+      tenant_identity_fresh_db_verified: false,
+      tenant_authority_tier: "CACHED_REGISTRY_IDENTITY_ONLY",
+      tenant_ownership_source: "cached_farm_doc_user_id_offline_cache",
+    },
+    prospective_forecast_ledger: {
+      status: "awaiting_future_observations",
+      issuance_count: 3,
+      scored_forecast_count: 0,
+    },
+  });
+  assert.equal(v21CachedTenant.tenantFreshDbVerified, false);
+  assert.equal(v21CachedTenant.tenantLabel, "Cached Registry (Non-Live Cache)");
+  assert.equal(v21CachedTenant.observationLineageHash, "1122334455667788");
+  assert.equal(v21CachedTenant.inputManifestHash, "8877665544332211");
+  assert.equal(v21CachedTenant.prospectiveLedgerStatus, "awaiting_future_observations");
+  assert.equal(v21CachedTenant.prospectiveLedgerIssuances, 3);
 });

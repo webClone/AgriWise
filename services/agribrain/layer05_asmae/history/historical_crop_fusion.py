@@ -9,6 +9,7 @@ applies bounded post-ASMAE refinement, and reports standard multiclass calibrati
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -932,7 +933,7 @@ def crop_context_as_of(
             _parse_iso_utc((completed_before_t or {}).get("end_time")) or datetime.min.replace(tzinfo=timezone.utc)
         )
         prefix_obs: List[Dict[str, Any]] = []
-        obs_sig_parts: List[str] = []
+        obs_ledger_items: List[Dict[str, Any]] = []
         for o in raw_canon:
             obs_t = _obs_time_utc(o)
             if obs_t is None or obs_t > t_dt:
@@ -945,25 +946,67 @@ def crop_context_as_of(
             if elig:
                 mat = _materialize_obs_for_version(o, sel_ver)
                 prefix_obs.append(mat)
-                obs_sig_parts.append(f"{o.get('observation_id') or obs_t.isoformat()}:{(sel_ver or {}).get('processing_baseline')}")
+                obs_ledger_items.append({
+                    "observation_id": str(o.get("observation_id") or obs_t.isoformat()),
+                    "sensing_time": obs_t.isoformat(),
+                    "processing_baseline": (sel_ver or {}).get("processing_baseline"),
+                    "product_available_at": (sel_ver or {}).get("product_available_at"),
+                    "content_hash": mat.get("content_hash") or mat.get("source_content_hash") or o.get("content_hash"),
+                    "spectral": {
+                        k: mat.get(k)
+                        for k in ("ndvi", "evi", "ndwi", "ndmi", "vv", "vh", "vh_vv_ratio", "valid_pixel_fraction", "cloud_score")
+                        if k in mat
+                    },
+                    "contract_version": mat.get("contract_version"),
+                })
 
         if prefix_obs:
-            # Memoize pure causal prefix posterior on the crop_fusion_result dict when mutable
+            # Memoize pure causal prefix posterior against canonical eligible ledger, chronology, soil & prior lineage
             cache_map = (
                 crop_fusion_result.setdefault("_causal_prefix_cache", {})
                 if isinstance(crop_fusion_result, dict)
                 else {}
             )
+            prev_comp_post = dict((completed_before_t or {}).get("raw_posterior") or {}) or None
+            dom_digest = hashlib.sha256(
+                json.dumps(
+                    {
+                        "dom_tk": (domain_chronology.as_of(t_dt, knowledge_cutoff_K=k_dt) if domain_chronology is not None else None),
+                        "crop_intervals": [
+                            iv.to_dict() if hasattr(iv, "to_dict") else iv
+                            for iv in (getattr(domain_chronology, "crop_intervals", ()) if domain_chronology is not None else ())
+                        ],
+                        "soil_context": dict(base_soil_context or {}),
+                        "soil_revisions": [
+                            sv.to_dict() if hasattr(sv, "to_dict") else sv
+                            for sv in (getattr(domain_chronology, "soil_revisions", ()) if domain_chronology is not None else ())
+                        ],
+                        "prev_post_lineage": (prev_comp_post or {}).get("content_hash") or (prev_comp_post or {}).get("lineage_id"),
+                        "prev_season_id": (completed_before_t or {}).get("season_id"),
+                        "declared_code": declared_code,
+                        "verified_as_of_k": verified_as_of_k,
+                        "crop_authority": crop_authority,
+                        "physical_regime": physical_regime,
+                        "declared_at": declared_at,
+                        "declared_src": declared_src,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()
+            obs_ledger_hash = hashlib.sha256(
+                json.dumps(obs_ledger_items, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+            ).hexdigest()
             cache_key = (
-                tuple(obs_sig_parts),
-                declared_code,
-                verified_as_of_k,
-                crop_authority,
-                physical_regime,
+                t_dt.strftime("%Y%m%dT%H%M%SZ"),
+                obs_ledger_hash,
+                dom_digest,
+                "prefix_cache_v2",
             )
             cached_post = cache_map.get(cache_key) if isinstance(cache_map, dict) else None
             if isinstance(cached_post, dict):
-                posterior = dict(cached_post)
+                posterior = json.loads(json.dumps(cached_post))
             else:
                 plot_id = str((crop_fusion_result or {}).get("plot_id") or "plot")
                 tenant_id = str((crop_fusion_result or {}).get("tenant_id") or "default_tenant")
@@ -998,7 +1041,6 @@ def crop_context_as_of(
                         "crop_cycle_id": (active_cycle or {}).get("record_id"),
                         "crop_cycle": active_cycle,
                     }
-                prev_comp_post = dict((completed_before_t or {}).get("raw_posterior") or {}) or None
                 posterior = infer_crop_posterior(
                     plot_id=plot_id,
                     run_id=f"prefix_{t_dt.strftime('%Y%m%d')}",
@@ -1010,7 +1052,7 @@ def crop_context_as_of(
                 if isinstance(cache_map, dict):
                     if len(cache_map) > 256:
                         cache_map.clear()
-                    cache_map[cache_key] = posterior
+                    cache_map[cache_key] = json.loads(json.dumps(posterior))
 
     if not posterior and selected is not None:
         posterior = dict(selected.get("raw_posterior") or {})
@@ -1113,6 +1155,130 @@ def _bootstrap_ci(values: Sequence[float], seed: int = 20261127, n_boot: int = 2
     lo = means[max(0, int(0.025 * (n_boot - 1)))]
     hi = means[min(n_boot - 1, int(0.975 * (n_boot - 1)))]
     return [round(lo, 4), round(hi, 4)]
+
+
+def evaluate_cross_validated_crop_calibration(
+    evaluated_seasons: Sequence[Mapping[str, Any]],
+    *,
+    require_confirmed_labels: bool = True,
+) -> Dict[str, Any]:
+    """V3 Leave-One-Plot-Out cross-validated temperature scaling for crop-group posteriors.
+
+    Strictly fits temperature T on training plots only and evaluates out-of-fold.
+    Never grants calibrated production authority unless >= 6 independently confirmed
+    label seasons pass the held-out calibration gate.
+    """
+    candidates = [r for r in evaluated_seasons if isinstance(r.get("raw_broad_group_probs"), Mapping)]
+    if require_confirmed_labels:
+        confirmed_rows = [r for r in candidates if bool(r.get("label_confirmed"))]
+    else:
+        confirmed_rows = list(candidates)
+
+    def _ece5(pts: Sequence[Tuple[float, float]]) -> Optional[float]:
+        if not pts:
+            return None
+        ece_acc = 0.0
+        for i in range(5):
+            lo, hi = i / 5.0, (i + 1) / 5.0
+            sub = [p for p in pts if (lo <= p[0] < hi) or (hi == 1.0 and p[0] == 1.0)]
+            if sub:
+                ece_acc += (len(sub) / len(pts)) * abs(sum(p[0] for p in sub) / len(sub) - sum(p[1] for p in sub) / len(sub))
+        return round(ece_acc, 4)
+
+    def _temp_scale(probs: Mapping[str, float], temp: float) -> Dict[str, float]:
+        t = max(0.35, min(5.0, float(temp)))
+        raw_logits = {g: math.log(max(1e-6, float(probs.get(g, 0.0)))) / t for g in _BROAD_GROUPS}
+        m = max(raw_logits.values())
+        exps = {g: math.exp(v - m) for g, v in raw_logits.items()}
+        tot = sum(exps.values()) or 1.0
+        return {g: exps[g] / tot for g in _BROAD_GROUPS}
+
+    def _run_loocv(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        plots = sorted({str(r.get("plot_id") or "") for r in rows if r.get("plot_id")})
+        if len(rows) < 2 or len(plots) < 2:
+            return {
+                "status": "insufficient_multiplot_seasons",
+                "evaluated_seasons": len(rows),
+                "plot_count": len(plots),
+                "pre_calibration_ece": None,
+                "post_calibration_ece": None,
+                "pre_calibration_brier": None,
+                "post_calibration_brier": None,
+                "mean_fitted_temperature": None,
+            }
+        temps_grid = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0]
+        pre_briers: List[float] = []
+        post_briers: List[float] = []
+        pre_nlls: List[float] = []
+        post_nlls: List[float] = []
+        pre_pts: List[Tuple[float, float]] = []
+        post_pts: List[Tuple[float, float]] = []
+        fitted_temps: List[float] = []
+        for held_pid in plots:
+            train_rows = [r for r in rows if str(r.get("plot_id") or "") != held_pid]
+            held_rows = [r for r in rows if str(r.get("plot_id") or "") == held_pid]
+            if not train_rows or not held_rows:
+                continue
+            best_t = 1.0
+            best_loss = float("inf")
+            for cand_t in temps_grid:
+                loss_sum = 0.0
+                for tr in train_rows:
+                    sp = _temp_scale(tr["raw_broad_group_probs"], cand_t)
+                    tg = str(tr.get("true_crop_group") or "unknown")
+                    loss_sum += -math.log(max(1e-6, sp.get(tg, 0.0)))
+                if loss_sum < best_loss:
+                    best_loss = loss_sum
+                    best_t = cand_t
+            fitted_temps.append(best_t)
+            for hr in held_rows:
+                tg = str(hr.get("true_crop_group") or "unknown")
+                p_pre = _canonical_broad_group_probs(hr["raw_broad_group_probs"])
+                p_post = _temp_scale(p_pre, best_t)
+                pre_briers.append(sum((p_pre[g] - (1.0 if g == tg else 0.0)) ** 2 for g in _BROAD_GROUPS))
+                post_briers.append(sum((p_post[g] - (1.0 if g == tg else 0.0)) ** 2 for g in _BROAD_GROUPS))
+                pre_nlls.append(-math.log(max(1e-6, p_pre.get(tg, 0.0))))
+                post_nlls.append(-math.log(max(1e-6, p_post.get(tg, 0.0))))
+                top_pre = max(p_pre.items(), key=lambda kv: kv[1])
+                top_post = max(p_post.items(), key=lambda kv: kv[1])
+                pre_pts.append((float(top_pre[1]), 1.0 if top_pre[0] == tg else 0.0))
+                post_pts.append((float(top_post[1]), 1.0 if top_post[0] == tg else 0.0))
+        if not post_briers:
+            return {"status": "insufficient_multiplot_folds", "evaluated_seasons": len(rows), "plot_count": len(plots)}
+        return {
+            "status": "evaluated_out_of_fold",
+            "evaluated_seasons": len(post_briers),
+            "plot_count": len(plots),
+            "pre_calibration_ece": _ece5(pre_pts),
+            "post_calibration_ece": _ece5(post_pts),
+            "pre_calibration_brier": round(sum(pre_briers) / len(pre_briers), 4),
+            "post_calibration_brier": round(sum(post_briers) / len(post_briers), 4),
+            "pre_calibration_log_loss": round(sum(pre_nlls) / len(pre_nlls), 4),
+            "post_calibration_log_loss": round(sum(post_nlls) / len(post_nlls), 4),
+            "mean_fitted_temperature": round(sum(fitted_temps) / len(fitted_temps), 4),
+        }
+
+    confirmed_res = _run_loocv(confirmed_rows)
+    diagnostic_all = _run_loocv(candidates)
+    confirmed_count = len([r for r in candidates if bool(r.get("label_confirmed"))])
+    qualified_cal = bool(
+        confirmed_count >= 6
+        and confirmed_res.get("status") == "evaluated_out_of_fold"
+        and isinstance(confirmed_res.get("post_calibration_ece"), (int, float))
+        and float(confirmed_res["post_calibration_ece"]) <= 0.12
+    )
+    return {
+        "calibrator_version": "v3_loocv_temperature_scaling",
+        "confirmed_label_seasons_count": confirmed_count,
+        "confirmed_only_loocv": confirmed_res,
+        "diagnostic_registry_included_loocv": diagnostic_all,
+        "calibrated_production_eligible": qualified_cal,
+        "status": (
+            "calibrated_verified_out_of_fold"
+            if qualified_cal
+            else "withheld_insufficient_confirmed_labels"
+        ),
+    }
 
 
 def evaluate_crop_detection_benchmark(
@@ -1228,6 +1394,7 @@ def evaluate_crop_detection_benchmark(
                 "species_top5_correct": hit_sp5,
                 "multiclass_brier": round(mc_brier, 4),
                 "multiclass_log_loss": round(nll, 4),
+                "raw_broad_group_probs": canon_probs,
             })
 
     n = len(evaluated_seasons)
@@ -1254,6 +1421,11 @@ def evaluate_crop_detection_benchmark(
     confirmed_only_count = sum(1 for r in evaluated_seasons if r["label_confirmed"])
     acc_values = [1.0 if r["group_correct"] else 0.0 for r in evaluated_seasons]
 
+    cross_val_cal = evaluate_cross_validated_crop_calibration(evaluated_seasons)
+    lean_season_records = [
+        {k: v for k, v in rec.items() if k != "raw_broad_group_probs"}
+        for rec in evaluated_seasons[:20]
+    ]
     acc_among_accepted = round(accepted_hits / accepted_count, 4) if accepted_count else None
     return {
         "evaluated_verified_seasons": n,
@@ -1284,9 +1456,14 @@ def evaluate_crop_detection_benchmark(
             "crop_group_accuracy_overall_ci": _bootstrap_ci(acc_values),
             "multiclass_brier_score_ci": _bootstrap_ci(multiclass_brier_scores),
         },
-        "calibration_status": "uncalibrated_reference_science_ranking_only",
+        "cross_validated_calibration": cross_val_cal,
+        "calibration_status": (
+            "calibrated_verified_out_of_fold"
+            if cross_val_cal.get("calibrated_production_eligible")
+            else "uncalibrated_reference_science_ranking_only"
+        ),
         "ml_production_eligible": False,
-        "season_records": evaluated_seasons[:20],
+        "season_records": lean_season_records,
     }
 
 
@@ -1297,5 +1474,6 @@ __all__ = [
     "build_historical_crop_observations",
     "crop_context_as_of",
     "evaluate_crop_detection_benchmark",
+    "evaluate_cross_validated_crop_calibration",
     "reconstruct_chronological_crop_posteriors",
 ]

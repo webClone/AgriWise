@@ -78,9 +78,9 @@ from services.agribrain.world_model.canonical_worldline import (
 
 logger = logging.getLogger(__name__)
 
-RECONSTRUCTOR_MODEL_VERSION = "asmae_hist_cross_layer_v4"
-CALIBRATION_VERSION = "asmae_causal_spatial_cal_v9"
-POSTERIOR_CHECKPOINT_SCHEMA = "asmae_posterior_checkpoint_v3"
+RECONSTRUCTOR_MODEL_VERSION = "asmae_hist_cross_layer_v5"
+CALIBRATION_VERSION = "asmae_causal_spatial_cal_v10"
+POSTERIOR_CHECKPOINT_SCHEMA = "asmae_posterior_checkpoint_v4"
 CROSS_LAYER_PRIOR_VERSION = "cross_layer_bridge_v3"
 
 _CAL_DECAY_BY_CHANNEL: Dict[str, float] = {
@@ -1234,10 +1234,28 @@ def _compute_causal_input_lineage_hashes(
     eff_day = min(cutoff_utc, k_utc).date().isoformat()
 
     intervals_norm: List[Dict[str, Any]] = []
+    soil_revs_norm: List[Dict[str, Any]] = []
+    dom_mgmt_norm: List[Dict[str, Any]] = []
+    scouting_norm: List[Dict[str, Any]] = []
+    domain_identity_digest_fields: Dict[str, Any] = {}
     if domain_chronology is not None:
+        dom_ident = getattr(domain_chronology, "identity", None)
+        if dom_ident is not None:
+            ident_dict = dom_ident.to_dict() if hasattr(dom_ident, "to_dict") else (dict(dom_ident) if isinstance(dom_ident, Mapping) else {})
+            domain_identity_digest_fields = {
+                "crop_identity_verified": ident_dict.get("crop_identity_verified"),
+                "crop_declaration_authority": ident_dict.get("crop_declaration_authority"),
+                "resolved_crop_code": ident_dict.get("resolved_crop_code"),
+                "crop_variety": ident_dict.get("crop_variety"),
+                "synthetic_label_rejected": ident_dict.get("synthetic_label_rejected"),
+                "soil_identity_verified": ident_dict.get("soil_identity_verified"),
+                "soil_texture": ident_dict.get("soil_texture"),
+                "soil_resolution_source": ident_dict.get("soil_resolution_source"),
+            }
         for iv in getattr(domain_chronology, "crop_intervals", ()) or ():
-            vf_raw = iv.get("valid_from") if isinstance(iv, dict) else getattr(iv, "valid_from", None)
-            kf_raw = iv.get("known_from") if isinstance(iv, dict) else getattr(iv, "known_from", None)
+            iv_dict = iv.to_dict() if hasattr(iv, "to_dict") else (dict(iv) if isinstance(iv, Mapping) else {})
+            vf_raw = iv_dict.get("valid_from")
+            kf_raw = iv_dict.get("known_from") or iv_dict.get("declared_at")
             try:
                 if vf_raw and _parse_utc_iso(vf_raw) > cutoff_utc:
                     continue
@@ -1245,18 +1263,63 @@ def _compute_causal_input_lineage_hashes(
                     continue
             except Exception:
                 pass
-            intervals_norm.append({
-                "interval_id": iv.get("interval_id") if isinstance(iv, dict) else getattr(iv, "interval_id", ""),
-                "crop_type": iv.get("crop_type") if isinstance(iv, dict) else getattr(iv, "crop_type", ""),
-                "valid_from": str(vf_raw or ""),
-                "valid_to": str(iv.get("valid_to") if isinstance(iv, dict) else getattr(iv, "valid_to", "")),
-                "known_from": str(kf_raw or ""),
-                "authority": iv.get("authority") if isinstance(iv, dict) else getattr(iv, "authority", ""),
-                "verification_status": (
-                    iv.get("verification_status") if isinstance(iv, dict) else getattr(iv, "verification_status", "")
-                ),
-                "synthetic": bool(iv.get("synthetic") if isinstance(iv, dict) else getattr(iv, "synthetic", False)),
-            })
+            intervals_norm.append(iv_dict)
+        intervals_norm.sort(
+            key=lambda x: (
+                str(x.get("valid_from") or ""),
+                str(x.get("known_from") or ""),
+                str(x.get("record_id") or x.get("interval_id") or ""),
+                str(x.get("crop_code") or x.get("crop_type") or ""),
+            )
+        )
+
+        for sv in getattr(domain_chronology, "soil_revisions", ()) or ():
+            sv_dict = sv.to_dict() if hasattr(sv, "to_dict") else (dict(sv) if isinstance(sv, Mapping) else {})
+            vf_raw = sv_dict.get("valid_from")
+            kf_raw = sv_dict.get("known_from")
+            try:
+                if vf_raw and _parse_utc_iso(vf_raw) > cutoff_utc:
+                    continue
+                if kf_raw and _parse_utc_iso(kf_raw) > k_utc:
+                    continue
+            except Exception:
+                pass
+            soil_revs_norm.append(sv_dict)
+        soil_revs_norm.sort(
+            key=lambda x: (str(x.get("valid_from") or ""), str(x.get("known_from") or ""), str(x.get("record_id") or ""))
+        )
+
+        for mk in getattr(domain_chronology, "management_records", ()) or ():
+            mk_dict = mk.to_dict() if hasattr(mk, "to_dict") else (dict(mk) if isinstance(mk, Mapping) else {})
+            vf_raw = mk_dict.get("valid_from")
+            kf_raw = mk_dict.get("known_from")
+            try:
+                if vf_raw and _parse_utc_iso(vf_raw) > cutoff_utc:
+                    continue
+                if kf_raw and _parse_utc_iso(kf_raw) > k_utc:
+                    continue
+            except Exception:
+                pass
+            dom_mgmt_norm.append(mk_dict)
+        dom_mgmt_norm.sort(
+            key=lambda x: (str(x.get("valid_from") or ""), str(x.get("known_from") or ""), str(x.get("record_id") or ""))
+        )
+
+        for sc in getattr(domain_chronology, "scouting_records", ()) or ():
+            sc_dict = sc.to_dict() if hasattr(sc, "to_dict") else (dict(sc) if isinstance(sc, Mapping) else {})
+            obs_raw = sc_dict.get("observed_at")
+            cr_raw = sc_dict.get("created_at")
+            try:
+                if obs_raw and _parse_utc_iso(obs_raw) > cutoff_utc:
+                    continue
+                if cr_raw and _parse_utc_iso(cr_raw) > k_utc:
+                    continue
+            except Exception:
+                pass
+            scouting_norm.append(sc_dict)
+        scouting_norm.sort(
+            key=lambda x: (str(x.get("observed_at") or ""), str(x.get("created_at") or ""), str(x.get("record_id") or ""))
+        )
 
     fusion_norm: List[Dict[str, Any]] = []
     if isinstance(crop_fusion, dict):
@@ -1284,16 +1347,25 @@ def _compute_causal_input_lineage_hashes(
                     continue
             except Exception:
                 pass
+            ev_end_raw = item.get("evidence_end_time") or item.get("end_time")
+            is_season_closed_at_t = True
+            if ev_end_raw:
+                try:
+                    is_season_closed_at_t = _parse_utc_iso(ev_end_raw) <= cutoff_utc
+                except Exception:
+                    is_season_closed_at_t = False
             fusion_norm.append({
                 "season_id": item.get("season_id"),
                 "date": str(item.get("start_time") or item.get("date") or item.get("acquisition_time") or "")[:10],
-                "end_date": str(item.get("end_time") or "")[:10],
+                "end_date": str(ev_end_raw or "")[:10] if is_season_closed_at_t else None,
                 "crop_authority": item.get("crop_declaration_authority") or item.get("authority"),
                 "verified_crop_code": item.get("verified_crop_code_as_of_tk"),
-                "physical_regime": item.get("physical_regime"),
-                "dominant_crop_group": item.get("top_group") or item.get("dominant_crop_group"),
-                "unknown_probability": item.get("unknown_probability"),
-                "posterior": item.get("crop_group_posterior") or item.get("posterior"),
+                "physical_regime": item.get("physical_regime") if is_season_closed_at_t else "in_progress_prefix",
+                "dominant_crop_group": (item.get("top_group") or item.get("dominant_crop_group")) if is_season_closed_at_t else None,
+                "unknown_probability": item.get("unknown_probability") if is_season_closed_at_t else None,
+                "posterior": (item.get("crop_group_posterior") or item.get("posterior")) if is_season_closed_at_t else None,
+                "crop_posterior_hash": item.get("crop_posterior_hash") if is_season_closed_at_t else None,
+                "crop_lineage_id": item.get("crop_lineage_id") if is_season_closed_at_t else None,
             })
 
     mgmt_norm = []
@@ -1312,10 +1384,15 @@ def _compute_causal_input_lineage_hashes(
             mgmt_norm.append(ev)
         else:
             mgmt_norm.append(str(ev))
+    mgmt_norm.sort(key=lambda m: json.dumps(m, sort_keys=True, default=str))
 
     crop_payload = {
         "has_domain_chronology": domain_chronology is not None,
+        "domain_identity": domain_identity_digest_fields,
         "crop_intervals": intervals_norm,
+        "soil_revisions": soil_revs_norm,
+        "domain_management_records": dom_mgmt_norm,
+        "domain_scouting_records": scouting_norm,
         "crop_fusion_contract": crop_fusion.get("contract_version") if isinstance(crop_fusion, dict) else None,
         "crop_fusion_timeline": fusion_norm,
         "fallback_crop_context": dict(crop_context or {}) if domain_chronology is None and crop_fusion is None else {},
@@ -2063,6 +2140,8 @@ class HistoricalStateReconstructor:
                 and bool(cp.use_cross_layer_priors) == bool(use_cross_layer_priors)
                 and cp.crop_chronology_hash == cp_hashes["crop_chronology_hash"]
                 and cp.weather_lineage_hash == cp_hashes["weather_lineage_hash"]
+                and cp.observation_lineage_hash == cp_hashes["observation_lineage_hash"]
+                and cp.specialist_config_hash == cp_hashes["specialist_config_hash"]
                 and cp.input_manifest_hash == cp_hashes["input_manifest_hash"]
             ):
                 loaded_chain.append(cp)
@@ -3070,6 +3149,8 @@ class HistoricalStateReconstructor:
                 and bool(cp.use_cross_layer_priors) == bool(use_cross_layer_priors)
                 and cp.crop_chronology_hash == cp_hashes["crop_chronology_hash"]
                 and cp.weather_lineage_hash == cp_hashes["weather_lineage_hash"]
+                and cp.observation_lineage_hash == cp_hashes["observation_lineage_hash"]
+                and cp.specialist_config_hash == cp_hashes["specialist_config_hash"]
                 and cp.input_manifest_hash == cp_hashes["input_manifest_hash"]
             ):
                 active_cps.append(cp)

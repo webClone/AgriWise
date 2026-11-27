@@ -182,6 +182,8 @@ export interface HistoricalIntelligencePayload {
   world_model_contract_version?: string;
   crop_chronology_hash?: string | null;
   weather_lineage_hash?: string | null;
+  observation_lineage_hash?: string | null;
+  input_manifest_hash?: string | null;
   cross_layer_prior_version?: string | null;
   withheld_reprocessed_after_k_count?: number;
   domain_identity?: {
@@ -189,12 +191,21 @@ export interface HistoricalIntelligencePayload {
     crop_identity_verified?: boolean;
     crop_declaration_authority?: string | null;
     tenant_identity_verified?: boolean;
+    tenant_identity_fresh_db_verified?: boolean;
+    tenant_authority_tier?: string | null;
     tenant_ownership_source?: string | null;
     is_isolated_dev_fixture?: boolean;
     synthetic_label_rejected?: boolean;
     crop_resolution_source?: string;
     soil_texture?: string;
     identity_block_reasons?: string[];
+  } | null;
+  prospective_forecast_ledger?: {
+    status?: string | null;
+    issuance_count?: number;
+    pending_issuance_count?: number;
+    scored_forecast_count?: number;
+    chain_integrity_valid?: boolean;
   } | null;
   crop_context_as_of?: {
     crop?: string | null;
@@ -766,10 +777,15 @@ export default function HistoricalIntelligencePanel({
                   </span>
                 </div>
               )}
-              {(wmView.cropChronologyHash || wmView.weatherLineageHash) && (
+              {(wmView.cropChronologyHash || wmView.weatherLineageHash || wmView.inputManifestHash) && (
                 <div style={{ fontSize: "8.5px", color: "#64748b", fontFamily: "monospace" }}>
-                  Lineage: crop={wmView.cropChronologyHash ? wmView.cropChronologyHash.slice(0, 10) : "n/a"} · weather={wmView.weatherLineageHash ? wmView.weatherLineageHash.slice(0, 10) : "n/a"}
+                  Lineage: crop={wmView.cropChronologyHash ? wmView.cropChronologyHash.slice(0, 10) : "n/a"} · obs={wmView.observationLineageHash ? wmView.observationLineageHash.slice(0, 10) : "n/a"} · weather={wmView.weatherLineageHash ? wmView.weatherLineageHash.slice(0, 10) : "n/a"} · manifest={wmView.inputManifestHash ? wmView.inputManifestHash.slice(0, 10) : "n/a"}
                   {wmView.crossLayerPriorVersion ? ` · prior=${wmView.crossLayerPriorVersion}` : ""}
+                </div>
+              )}
+              {wmView.prospectiveLedgerStatus && (
+                <div style={{ fontSize: "9px", color: "#94a3b8" }}>
+                  Prospective Ledger (V3): <strong style={{ color: "#e2e8f0" }}>{wmView.prospectiveLedgerStatus}</strong> ({wmView.prospectiveLedgerIssuances} issued · {wmView.prospectiveLedgerScored} scored)
                 </div>
               )}
               {wmView.primaryFailureCause && (

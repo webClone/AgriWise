@@ -131,8 +131,9 @@ def _resolve_calibration_validity(
     *,
     expected_feature_schema_hash: Optional[str] = None,
     calibration_store: Optional[Any] = None,
+    require_production_trust: Optional[bool] = None,
 ) -> Tuple[str, Optional[str]]:
-    """WM1-P2-12: Validate calibration strictly via server-side trusted artifact store (never self-asserted dicts)."""
+    """WM1-P2-12 & V2.1-P2: Validate calibration strictly via server-side trusted artifact store."""
     if not isinstance(calibration_receipt, Mapping):
         return "unavailable", None
     from .calibration_registry import get_default_trusted_calibration_store
@@ -141,6 +142,7 @@ def _resolve_calibration_validity(
     validity, art_hash, _ = store.verify_receipt(
         calibration_receipt,
         expected_feature_schema_hash=expected_feature_schema_hash,
+        require_production_trust=require_production_trust,
     )
     return validity, art_hash
 

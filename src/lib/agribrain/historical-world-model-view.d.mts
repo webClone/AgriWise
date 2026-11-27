@@ -1,6 +1,8 @@
 export interface WorldModelV1SummaryView {
   cropVerified: boolean;
   tenantVerified: boolean;
+  tenantFreshDbVerified: boolean;
+  tenantAuthorityTier: string | null;
   syntheticRejected: boolean;
   cropBadgeLabel: string | null;
   cropDeclarationAuthority: string | null;
@@ -14,7 +16,12 @@ export interface WorldModelV1SummaryView {
   withheldReprocessedAfterK: number;
   cropChronologyHash: string | null;
   weatherLineageHash: string | null;
+  observationLineageHash: string | null;
+  inputManifestHash: string | null;
   crossLayerPriorVersion: string | null;
+  prospectiveLedgerStatus: string | null;
+  prospectiveLedgerIssuances: number;
+  prospectiveLedgerScored: number;
   exploratory36_90d: {
     n: number;
     skillVsPersistence: number | null;

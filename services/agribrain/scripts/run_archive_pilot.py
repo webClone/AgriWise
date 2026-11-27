@@ -745,6 +745,7 @@ def _resolve_plot_domain_context(
                         "sensor_readings": enriched_sr,
                         "crop_observations": co_list,
                         "crop_tasks": ct_list,
+                        "tenant_verified_at": datetime.now(timezone.utc).isoformat(),
                     })
                     domain_cache_path.write_text(json.dumps(dom, indent=2), encoding="utf-8")
                     domain_source = "mongodb_domain_registry"
@@ -783,6 +784,8 @@ def _resolve_plot_domain_context(
         crop_tasks=dom.get("crop_tasks"),
         crop_observations=dom.get("crop_observations"),
         explicit_tenant_id=explicit_tenant_partition,
+        tenant_provenance=("live_db" if domain_source == "mongodb_domain_registry" else "local_domain_metadata_cache"),
+        tenant_verified_at=dom.get("tenant_verified_at"),
     )
 
     # Never silently inject fallback citrus or wheat when CropCycle identity is unverified
@@ -874,6 +877,7 @@ def run_historical_intelligence_for_plot(
     offline: Optional[bool] = None,
     skip_bootstrap: bool = False,
     local_scene_cache: bool = False,
+    record_prospective: bool = False,
 ) -> Dict[str, Any]:
     """Run canonical Historical State Intelligence reconstruction across real plot domain metadata."""
     repo_root = str(Path(__file__).resolve().parents[3])
@@ -1099,6 +1103,78 @@ def run_historical_intelligence_for_plot(
         recon_disk["retrovalidation"] = retro_disk
     if recon_disk:
         res_disk["reconstruction"] = recon_disk
+    ledger_root = artifacts_dir / "prospective_forecast_ledger"
+    from services.agribrain.layer05_asmae.history.prospective_forecast_ledger import ProspectiveForecastLedger
+
+    prospective_ledger = ProspectiveForecastLedger(ledger_root)
+    if record_prospective:
+        now_dt = datetime.now(timezone.utc)
+        now_iso = now_dt.isoformat()
+        live_q = service.reconstructor.query_as_of(
+            plot_id=plot_id,
+            geometry_hash=canonical_geom_hash,
+            valid_time_T=now_iso,
+            knowledge_cutoff_K=now_iso,
+            tenant_id=tenant_id,
+            namespace=ns_name,
+            daily_weather=daily_weather,
+            crop_context=crop_ctx,
+            soil_context=soil_ctx,
+            management_events=dom["confirmed_management"],
+            polygon_geojson=geom_geojson,
+            forecast_horizons_days=(7, 14, 30),
+            enforce_weather_publication_lag=True,
+            crop_fusion=crop_fusion,
+            domain_chronology=domain_chronology,
+        )
+        bma_w = dict((((res.get("reconstruction") or {}).get("retrovalidation") or {}).get("bma") or {}).get("weights") or {})
+        for fc_entry in live_q.get("causal_forecasts") or []:
+            h_days = int(fc_entry.get("horizon_days") or 0)
+            target_iso = str(fc_entry.get("target_valid_time") or "")
+            if h_days < 1 or not target_iso:
+                continue
+            fid = f"prosp_{plot_id}_{now_dt.strftime('%Y%m%dT%H%M')}_h{h_days}"
+            try:
+                prospective_ledger.record_forecast_issuance(
+                    forecast_id=fid,
+                    plot_id=plot_id,
+                    tenant_id=tenant_id,
+                    farm_id=farm_id,
+                    geometry_hash=canonical_geom_hash,
+                    issued_at=now_iso,
+                    knowledge_cutoff_time=live_q.get("knowledge_cutoff_K") or now_iso,
+                    target_valid_time=target_iso,
+                    horizon_days=h_days,
+                    model_version=str(live_q.get("model_version") or ""),
+                    calibration_version=str(live_q.get("calibration_version") or ""),
+                    state_schema_version=str(recon.get("state_schema_version") or "asmae_state_v1_13"),
+                    input_manifest_hash=str(live_q.get("input_manifest_hash") or ""),
+                    observation_lineage_hash=str(live_q.get("observation_lineage_hash") or ""),
+                    crop_chronology_hash=str(live_q.get("crop_chronology_hash") or ""),
+                    weather_lineage_hash=str(live_q.get("weather_lineage_hash") or ""),
+                    specialist_config_hash=str(live_q.get("specialist_config_hash") or ""),
+                    complete_model_state={
+                        "state_means": live_q.get("state_means") or {},
+                        "state_stds": live_q.get("state_stds") or {},
+                        "predicted_states": fc_entry.get("predicted_states") or {},
+                        "predicted_state_stds": fc_entry.get("predicted_state_stds") or {},
+                    },
+                    crop_posterior=live_q.get("crop_context_as_of") or {},
+                    weather_forecast={
+                        "horizon_days": h_days,
+                        "target_valid_time": target_iso,
+                        "source": "era5_or_operational_cutoff_locked",
+                        "issued_cutoff": now_iso,
+                    },
+                    channel_calibration=live_q.get("channel_calibration") or {},
+                    specialist_outputs=live_q.get("cross_layer_pre_priors") or {},
+                    bma_weights=bma_w,
+                    predicted_channels=fc_entry.get("predicted_channels") or {},
+                )
+            except Exception:
+                pass
+    prospective_summary = prospective_ledger.summarize(plot_id=plot_id, tenant_id=tenant_id)
+
     disk_payload = {
         **res_disk,
         "plot_id": plot_id,
@@ -1116,6 +1192,7 @@ def run_historical_intelligence_for_plot(
         "manifest_reconciliation": manifest_reconcile,
         "domain_identity": dom["domain_identity"],
         "domain_chronology": domain_chronology.to_summary(),
+        "prospective_forecast_ledger": prospective_summary,
     }
     summary_path.write_text(json.dumps(disk_payload, indent=2, default=str), encoding="utf-8")
     return {
@@ -1136,6 +1213,7 @@ def main():
     parser.add_argument("--skip-bootstrap", action="store_true", help="Skip live STAC queries and reconstruct from existing worldline observations")
     parser.add_argument("--local-scene-cache", action="store_true", help="Ingest verified real .SAFE scenes from SceneProductStore without re-downloading")
     parser.add_argument("--offline", action="store_true", help="Run strictly from local domain/weather/scene caches without network or DB calls")
+    parser.add_argument("--record-prospective", action="store_true", help="Append genuine forward issued_at=now prospective forecasts into the immutable V3 ledger")
     parser.add_argument("--json-summary-out", help="Optional path to write multi-plot compact summary JSON")
     args = parser.parse_args()
 
@@ -1153,6 +1231,7 @@ def main():
                 offline=True if args.offline else None,
                 skip_bootstrap=bool(args.skip_bootstrap),
                 local_scene_cache=bool(args.local_scene_cache),
+                record_prospective=bool(args.record_prospective),
             )
             _ws_art = Path(os.getcwd()) / "services" / "agribrain" / "artifacts"
             _dom_p = _resolve_plot_domain_context(target_plot, _ws_art, offline=True)
@@ -1240,14 +1319,18 @@ def main():
                 "crop_identity_verified": (res.get("domain_identity") or {}).get("crop_identity_verified"),
                 "crop_declaration_authority": (res.get("domain_identity") or {}).get("crop_declaration_authority"),
                 "tenant_identity_verified": (res.get("domain_identity") or {}).get("tenant_identity_verified"),
-                "tenant_ownership_source": (res.get("domain_identity") or {}).get("tenant_ownership_source"),
+                "tenant_identity_fresh_db_verified": (res.get("domain_identity") or {}).get("tenant_identity_fresh_db_verified"),
+                "tenant_authority_tier": (res.get("domain_identity") or {}).get("tenant_authority_tier"),
+                "tenant_ownership_source": (res.get("domain_identity") or {}).get("tenant_resolution_source") or (res.get("domain_identity") or {}).get("tenant_ownership_source"),
                 "eo_crop_top_group": ((res.get("crop_fusion") or {}).get("latest_crop_posterior") or {}).get("top_group"),
                 "scientific_failure_cause": (retro_full.get("scientific_failure_diagnosis") or {}).get("primary_cause"),
                 "ablation_cross_layer_rmse": abl.get("cross_layer_rmse"),
                 "ablation_s1_s2_only_rmse": abl.get("s1_s2_only_rmse"),
+                "prospective_forecast_ledger": res.get("prospective_forecast_ledger"),
             })
         from services.agribrain.layer05_asmae.history.benchmark_matrix import evaluate_cross_plot_matrix
-        benchmark_matrix = evaluate_cross_plot_matrix(matrix_cohort_items)
+        ledger_dir = Path(os.getcwd()) / "services" / "agribrain" / "artifacts" / "prospective_forecast_ledger"
+        benchmark_matrix = evaluate_cross_plot_matrix(matrix_cohort_items, prospective_ledger_root=ledger_dir)
         bm_out_v2 = Path(os.getcwd()) / "services" / "agribrain" / "artifacts" / "archive_pilot_reports" / "asmae_world_model_v2_benchmark_matrix.json"
         bm_out_v2.parent.mkdir(parents=True, exist_ok=True)
         bm_out_v2.write_text(json.dumps(benchmark_matrix, indent=2, default=str), encoding="utf-8")
